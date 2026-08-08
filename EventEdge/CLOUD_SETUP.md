@@ -14,6 +14,7 @@ cloud: eventedge
 │   ├── Container Registry: eventedge
 │   ├── Serverless Container: eventedge-api
 │   ├── API Gateway: eventedge-api
+│   ├── YDB Serverless: eventedge-prod
 │   └── VPC: eventedge-prod (без подсетей и разрешающих правил)
 └── folder: dev
 ```
@@ -43,6 +44,7 @@ cloud: eventedge
 | Serverless Container | `eventedge-api` | Production API с масштабированием до нуля |
 | Service account | `eventedge-gateway` | Вызов только приватного контейнера API |
 | API Gateway | `eventedge-api` | Публичная точка входа и маршрутизация к контейнеру |
+| YDB Serverless | `eventedge-prod` | Новости, idempotency-записи и асинхронные jobs |
 
 ## CI/CD и автоматические merge
 
@@ -52,6 +54,8 @@ cloud: eventedge
 - Workflow сверяет SHA проверенной ревизии, репозиторий ветки и target `main`; draft и PR с label `do-not-merge` не мержатся.
 - После зелёного CI на `main` выполняется OIDC-аутентификация, публикация образа и деплой новой ревизии.
 - Production-ревизия ограничена 256 MB памяти, одной инстанцией на зону, 50 запросами на зону и `min-instances=0`.
+- YDB не имеет зарезервированной мощности, ограничена 10 RU/с и 1 ГБ, защищена от удаления.
+- Runtime service account имеет `ydb.editor` только на базе `eventedge-prod`; роль не выдана на каталог или облако.
 
 GitHub Free не предоставляет branch protection для приватного репозитория. Поэтому запрет прямого push в `main` нельзя обеспечить на стороне GitHub без GitHub Pro; автоматический pipeline сам прямой push не использует.
 
@@ -62,6 +66,8 @@ https://d5d8smlpd6q241aquti1.kocrdvxt.apigw.yandexcloud.net
 ```
 
 Gateway и рабочая ревизия контейнера развёрнуты. Полная цепочка `CI → OIDC → image → revision → smoke test` подтверждена успешным [production deployment](https://github.com/IakovlevAn/eventedge/actions/runs/31261742339) 8 августа 2026 года.
+
+Новостной ingestion пока не опубликован в API Gateway. `POST /v1/internal/news` доступен только через приватный URL контейнера с IAM-аутентификацией. Публичный маршрут появится вместе с отдельным ключом ingestor в Lockbox; до этого случайно открыть служебную загрузку наружу нельзя.
 
 ## Проверка
 
@@ -75,4 +81,4 @@ Yandex Cloud OIDC exchange succeeded
 
 ## Следующий этап
 
-После production bootstrap подключаются YDB Serverless и первый новостной источник. Роли для YDB, Object Storage, Message Queue и Lockbox добавляются вместе с соответствующим инкрементом, а не заранее.
+Следующий этап — подключить первый новостной источник и вынести ключ ingestor в Lockbox. Роли для Object Storage и Message Queue добавляются вместе с использующим их инкрементом, а не заранее.
