@@ -275,6 +275,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
@@ -833,6 +835,15 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
+    ServiceUnavailable:
+      description: A required upstream data source is temporarily unavailable.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
 
   schemas:
     RelatedSignal:
@@ -1133,7 +1144,13 @@ components:
     MarketSnapshot:
       type: object
       additionalProperties: false
-      required: [last_price, currency, observed_at]
+      required:
+        - last_price
+        - currency
+        - observed_at
+        - liquidity_status
+        - candles
+        - source
       properties:
         last_price:
           type: string
@@ -1151,11 +1168,93 @@ components:
         liquidity_status:
           type: string
           enum: [sufficient, limited, unavailable]
+        volume_shares:
+          type: integer
+          nullable: true
+        value_rub:
+          type: number
+          format: double
+          nullable: true
+        lot_size:
+          type: integer
+          minimum: 1
+        daily_volatility_pct:
+          type: number
+          format: double
+          nullable: true
+        annualized_volatility_pct:
+          type: number
+          format: double
+          nullable: true
+        candles:
+          type: array
+          maxItems: 30
+          items:
+            $ref: '#/components/schemas/DailyCandle'
+        source:
+          $ref: '#/components/schemas/MarketDataSource'
+
+    DailyCandle:
+      type: object
+      additionalProperties: false
+      required: [begin, open, close, high, low, value_rub, volume_shares]
+      properties:
+        begin:
+          type: string
+          format: date-time
+        open:
+          type: number
+        close:
+          type: number
+        high:
+          type: number
+        low:
+          type: number
+        value_rub:
+          type: number
+          format: double
+        volume_shares:
+          type: integer
+
+    MarketDataSource:
+      type: object
+      additionalProperties: false
+      required: [name, url]
+      properties:
+        name:
+          type: string
+          enum: [MOEX ISS]
+        url:
+          type: string
+          format: uri
+
+    ScenarioRange:
+      type: object
+      additionalProperties: false
+      required: [low_pct, high_pct, horizon_trading_days, kind, label, method]
+      properties:
+        low_pct:
+          type: number
+          format: double
+        high_pct:
+          type: number
+          format: double
+        horizon_trading_days:
+          type: integer
+          minimum: 1
+        kind:
+          type: string
+          enum: [volatility_scenario]
+        label:
+          type: string
+        method:
+          type: string
+          enum: [realized_volatility_x_signal_strength_v1]
 
     InstrumentSnapshot:
       type: object
       additionalProperties: false
-      required: [ticker, name, as_of, market, active_signal, recent_events]
+      required: [ticker, name, as_of, market, scenario, active_signal, recent_events]
       properties:
         ticker:
           type: string
@@ -1166,6 +1265,10 @@ components:
           format: date-time
         market:
           $ref: '#/components/schemas/MarketSnapshot'
+        scenario:
+          allOf:
+            - $ref: '#/components/schemas/ScenarioRange'
+          nullable: true
         active_signal:
           allOf:
             - $ref: '#/components/schemas/Signal'

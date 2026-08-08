@@ -214,3 +214,41 @@ def test_unknown_job_is_explicit() -> None:
 
     assert response.status_code == 404
     assert response.json()["code"] == "JOB_NOT_FOUND"
+
+
+def test_instrument_snapshot_exposes_market_data_and_etag() -> None:
+    original = app.state.market_data_client
+
+    class FakeMarketDataClient:
+        async def snapshot(self, ticker: str) -> dict[str, object]:
+            return {
+                "ticker": ticker,
+                "name": "Сбербанк",
+                "last_price": "283.65",
+                "currency": "RUB",
+                "observed_at": "2026-08-08T16:00:08Z",
+                "daily_change_pct": 0.41,
+                "volume_shares": 3_204_170,
+                "value_rub": 908_086_982.0,
+                "lot_size": 1,
+                "liquidity_status": "sufficient",
+                "daily_volatility_pct": 1.4,
+                "annualized_volatility_pct": 22.22,
+                "candles": [],
+                "source": {"name": "MOEX ISS", "url": "https://iss.moex.com/iss/"},
+            }
+
+    app.state.market_data_client = FakeMarketDataClient()
+    try:
+        response = client.get("/v1/instruments/SBER/snapshot")
+        cached = client.get(
+            "/v1/instruments/SBER/snapshot",
+            headers={"If-None-Match": response.headers["ETag"]},
+        )
+    finally:
+        app.state.market_data_client = original
+
+    assert response.status_code == 200
+    assert response.json()["data"]["market"]["last_price"] == "283.65"
+    assert response.json()["data"]["market"]["source"]["name"] == "MOEX ISS"
+    assert cached.status_code == 304

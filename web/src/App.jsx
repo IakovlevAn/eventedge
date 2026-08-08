@@ -261,21 +261,21 @@ const directionMeta = {
 };
 
 const companyBrands = {
-  SBER: { colors: ["#21a366", "#0c7650"], glyph: "СБ", domain: "sberbank.ru" },
-  LKOH: { colors: ["#ee2d33", "#9c101d"], glyph: "ЛК", domain: "lukoil.ru" },
-  YDEX: { colors: ["#ffcc00", "#f04b3f"], glyph: "Я", domain: "yandex.ru" },
-  NVTK: { colors: ["#2863b3", "#173f7d"], glyph: "НТ", domain: "novatek.ru" },
-  TATN: { colors: ["#008d6b", "#006047"], glyph: "ТН", domain: "tatneft.ru" },
-  ROSN: { colors: ["#f2c500", "#111216"], glyph: "РН", domain: "rosneft.ru" },
-  GMKN: { colors: ["#1f7ca8", "#124b72"], glyph: "НН", domain: "nornickel.ru" },
-  MGNT: { colors: ["#ef3340", "#a71930"], glyph: "МГ", domain: "magnit.com" },
-  SIBN: { colors: ["#1686c8", "#075487"], glyph: "ГН", domain: "gazprom-neft.ru" },
-  GAZP: { colors: ["#1686c8", "#075487"], glyph: "ГП", domain: "gazprom.ru" },
-  VTBR: { colors: ["#1783ca", "#174687"], glyph: "ВТ", domain: "vtb.ru" },
-  PLZL: { colors: ["#d9aa36", "#8d6712"], glyph: "ПЛ", domain: "polyus.com" },
-  CHMF: { colors: ["#586474", "#151a21"], glyph: "СВ", domain: "severstal.com" },
-  ALRS: { colors: ["#45a4b3", "#236a77"], glyph: "АЛ", domain: "alrosa.ru" },
-  MOEX: { colors: ["#174d86", "#112f53"], glyph: "МБ", domain: "moex.com" },
+  SBER: { colors: ["#21a366", "#0c7650"], glyph: "СБ", asset: "/brands/SBER.png" },
+  LKOH: { colors: ["#ee2d33", "#9c101d"], glyph: "ЛК", asset: "/brands/LKOH.png" },
+  YDEX: { colors: ["#ffcc00", "#f04b3f"], glyph: "Я", asset: "/brands/YDEX.png" },
+  NVTK: { colors: ["#2863b3", "#173f7d"], glyph: "НТ", asset: "/brands/NVTK.png" },
+  TATN: { colors: ["#008d6b", "#006047"], glyph: "ТН", asset: "/brands/TATN.png" },
+  ROSN: { colors: ["#f2c500", "#111216"], glyph: "РН", asset: "/brands/ROSN.png" },
+  GMKN: { colors: ["#1f7ca8", "#124b72"], glyph: "НН", asset: "/brands/GMKN.png" },
+  MGNT: { colors: ["#ef3340", "#a71930"], glyph: "МГ", asset: "/brands/MGNT.png" },
+  SIBN: { colors: ["#1686c8", "#075487"], glyph: "ГН", asset: "/brands/SIBN.png" },
+  GAZP: { colors: ["#1686c8", "#075487"], glyph: "ГП", asset: "/brands/GAZP.png" },
+  VTBR: { colors: ["#1783ca", "#174687"], glyph: "ВТ", asset: "/brands/VTBR.png" },
+  PLZL: { colors: ["#d9aa36", "#8d6712"], glyph: "ПЛ", asset: "/brands/PLZL.png" },
+  CHMF: { colors: ["#586474", "#151a21"], glyph: "СВ", asset: "/brands/CHMF.png" },
+  ALRS: { colors: ["#45a4b3", "#236a77"], glyph: "АЛ", asset: "/brands/ALRS.png" },
+  MOEX: { colors: ["#174d86", "#112f53"], glyph: "МБ", asset: "/brands/MOEX.png" },
 };
 
 const companyMeta = {
@@ -290,9 +290,9 @@ const companyMeta = {
 };
 
 const actionLabels = {
-  consider_buy: "Рассмотреть позицию",
+  consider_buy: "Рассмотреть покупку",
   no_action: "Ничего не делать",
-  review_position: "Пересмотреть риск",
+  review_position: "Сократить или защитить позицию",
 };
 
 const sourceLabels = {
@@ -303,6 +303,16 @@ const sourceLabels = {
   rbc: "РБК",
   google_news: "Новостная подборка",
 };
+
+const methodologySources = [
+  { id: "cbr_press", name: "Банк России", kind: "Первичный", quality: 95, freshness: "по публикации", role: "Макроэкономические решения и пресс-релизы регулятора", url: "https://www.cbr.ru/press/" },
+  { id: "moex_news", name: "Московская биржа", kind: "Первичный", quality: 95, freshness: "по публикации", role: "Сообщения биржи и эмитентов", url: "https://www.moex.com/ru/news/" },
+  { id: "interfax", name: "Интерфакс", kind: "Агентство", quality: 90, freshness: "RSS", role: "Оперативные корпоративные и рыночные новости", url: "https://www.interfax.ru/business/" },
+  { id: "tass", name: "ТАСС", kind: "Агентство", quality: 82, freshness: "RSS", role: "Подтверждение значимых событий", url: "https://tass.ru/ekonomika" },
+  { id: "rbc", name: "РБК", kind: "Медиа", quality: 78, freshness: "RSS", role: "Рыночный контекст и дополнительное подтверждение", url: "https://www.rbc.ru/quote/" },
+  { id: "google_news", name: "Google News", kind: "Discovery", quality: 74, freshness: "до 7 дней", role: "Поиск публикаций; не считается первичным источником", url: "https://news.google.com/" },
+  { id: "moex_iss", name: "MOEX ISS", kind: "Рыночные данные", quality: 100, freshness: "до 60 сек", role: "Цена, объём, свечи, ликвидность и волатильность", url: "https://iss.moex.com/iss/" },
+];
 
 const scoreFactorDefinitions = [
   { label: "Текстовый эффект", weight: 0.55, description: "Как событие меняет ожидания по компании" },
@@ -325,6 +335,27 @@ function scoreFactors(score) {
 
 function formatScore(score) {
   return `${score > 0 ? "+" : ""}${score.toFixed(1)}`;
+}
+
+function formatPrice(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
+  return `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(Number(value))} ₽`;
+}
+
+function formatPct(value, { sign = true } = {}) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
+  const number = Number(value);
+  return `${sign && number > 0 ? "+" : ""}${new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 1, maximumFractionDigits: 2 }).format(number)}%`;
+}
+
+function formatCompact(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
+  return new Intl.NumberFormat("ru-RU", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value));
+}
+
+function formatScenario(scenario) {
+  if (!scenario) return "Недоступен";
+  return `${formatPct(scenario.low_pct)} … ${formatPct(scenario.high_pct)}`;
 }
 
 function formatRelative(timestamp) {
@@ -357,6 +388,8 @@ function signalFromApi(item) {
     event: "Новостное событие",
     price: "—",
     change: "—",
+    market: null,
+    scenario: null,
     updated: formatRelative(item.as_of),
     action: actionLabels[item.action] || item.action,
     invalidation: (item.invalidation_conditions || []).join(" "),
@@ -365,6 +398,18 @@ function signalFromApi(item) {
       contribution: Number((factor.contribution * 100).toFixed(1)),
     })),
     evidence: [],
+  };
+}
+
+function hydrateSignalWithMarket(signal, snapshot) {
+  if (!snapshot?.market) return signal;
+  return {
+    ...signal,
+    price: formatPrice(snapshot.market.last_price),
+    change: formatPct(snapshot.market.daily_change_pct),
+    market: snapshot.market,
+    scenario: snapshot.scenario,
+    series: (snapshot.market.candles || []).map((candle) => candle.close),
   };
 }
 
@@ -395,26 +440,64 @@ function newsFromApi(item, signalsById) {
   };
 }
 
-function newsEventKey(item) {
-  if (!item.signal) return item.id;
-  return [
-    item.signal.ticker,
-    item.signal.direction,
-    item.publishedAt.slice(0, 10),
-  ].join(":");
+const titleStopWords = new Set([
+  "для", "как", "при", "что", "это", "его", "она", "они", "или", "уже", "будет", "после", "перед", "под", "над", "без", "из", "на", "по", "в", "во", "и", "а", "но", "к", "ко", "с", "со", "от", "до", "о", "об", "за", "не",
+]);
+
+function titleTokens(title) {
+  return new Set(
+    title
+      .toLocaleLowerCase("ru-RU")
+      .replace(/[^a-zа-яё0-9]+/giu, " ")
+      .split(/\s+/)
+      .filter((token) => token.length > 2 && !titleStopWords.has(token)),
+  );
+}
+
+function sameNewsEvent(left, right) {
+  if (!left.signal || !right.signal) return false;
+  if (left.signal.ticker !== right.signal.ticker || left.signal.direction !== right.signal.direction) return false;
+  if (Math.abs(new Date(left.publishedAt) - new Date(right.publishedAt)) > 48 * 60 * 60 * 1000) return false;
+  const leftTokens = titleTokens(left.title);
+  const rightTokens = titleTokens(right.title);
+  if (!leftTokens.size || !rightTokens.size) return false;
+  const overlap = [...leftTokens].filter((token) => rightTokens.has(token)).length;
+  return overlap / Math.min(leftTokens.size, rightTokens.size) >= 0.6;
+}
+
+function groupNewsEvents(items) {
+  const groups = [];
+  items.forEach((item) => {
+    const group = groups.find((candidate) => sameNewsEvent(candidate, item));
+    if (!group) {
+      groups.push({
+        ...item,
+        sourceCount: 1,
+        sources: [{ id: item.sourceId, name: item.source, url: item.url, publishedAt: item.publishedAt }],
+        corroborations: [],
+      });
+      return;
+    }
+    group.corroborations.push(item);
+    if (!group.sources.some((source) => source.name === item.source && source.url === item.url)) {
+      group.sources.push({ id: item.sourceId, name: item.source, url: item.url, publishedAt: item.publishedAt });
+      group.sourceCount = group.sources.length;
+    }
+  });
+  return groups;
 }
 
 function CompanyMark({ signal, small = false }) {
   const [imageFailed, setImageFailed] = useState(false);
-  const brand = companyBrands[signal.ticker] || { colors: ["#717785", "#353945"], glyph: signal.ticker.slice(0, 1), domain: "moex.com" };
+  const brand = companyBrands[signal.ticker] || { colors: ["#717785", "#353945"], glyph: signal.ticker.slice(0, 1), asset: null };
   return (
     <span
       className={`company-mark ${small ? "company-mark--small" : ""}`}
       style={{ "--company-color": brand.colors[0], "--company-color-deep": brand.colors[1] }}
       data-ticker={signal.ticker}
     >
-      {!imageFailed && <img src={`https://www.google.com/s2/favicons?domain=${encodeURIComponent(brand.domain)}&sz=128`} alt="" loading="lazy" referrerPolicy="no-referrer" onError={() => setImageFailed(true)} />}
-      {imageFailed && <b aria-hidden="true">{brand.glyph}</b>}
+      {brand.asset && !imageFailed && <img src={brand.asset} alt="" loading="lazy" onError={() => setImageFailed(true)} />}
+      {(!brand.asset || imageFailed) && <b aria-hidden="true">{brand.glyph}</b>}
     </span>
   );
 }
@@ -427,6 +510,55 @@ function Direction({ direction }) {
       <Icon size={13} strokeWidth={2.2} />
       {meta.label}
     </span>
+  );
+}
+
+function EventBubbles({ events = [], onOpen, compact = false }) {
+  if (!events.length) return <span className="event-bubbles__empty">События ещё не привязаны</span>;
+  return (
+    <div className={`event-bubbles ${compact ? "event-bubbles--compact" : ""}`} aria-label="События, повлиявшие на сигнал">
+      {events.slice(0, compact ? 5 : 8).map((item, index) => {
+        const direction = item.signal?.direction || "neutral";
+        const impact = Math.min(Math.abs(item.signal?.score || 0), 100);
+        const size = (compact ? 13 : 18) + Math.round(impact * (compact ? 0.09 : 0.14)) + Math.min((item.sourceCount || 1) - 1, 3) * 2;
+        const label = `${item.title}. ${item.sourceCount || 1} ${item.sourceCount === 1 ? "источник" : "источника"}`;
+        return (
+          <button
+            type="button"
+            className={`event-bubble event-bubble--${direction}`}
+            style={{ "--event-size": `${size}px`, "--event-order": index }}
+            key={item.id}
+            onClick={(event) => { event.stopPropagation(); onOpen?.(item); }}
+            aria-label={label}
+            title={label}
+          >
+            <span>{item.sourceCount > 1 ? item.sourceCount : ""}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function PriceChart({ series = [], direction = "neutral" }) {
+  if (series.length < 2) return <div className="price-chart__empty">Недостаточно свечей MOEX</div>;
+  const width = 640;
+  const height = 180;
+  const min = Math.min(...series);
+  const max = Math.max(...series);
+  const spread = Math.max(max - min, 0.01);
+  const points = series.map((value, index) => {
+    const x = (index / (series.length - 1)) * width;
+    const y = height - ((value - min) / spread) * (height - 20) - 10;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  return (
+    <svg className={`price-chart price-chart--${direction}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Динамика цены по дневным свечам MOEX">
+      <line x1="0" y1="45" x2={width} y2="45" />
+      <line x1="0" y1="90" x2={width} y2="90" />
+      <line x1="0" y1="135" x2={width} y2="135" />
+      <polyline points={points} />
+    </svg>
   );
 }
 
@@ -528,7 +660,7 @@ function AppHeader({ view, signals, onNavigate, onSelect, onOpenNews }) {
   );
 }
 
-function SignalsScreen({ signals, onSelect, onOpenNews, onMethodology }) {
+function SignalsScreen({ signals, onSelect, onOpenNews, onMethodology, onReadNews }) {
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
@@ -611,7 +743,7 @@ function SignalsScreen({ signals, onSelect, onOpenNews, onMethodology }) {
         </div>
 
         <div className="market-strip">
-          <span><i /> Живые данные · Московская биржа</span>
+          <span><i /> MOEX ISS · данные по {signals.filter((signal) => signal.market).length} компаниям</span>
           <span>Модель <strong>news-baseline-0.1.1</strong></span>
           <span>Шкала сигнала <strong>от −100 до +100</strong></span>
           <span className="market-strip__right"><strong>{signals.length}</strong> активных · {companyCards.length} в наблюдении</span>
@@ -622,12 +754,15 @@ function SignalsScreen({ signals, onSelect, onOpenNews, onMethodology }) {
             {filteredSignals.map((signal) => {
               const available = signal.available !== false;
               const evidence = signal.evidence?.[0];
+              const openCard = () => available ? onSelect(signal.ticker) : onOpenNews(signal.ticker);
               return (
-                <button
+                <article
                   className={`company-signal-card ${available ? `company-signal-card--${signal.direction}` : "company-signal-card--waiting"}`}
-                  type="button"
                   key={signal.ticker}
-                  onClick={() => available ? onSelect(signal.ticker) : onOpenNews(signal.ticker)}
+                  role="button"
+                  tabIndex={0}
+                  onClick={openCard}
+                  onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) openCard(); }}
                 >
                   <span className="company-signal-card__glow" aria-hidden="true" />
                   <header>
@@ -636,13 +771,21 @@ function SignalsScreen({ signals, onSelect, onOpenNews, onMethodology }) {
                   </header>
                   <div className="company-signal-card__body">
                     <div className="company-signal-card__score">
-                      <span>{available ? "Сила гипотезы" : signal.sector}</span>
+                      <span>{available ? "Сила сигнала" : signal.sector}</span>
                       {available ? <strong className={`score-cell--${signal.direction}`}>{formatScore(signal.score)}<small> / 100</small></strong> : <strong>Нет сигнала</strong>}
                     </div>
                     <p>{signal.summary}</p>
+                    {available && <span className={`company-signal-card__action company-signal-card__action--${signal.direction}`}><Check size={11} /> {signal.action}</span>}
                   </div>
+                  {available && (
+                    <div className="company-signal-card__scenario">
+                      <span><small>Сценарий движения</small><strong>{formatScenario(signal.scenario)}</strong></span>
+                      <span><small>Цена MOEX</small><strong>{signal.price} <em>{signal.change}</em></strong></span>
+                    </div>
+                  )}
+                  {available && <EventBubbles events={signal.evidence} onOpen={onReadNews} compact />}
                   <div className="company-signal-card__metrics">
-                    <span><small>Уверенность</small><strong>{available ? `${signal.confidence}%` : "—"}</strong></span>
+                    <span><small>Уверенность модели</small><strong>{available ? `${signal.confidence}%` : "—"}</strong></span>
                     <span><small>Горизонт</small><strong>{signal.horizon}</strong></span>
                     <span><small>Обновлено</small><strong>{signal.updated}</strong></span>
                   </div>
@@ -650,7 +793,7 @@ function SignalsScreen({ signals, onSelect, onOpenNews, onMethodology }) {
                     <span><Newspaper size={12} /> {evidence ? evidence.title : available ? "Открыть источник сигнала" : "Посмотреть ленту компании"}</span>
                     <ArrowUpRight size={15} />
                   </footer>
-                </button>
+                </article>
               );
             })}
           </div>
@@ -692,16 +835,23 @@ function CompanyScreen({ signal, onBack, onMethodology, onOpenNews, onReadNews }
         <div className="chart-card">
           <div className="chart-summary">
             <div>
-              <span>Покрытие данных</span>
-              <strong>Новостной сигнал</strong>
-              <em>Цена и объём ещё не подключены</em>
+              <span>Цена MOEX</span>
+              <strong>{signal.price}</strong>
+              <em className={Number(signal.market?.daily_change_pct) >= 0 ? "market-positive" : "market-negative"}>{signal.change} за сессию</em>
             </div>
             <div className="chart-signal">
               <Direction direction={signal.direction} />
-              <span>ожидание на {signal.horizon}</span>
+              <span>{formatScenario(signal.scenario)} · {signal.horizon}</span>
             </div>
           </div>
-          <div className="empty-state"><Database size={22} /><strong>Без выдуманных рыночных данных</strong><span>График появится после подключения отдельного проверяемого источника котировок.</span></div>
+          <PriceChart series={signal.series} direction={signal.direction} />
+          <div className="market-facts">
+            <span><small>Объём</small><strong>{formatCompact(signal.market?.volume_shares)} акций</strong></span>
+            <span><small>Оборот</small><strong>{formatCompact(signal.market?.value_rub)} ₽</strong></span>
+            <span><small>Дневная волатильность</small><strong>{formatPct(signal.market?.daily_volatility_pct, { sign: false })}</strong></span>
+            <span><small>Ликвидность</small><strong>{signal.market?.liquidity_status === "sufficient" ? "Достаточная" : signal.market?.liquidity_status === "limited" ? "Ограниченная" : "Нет данных"}</strong></span>
+          </div>
+          <footer className="market-source">Источник: <a href={signal.market?.source?.url || "https://iss.moex.com/iss/"} target="_blank" rel="noreferrer">MOEX ISS <ArrowUpRight size={10} /></a> · 30 дневных свечей</footer>
         </div>
 
         <div className="analysis-grid">
@@ -723,9 +873,9 @@ function CompanyScreen({ signal, onBack, onMethodology, onOpenNews, onReadNews }
               <ArrowUpRight size={13} />
             </button>
             <div className="decision-stats">
-              <div><span>Уверенность</span><strong>{signal.confidence}%</strong><small>{signal.confidence >= 70 ? "высокая" : signal.confidence >= 60 ? "средняя" : "ограниченная"}</small></div>
+              <div><span>Уверенность модели</span><strong>{signal.confidence}%</strong><small>{signal.confidence >= 70 ? "высокая" : signal.confidence >= 60 ? "средняя" : "ограниченная"}</small></div>
               <div><span>Горизонт</span><strong>{signal.horizon}</strong><small>торговых</small></div>
-              <div><span>Событие</span><strong>{signal.event}</strong><small>главный драйвер</small></div>
+              <div><span>Сценарий движения</span><strong>{formatScenario(signal.scenario)}</strong><small>не ценовой таргет</small></div>
             </div>
             <div className={`action-note action-note--${signal.direction}`}>
               <Check size={15} />
@@ -751,6 +901,15 @@ function CompanyScreen({ signal, onBack, onMethodology, onOpenNews, onReadNews }
           </section>
         </div>
 
+        <section className="event-map-card">
+          <div className="section-heading">
+            <span><CircleGauge size={15} /> Карта событий</span>
+            <small>цвет — направление · размер — вес · число — источники</small>
+          </div>
+          <EventBubbles events={signal.evidence} onOpen={onReadNews} />
+          <p>Каждый круг — одно событие. Повторные публикации объединены и усиливают подтверждение, но не создают новый сигнал.</p>
+        </section>
+
         <section className="news-card">
           <div className="section-heading">
             <span><Newspaper size={15} /> Новости, изменившие сигнал</span>
@@ -763,7 +922,7 @@ function CompanyScreen({ signal, onBack, onMethodology, onOpenNews, onReadNews }
                 <div className="news-content">
                   <div><span>{item.source}</span><i>{item.tag}</i></div>
                   <h2>{item.title}</h2>
-                  <p>{signal.summary}</p>
+                  <p>{item.sourceCount > 1 ? `${item.sourceCount} подтверждающих источника · ` : ""}{signal.summary}</p>
                 </div>
                 <span className="news-time"><Clock3 size={12} /> {item.time}</span>
                 <span className="news-open"><BookOpen size={14} /></span>
@@ -811,7 +970,7 @@ function NewsScreen({ signals, allNews, initialTicker, onReadNews }) {
         {items.map((item) => (
           <button type="button" className="feed-item" key={item.id} onClick={() => onReadNews(item)}>
             {item.signal ? <CompanyMark signal={item.signal} /> : <span className="company-mark"><Newspaper size={17} /></span>}
-            <div className="feed-copy"><div><span>{item.source}</span><i>{item.tag}</i><time>{item.time}</time></div><h2>{item.title}</h2><p>{item.content}</p>{item.signal && <footer><strong>{item.signal.ticker}</strong><Direction direction={item.signal.direction} /><span>{formatScore(item.signal.score)} п.</span></footer>}</div>
+            <div className="feed-copy"><div><span>{item.source}</span><i>{item.tag}</i>{item.sourceCount > 1 && <i className="source-count">{item.sourceCount} источника</i>}<time>{item.time}</time></div><h2>{item.title}</h2><p>{item.content}</p>{item.signal && <footer><strong>{item.signal.ticker}</strong><Direction direction={item.signal.direction} /><span>{formatScore(item.signal.score)} п.</span></footer>}</div>
             <BookOpen size={17} />
           </button>
         ))}
@@ -821,9 +980,18 @@ function NewsScreen({ signals, allNews, initialTicker, onReadNews }) {
   );
 }
 
-function MethodologyScreen({ onApi }) {
+function MethodologyScreen({ onApi, allNews }) {
   const sample = methodologySignals[0];
   const sampleFactors = scoreFactors(sample.score);
+  const recentBySource = useMemo(() => {
+    const result = new Map();
+    allNews.forEach((item) => {
+      (item.sources || [{ id: item.sourceId, publishedAt: item.publishedAt }]).forEach((source) => {
+        if (!result.has(source.id)) result.set(source.id, source.publishedAt);
+      });
+    });
+    return result;
+  }, [allNews]);
 
   return (
     <main className="screen section-screen methodology-screen">
@@ -861,9 +1029,34 @@ function MethodologyScreen({ onApi }) {
         </section>
       </div>
 
+      <section className="scenario-method">
+        <div><span>04</span><div><h2>Рынок задаёт диапазон движения</h2><p>Дневная волатильность из 30 свечей MOEX масштабируется на горизонт сигнала. Направление и сила оценки сдвигают диапазон вверх, вниз или вокруг нуля.</p></div></div>
+        <code>диапазон = σ дневная × √горизонт × сила сигнала</code>
+        <p><ShieldCheck size={14} /> Это сценарная зона, а не таргет цены и не обещанная доходность. Калибровка на исторических outcomes остаётся следующим этапом.</p>
+      </section>
+
+      <section className="source-method">
+        <div className="section-heading"><span><Database size={15} /> Источники и их роль</span><small>прозрачный реестр текущего контура</small></div>
+        <div className="source-method__grid">
+          {methodologySources.map((source) => {
+            const lastSeen = recentBySource.get(source.id);
+            const hasData = source.id === "moex_iss" || Boolean(lastSeen);
+            return (
+              <a href={source.url} target="_blank" rel="noreferrer" key={source.id} className="source-card">
+                <header><span>{source.kind}</span><strong>{source.quality}/100</strong></header>
+                <h3>{source.name}<ArrowUpRight size={12} /></h3>
+                <p>{source.role}</p>
+                <footer><span className={hasData ? "is-live" : "is-waiting"}><i /> {hasData ? "Есть данные" : "Подключён · без событий"}</span><time>{lastSeen ? formatRelative(lastSeen) : source.freshness}</time></footer>
+              </a>
+            );
+          })}
+        </div>
+        <p className="source-note">Качество источника — фиксированный вес внутри текущей модели. Discovery-источник помогает найти публикацию, но не заменяет первичное подтверждение.</p>
+      </section>
+
       <section className="method-reality">
-        <div><ShieldCheck size={17} /><span><strong>Что работает сейчас</strong>Новостной baseline: семантические признаки, фиксированные веса и версионируемый расчёт.</span></div>
-        <div><Database size={17} /><span><strong>Следующие улучшения</strong>Фундаментальные показатели, цена и объём будут добавляться как отдельные проверяемые блоки — без скрытой магии.</span></div>
+        <div><ShieldCheck size={17} /><span><strong>Что работает сейчас</strong>Новостной baseline, фиксированные веса, группировка публикаций и рыночные данные MOEX.</span></div>
+        <div><Database size={17} /><span><strong>Что пока не входит</strong>Фундаментальные показатели, калиброванный backtest и демо-счёт находятся в backlog и не подмешиваются в текущий сигнал.</span></div>
         <button type="button" onClick={onApi}>Посмотреть API <ArrowUpRight size={13} /></button>
       </section>
     </main>
@@ -874,6 +1067,7 @@ const apiEndpoints = [
   { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Список сигналов", description: "Последние рассчитанные сигналы с фильтрами по тикеру и направлению." },
   { id: "news", method: "GET", path: "/v1/news?limit=20", title: "Лента новостей", description: "Исходные публикации и сигналы, которые с ними связаны." },
   { id: "ticker", method: "GET", path: "/v1/signals?ticker=SBER&limit=1", title: "Сигнал компании", description: "Последний доступный сигнал по выбранному тикеру." },
+  { id: "snapshot", method: "GET", path: "/v1/instruments/SBER/snapshot", title: "Рыночный snapshot", description: "Цена, объём, волатильность, дневные свечи MOEX и честный сценарный диапазон для активного сигнала." },
   { id: "health", method: "GET", path: "/health/ready", title: "Готовность сервиса", description: "Проверка приложения и соединения с хранилищем." },
 ];
 
@@ -883,7 +1077,22 @@ function ApiScreen() {
   const [copied, setCopied] = useState("");
   const endpoint = apiEndpoints.find((item) => item.id === selectedId);
   const baseUrl = typeof window === "undefined" ? "" : window.location.origin;
-  const responseExample = endpoint.id === "health" ? `{"status":"ok"}` : endpoint.id === "news" ? `{
+  const responseExample = endpoint.id === "health" ? `{"status":"ok"}` : endpoint.id === "snapshot" ? `{
+  "data": {
+    "ticker": "SBER",
+    "market": {
+      "last_price": "283.65",
+      "daily_change_pct": 0.41,
+      "daily_volatility_pct": 1.42,
+      "source": {"name": "MOEX ISS"}
+    },
+    "scenario": {
+      "low_pct": 0.74,
+      "high_pct": 2.48,
+      "label": "Сценарный диапазон, не таргет"
+    }
+  }
+}` : endpoint.id === "news" ? `{
   "data": [{
     "id": "news_…",
     "source_id": "moex_news",
@@ -944,7 +1153,7 @@ function ApiScreen() {
         <section className="endpoint-doc">
           <header><div><span className="http-method">{endpoint.method}</span><code>{endpoint.path}</code></div><button type="button" onClick={() => copyText(`${baseUrl}${endpoint.path}`, endpoint.id)}><Copy size={14} /> {copied === endpoint.id ? "Скопировано" : "Копировать URL"}</button></header>
           <h2>{endpoint.title}</h2><p>{endpoint.description}</p>
-          {endpoint.id !== "health" && <div className="parameter-table"><div><strong>Параметр</strong><strong>Тип</strong><strong>Описание</strong></div><div><code>{endpoint.id === "ticker" ? "ticker" : "limit"}</code><span>{endpoint.id === "ticker" ? "string" : "integer"}</span><p>{endpoint.id === "ticker" ? "Тикер MOEX, например SBER" : "Количество записей, максимум 100"}</p></div></div>}
+          {endpoint.id !== "health" && <div className="parameter-table"><div><strong>Параметр</strong><strong>Тип</strong><strong>Описание</strong></div><div><code>{["ticker", "snapshot"].includes(endpoint.id) ? "ticker" : "limit"}</code><span>{["ticker", "snapshot"].includes(endpoint.id) ? "string" : "integer"}</span><p>{["ticker", "snapshot"].includes(endpoint.id) ? "Тикер MOEX, например SBER" : "Количество записей, максимум 100"}</p></div></div>}
           <div className="code-panel"><div><span><Terminal size={13} /> cURL</span><button type="button" onClick={() => copyText(`curl -s '${baseUrl}${endpoint.path}'`, "curl")}><Copy size={13} /> {copied === "curl" ? "Готово" : "Копировать"}</button></div><pre><code>{`curl -s '${baseUrl}${endpoint.path}' \\\n  -H 'Accept: application/json'`}</code></pre></div>
           <div className="response-panel"><span>Пример ответа</span><pre><code>{responseExample}</code></pre></div>
         </section>
@@ -964,6 +1173,7 @@ function NewsReader({ item, onClose }) {
         <div className="reader-meta"><span>{item.tag}</span><time><Clock3 size={12} /> {new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" }).format(new Date(item.publishedAt))}</time></div>
         <h1>{item.title}</h1>
         <div className="reader-body"><p>{item.content}</p>{signal && <p>EventEdge связал публикацию с {signal.ticker} и алгоритмически рассчитал на горизонте {signal.horizon} оценку <strong>{formatScore(signal.score)} пункта</strong>.</p>}</div>
+        {item.sources?.length > 1 && <section className="reader-sources"><span>Подтверждающие публикации</span>{item.sources.map((source) => <a href={source.url} target="_blank" rel="noreferrer" key={`${source.name}-${source.url}`}>{source.name}<ArrowUpRight size={11} /></a>)}</section>}
         {signal && <section className="reader-insight"><CircleGauge size={16} /><div><span>Что это меняет</span><strong>{signal.action}</strong><p>{signal.summary}</p></div></section>}
         <footer><FileText size={13} /> Показан текст из RSS источника. <a href={item.url} target="_blank" rel="noreferrer">Открыть оригинал <ArrowUpRight size={11} /></a></footer>
       </article>
@@ -1025,19 +1235,23 @@ export default function App() {
           seenTickers.add(item.ticker);
           return true;
         });
-        const seenNewsEvents = new Set();
-        const nextNews = newsPayload.data
-          .map((item) => newsFromApi(item, signalsById))
-          .filter((item) => {
-            const eventKey = newsEventKey(item);
-            if (seenNewsEvents.has(eventKey)) return false;
-            seenNewsEvents.add(eventKey);
-            return true;
-          });
+        const nextNews = groupNewsEvents(newsPayload.data.map((item) => newsFromApi(item, signalsById)));
         nextNews.forEach((item) => {
           if (item.signal) item.signal.evidence.push(item);
         });
-        setSignals(nextSignals);
+        const marketEntries = await Promise.all(nextSignals.map(async (signal) => {
+          try {
+            const response = await fetch(`/v1/instruments/${encodeURIComponent(signal.ticker)}/snapshot`, { signal: controller.signal });
+            if (!response.ok) return [signal.ticker, null];
+            const payload = await response.json();
+            return [signal.ticker, payload.data];
+          } catch (error) {
+            if (error.name === "AbortError") throw error;
+            return [signal.ticker, null];
+          }
+        }));
+        const marketByTicker = new Map(marketEntries);
+        setSignals(nextSignals.map((signal) => hydrateSignalWithMarket(signal, marketByTicker.get(signal.ticker))));
         setAllNews(nextNews);
         setDataStatus("ready");
       } catch (error) {
@@ -1064,10 +1278,10 @@ export default function App() {
     <div className="app-shell">
       <AppHeader view={route.view} signals={signals} onNavigate={navigate} onSelect={(ticker) => navigate("signal", ticker)} onOpenNews={(ticker) => navigate("news", ticker)} />
       {needsData && dataStatus !== "ready" && <DataState error={dataStatus === "error" ? dataError : ""} onRetry={() => setReloadKey((value) => value + 1)} />}
-      {dataStatus === "ready" && route.view === "signals" && <SignalsScreen signals={signals} onSelect={(ticker) => navigate("signal", ticker)} onOpenNews={(ticker) => navigate("news", ticker)} onMethodology={() => navigate("methodology")} />}
+      {dataStatus === "ready" && route.view === "signals" && <SignalsScreen signals={signals} onSelect={(ticker) => navigate("signal", ticker)} onOpenNews={(ticker) => navigate("news", ticker)} onMethodology={() => navigate("methodology")} onReadNews={setReaderItem} />}
       {dataStatus === "ready" && route.view === "signal" && (selectedSignal ? <CompanyScreen signal={selectedSignal} onBack={() => navigate("signals")} onMethodology={() => navigate("methodology")} onOpenNews={() => navigate("news", selectedSignal.ticker)} onReadNews={setReaderItem} /> : <DataState error="Сигнал ещё не рассчитан." onRetry={() => navigate("signals")} />)}
       {dataStatus === "ready" && route.view === "news" && <NewsScreen signals={signals} allNews={allNews} initialTicker={route.ticker} onReadNews={setReaderItem} />}
-      {route.view === "methodology" && <MethodologyScreen onApi={() => navigate("api")} />}
+      {route.view === "methodology" && <MethodologyScreen onApi={() => navigate("api")} allNews={allNews} />}
       {route.view === "api" && <ApiScreen />}
       <NewsReader item={readerItem} onClose={() => setReaderItem(null)} />
     </div>
