@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 import pytest
 import ydb
+from ydb.query.base import QueryExecMode
 
 from eventedge.storage import (
     SCHEMA_STATEMENTS,
@@ -91,7 +92,11 @@ def test_ydb_runtime_is_created_inside_running_event_loop(
         async def execute_with_retries(
             self, statement: str, **kwargs: object
         ) -> list[object]:
-            events.append("validate" if kwargs else "schema")
+            if kwargs:
+                assert kwargs == {"exec_mode": QueryExecMode.EXPLAIN}
+                events.append("explain")
+            else:
+                events.append("schema")
             return []
 
         async def stop(self) -> None:
@@ -118,7 +123,7 @@ def test_ydb_runtime_is_created_inside_running_event_loop(
         "driver.wait:15:True",
         "pool.init:2",
         *("schema" for _ in SCHEMA_STATEMENTS),
-        *("validate" for _ in VALIDATED_QUERIES),
+        *("explain" for _ in VALIDATED_QUERIES),
         "pool.stop",
         "driver.stop:5",
     ]
