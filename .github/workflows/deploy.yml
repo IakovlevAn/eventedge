@@ -107,3 +107,11 @@ jobs:
           done
           echo "Production API did not become ready" >&2
           exit 1
+
+      - name: Smoke test web application
+        shell: bash
+        run: |
+          set -euo pipefail
+          page="$(curl --fail --silent --show-error --max-time 10 "${EVENTEDGE_API_URL}/")"
+          grep -Fq '<title>EventEdge — сигналы российского рынка</title>' <<<"$page"
+          echo "Production web application is ready"

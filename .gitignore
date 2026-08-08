@@ -28,3 +28,4 @@ node_modules/
 .ruff_cache/
 .uv-cache/
 *.egg-info/
+src/eventedge/static/
