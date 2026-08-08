@@ -63,6 +63,7 @@ cloud: eventedge
 - YDB не имеет зарезервированной мощности, ограничена 10 RU/с и 1 ГБ, защищена от удаления.
 - Runtime service account имеет `ydb.editor` только на базе `eventedge-prod`; роль не выдана на каталог или облако.
 - Runtime service account имеет `ai.languageModels.user` в production-каталоге для вызова YandexGPT через короткоживущий metadata IAM token.
+- Три новостных Timer созданы административно и не изменяются обычным deploy. Для управления ими CI потребовалась бы широкая роль `functions.editor` на весь production-каталог; ради минимальных привилегий эта роль не выдаётся. В репозитории остаётся проверяемая конфигурация [`scripts/deploy_triggers.py`](../scripts/deploy_triggers.py) для явного административного запуска.
 
 GitHub Free не предоставляет branch protection для приватного репозитория. Поэтому запрет прямого push в `main` нельзя обеспечить на стороне GitHub без GitHub Pro; автоматический pipeline сам прямой push не использует.
 
