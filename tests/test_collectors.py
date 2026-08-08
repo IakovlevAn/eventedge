@@ -7,6 +7,7 @@ from eventedge.collectors import (
     RssFeedConfig,
     RssItem,
     collect_rss_feed,
+    is_moex_equity_title,
     is_watched_company_news,
     parse_rss,
 )
@@ -80,3 +81,5 @@ def test_moex_equity_filter_rejects_mechanical_listing_notice() -> None:
     )
 
     assert is_watched_company_news(item) is False
+    assert is_moex_equity_title(item.title) is False
+    assert is_moex_equity_title("Сбербанк опубликовал финансовые результаты") is True

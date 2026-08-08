@@ -70,6 +70,7 @@ paths:
           explode: false
         - name: status
           in: query
+          description: Defaults to active; pass another status for audit views.
           schema:
             $ref: '#/components/schemas/SignalStatus'
         - name: min_confidence

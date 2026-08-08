@@ -231,9 +231,13 @@ MOEX_NON_EQUITY_TITLE_MARKERS = (
 )
 
 
+def is_moex_equity_title(title: str) -> bool:
+    normalized = title.casefold()
+    return not any(marker in normalized for marker in MOEX_NON_EQUITY_TITLE_MARKERS)
+
+
 def is_watched_company_news(item: RssItem) -> bool:
-    title = item.title.casefold()
-    if any(marker in title for marker in MOEX_NON_EQUITY_TITLE_MARKERS):
+    if not is_moex_equity_title(item.title):
         return False
     features = RuleBasedNewsExtractor().extract(
         NewsAnalysisInput(
