@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
+import pytest
+
+import eventedge.collectors as collectors_module
 from eventedge.collectors import (
     RssFeedConfig,
     RssItem,
@@ -177,3 +180,30 @@ def test_google_candidate_requires_trusted_publisher() -> None:
 
     assert is_google_market_signal_candidate(trusted) is True
     assert is_google_market_signal_candidate(unknown) is False
+
+
+def test_composite_collector_isolates_a_failed_feed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = MemoryNewsRepository()
+
+    async def flaky_collect(
+        repository: object,
+        config: RssFeedConfig,
+        **kwargs: object,
+    ) -> dict[str, int]:
+        if config.source_id == "google_news":
+            raise TimeoutError("feed unavailable")
+        return {"fetched": 1, "matched": 1, "accepted": 1, "replayed": 0}
+
+    monkeypatch.setattr(collectors_module, "collect_rss_feed", flaky_collect)
+
+    result = asyncio.run(collectors_module.collect_market_news(repository))
+
+    assert result == {
+        "fetched": 5,
+        "matched": 5,
+        "accepted": 5,
+        "replayed": 0,
+        "failed": 3,
+    }

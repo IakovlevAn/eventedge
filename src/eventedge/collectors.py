@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import urllib.parse
 import urllib.request
@@ -22,6 +23,7 @@ from eventedge.storage import (
 MAX_FEED_BYTES = 8_000_000
 MAX_CONTENT_LENGTH = 200_000
 RSS_CONTENT_TAG = "{http://purl.org/rss/1.0/modules/content/}encoded"
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -463,7 +465,13 @@ async def collect_moex_news(repository: NewsRepository) -> dict[str, int]:
 
 async def collect_market_news(repository: NewsRepository) -> dict[str, int]:
     """Backfill and refresh the complete low-cost market news surface."""
-    totals = {"fetched": 0, "matched": 0, "accepted": 0, "replayed": 0}
+    totals = {
+        "fetched": 0,
+        "matched": 0,
+        "accepted": 0,
+        "replayed": 0,
+        "failed": 0,
+    }
     results = await asyncio.gather(
         *(
             collect_rss_feed(
@@ -479,8 +487,18 @@ async def collect_market_news(repository: NewsRepository) -> dict[str, int]:
         ),
         collect_cbr_press(repository),
         collect_moex_news(repository),
+        return_exceptions=True,
     )
     for result in results:
+        if isinstance(result, asyncio.CancelledError):
+            raise result
+        if isinstance(result, BaseException):
+            totals["failed"] += 1
+            LOGGER.warning(
+                "Market feed collection failed: %s",
+                type(result).__name__,
+            )
+            continue
         for key in totals:
-            totals[key] += result[key]
+            totals[key] += result.get(key, 0)
     return totals
