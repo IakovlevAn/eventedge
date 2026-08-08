@@ -4,11 +4,13 @@ import hashlib
 import re
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from eventedge import __version__
@@ -168,3 +170,12 @@ async def get_signal(request: Request, signal_id: str) -> JSONResponse:
         title="Signal not found",
         detail="The signal does not exist or is not visible.",
     )
+
+
+STATIC_DIR = Path(__file__).with_name("static")
+if STATIC_DIR.is_dir():
+    app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="web-assets")
+
+    @app.get("/", include_in_schema=False)
+    async def web_app() -> FileResponse:
+        return FileResponse(STATIC_DIR / "index.html")

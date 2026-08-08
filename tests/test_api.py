@@ -54,3 +54,11 @@ def test_unknown_signal_is_explicit() -> None:
 
     assert response.status_code == 404
     assert response.json()["code"] == "SIGNAL_NOT_FOUND"
+
+
+def test_unknown_api_route_keeps_problem_json_contract() -> None:
+    response = client.get("/v1/not-a-real-route")
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["code"] == "RESOURCE_NOT_FOUND"

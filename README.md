@@ -4,6 +4,7 @@ EventEdge — API-first платформа краткосрочных сигна
 
 - [Понятное описание продукта](EventEdge/README.md)
 - [Технический дизайн](EventEdge/TECHNICAL_DESIGN.md)
+- [Направление UX/UI](EventEdge/DESIGN_SYSTEM.md)
 - [OpenAPI-контракт](EventEdge/openapi.yaml)
 - [Подключение Yandex Cloud](EventEdge/CLOUD_SETUP.md)
 
@@ -14,4 +15,12 @@ uv sync --locked --dev
 uv run ruff check .
 uv run pytest
 uv run python scripts/validate_openapi.py
+```
+
+## Локальный UI
+
+```bash
+cd web
+npm install
+npm run dev
 ```
