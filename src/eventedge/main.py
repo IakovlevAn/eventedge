@@ -19,7 +19,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from eventedge import __version__
 from eventedge.collectors import (
     collect_cbr_press,
-    collect_moex_news,
+    collect_market_news,
     is_moex_equity_title,
 )
 from eventedge.llm import analyzer_from_environment
@@ -117,7 +117,10 @@ app = FastAPI(
 app.state.news_repository = repository_from_environment(os.environ)
 app.state.collectors = {
     "cbr_press": collect_cbr_press,
-    "moex_news": collect_moex_news,
+    # Keep the current trigger payload backward compatible while widening the
+    # collector from exchange notices to the complete market-news surface.
+    "moex_news": collect_market_news,
+    "market_news": collect_market_news,
 }
 
 
@@ -350,7 +353,7 @@ async def list_news(
     signals = await repository.list_signals(
         ticker=None,
         directions=None,
-        status="active",
+        status=None,
         min_confidence=None,
         limit=1000,
     )
@@ -364,6 +367,7 @@ async def list_news(
                 "action": signal.action,
                 "score": signal.score,
                 "confidence": signal.confidence,
+                "status": signal.status,
             }
         )
     data = []
@@ -413,8 +417,17 @@ async def list_signals(
         directions=requested_directions,
         status=status or "active",
         min_confidence=min_confidence,
-        limit=limit,
+        limit=1000,
     )
+    news = await repository.list_news(source_id=None, limit=1000)
+    hidden_news_ids = {
+        item.id
+        for item in news
+        if item.source_id == "moex_news" and not is_moex_equity_title(item.title)
+    }
+    signals = [signal for signal in signals if signal.news_id not in hidden_news_ids][
+        :limit
+    ]
     data = [signal.as_api_dict() for signal in signals]
     cache_payload = {
         "ticker": ticker,

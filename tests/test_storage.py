@@ -61,6 +61,77 @@ def test_stable_id_uses_eventedge_crockford_format() -> None:
     assert not set(identifier.removeprefix("job_")) & set("ILOU")
 
 
+def test_retroactive_news_creates_historical_not_active_signal() -> None:
+    async def scenario() -> None:
+        repository = MemoryNewsRepository()
+        document = NewsDocument(
+            source_id="interfax",
+            external_id="historical-1",
+            published_at=datetime(2026, 7, 1, 10, tzinfo=UTC),
+            received_at=datetime(2026, 7, 1, 10, tzinfo=UTC),
+            title="Сбербанк опубликовал отчётность",
+            url="https://example.com/historical-1",
+            content="Чистая прибыль выросла на 15% и превысила ожидания.",
+            language="ru",
+            source_metadata={},
+            payload_hash="historical-payload-hash",
+        )
+        await repository.ingest("historical-key", document)
+
+        active = await repository.list_signals(
+            ticker="SBER",
+            directions=None,
+            status="active",
+            min_confidence=None,
+            limit=10,
+        )
+        expired = await repository.list_signals(
+            ticker="SBER",
+            directions=None,
+            status="expired",
+            min_confidence=None,
+            limit=10,
+        )
+
+        assert active == []
+        assert len(expired) == 1
+        assert expired[0].status == "expired"
+
+    asyncio.run(scenario())
+
+
+def test_cbr_context_news_does_not_create_direct_company_signal() -> None:
+    async def scenario() -> None:
+        repository = MemoryNewsRepository()
+        document = NewsDocument(
+            source_id="cbr_press",
+            external_id="cbr-rates-1",
+            published_at=datetime(2026, 8, 8, 10, tzinfo=UTC),
+            received_at=datetime(2026, 8, 8, 10, tzinfo=UTC),
+            title="Банк России опубликовал мониторинг ставок",
+            url="https://www.cbr.ru/example",
+            content="В расчет вошли ставки Сбербанка и ВТБ, показатель снизился.",
+            language="ru",
+            source_metadata={},
+            payload_hash="cbr-rates-payload",
+        )
+        await repository.ingest("cbr-rates-key", document)
+
+        signals = await repository.list_signals(
+            ticker=None,
+            directions=None,
+            status=None,
+            min_confidence=None,
+            limit=10,
+        )
+        news = await repository.list_news(source_id="cbr_press", limit=10)
+
+        assert len(news) == 1
+        assert signals == []
+
+    asyncio.run(scenario())
+
+
 def test_runtime_metadata_credentials_can_be_constructed() -> None:
     credentials = ydb.iam.MetadataUrlCredentials()
 
