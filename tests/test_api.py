@@ -124,14 +124,44 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
     assert accepted.status_code == 202
     assert replayed.status_code == 202
     assert accepted.json() == replayed.json()
-    assert accepted.json()["data"]["status"] == "queued"
+    assert accepted.json()["data"]["status"] == "succeeded"
     assert accepted.json()["data"]["kind"] == "news_ingestion"
+    assert accepted.json()["data"]["progress"] == 1
+    assert accepted.json()["data"]["result_ref"].startswith("sig_")
+    assert accepted.json()["data"]["completed_at"].endswith("Z")
     assert replayed.headers["Idempotency-Replayed"] == "true"
     assert accepted.headers["Location"] == f"/v1/jobs/{accepted.json()['data']['id']}"
 
     job = client.get(accepted.headers["Location"])
     assert job.status_code == 200
     assert job.json() == accepted.json()
+
+    signal_id = accepted.json()["data"]["result_ref"]
+    signal = client.get(f"/v1/signals/{signal_id}")
+    assert signal.status_code == 200
+    assert signal.json()["data"]["id"] == signal_id
+    assert signal.json()["data"]["ticker"] == "SBER"
+    assert signal.json()["data"]["direction"] == "up"
+    assert signal.json()["data"]["action"] == "consider_buy"
+    assert signal.json()["data"]["model_version"] == "news-baseline-0.1.0"
+    assert len(signal.json()["data"]["factor_contributions"]) == 5
+
+    listed = client.get("/v1/signals", params={"ticker": "SBER", "direction": "up"})
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()["data"]] == [signal_id]
+
+    cached = client.get(
+        f"/v1/signals/{signal_id}",
+        headers={"If-None-Match": signal.headers["ETag"]},
+    )
+    assert cached.status_code == 304
+
+
+def test_signal_list_rejects_unknown_direction() -> None:
+    response = client.get("/v1/signals", params={"direction": "up,sideways"})
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "INVALID_PARAMETER"
 
 
 def test_news_ingestion_rejects_idempotency_key_reuse_with_new_payload() -> None:

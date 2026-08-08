@@ -6,6 +6,7 @@ import ydb
 
 from eventedge.storage import (
     SCHEMA_STATEMENTS,
+    VALIDATED_QUERIES,
     MemoryNewsRepository,
     NewsDocument,
     YdbNewsRepository,
@@ -21,9 +22,9 @@ def test_concurrent_retries_create_one_job() -> None:
             external_id="external-1",
             published_at=datetime(2026, 8, 8, 10, 18, tzinfo=UTC),
             received_at=datetime(2026, 8, 8, 10, 19, tzinfo=UTC),
-            title="Новость",
+            title="Сбербанк опубликовал отчётность",
             url="https://example.com/news/1",
-            content="Текст новости",
+            content="Чистая прибыль выросла на 15% и оказалась выше ожиданий.",
             language="ru",
             source_metadata={},
             payload_hash="same-payload-hash",
@@ -36,6 +37,17 @@ def test_concurrent_retries_create_one_job() -> None:
         assert len({result.job.id for result in results}) == 1
         assert sum(not result.replayed for result in results) == 1
         assert sum(result.replayed for result in results) == 19
+        assert {result.job.status for result in results} == {"succeeded"}
+
+        signals = await repository.list_signals(
+            ticker="SBER",
+            directions=frozenset({"up"}),
+            status="active",
+            min_confidence=None,
+            limit=10,
+        )
+        assert len(signals) == 1
+        assert signals[0].id == results[0].job.result_ref
 
     asyncio.run(scenario())
 
@@ -76,8 +88,10 @@ def test_ydb_runtime_is_created_inside_running_event_loop(
             asyncio.get_running_loop()
             events.append(f"pool.init:{size}")
 
-        async def execute_with_retries(self, statement: str) -> list[object]:
-            events.append("schema")
+        async def execute_with_retries(
+            self, statement: str, **kwargs: object
+        ) -> list[object]:
+            events.append("validate" if kwargs else "schema")
             return []
 
         async def stop(self) -> None:
@@ -104,6 +118,7 @@ def test_ydb_runtime_is_created_inside_running_event_loop(
         "driver.wait:15:True",
         "pool.init:2",
         *("schema" for _ in SCHEMA_STATEMENTS),
+        *("validate" for _ in VALIDATED_QUERIES),
         "pool.stop",
         "driver.stop:5",
     ]
