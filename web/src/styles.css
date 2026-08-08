@@ -3664,6 +3664,12 @@ kbd {
   transform-origin: left center;
 }
 
+.brand > span.brand-wordmark {
+  flex-direction: row;
+  align-items: center;
+  white-space: nowrap;
+}
+
 .brand-wordmark span,
 .brand-wordmark strong {
   display: block;
