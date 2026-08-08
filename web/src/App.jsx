@@ -309,13 +309,13 @@ const sourceLabels = {
 };
 
 const methodologySources = [
-  { id: "cbr_press", name: "Банк России", kind: "Первичный", quality: 95, freshness: "по публикации", role: "Макроэкономические решения и пресс-релизы регулятора", url: "https://www.cbr.ru/press/" },
-  { id: "moex_news", name: "Московская биржа", kind: "Первичный", quality: 95, freshness: "по публикации", role: "Сообщения биржи и эмитентов", url: "https://www.moex.com/ru/news/" },
-  { id: "interfax", name: "Интерфакс", kind: "Агентство", quality: 90, freshness: "RSS", role: "Оперативные корпоративные и рыночные новости", url: "https://www.interfax.ru/business/" },
-  { id: "tass", name: "ТАСС", kind: "Агентство", quality: 82, freshness: "RSS", role: "Подтверждение значимых событий", url: "https://tass.ru/ekonomika" },
-  { id: "rbc", name: "РБК", kind: "Медиа", quality: 78, freshness: "RSS", role: "Рыночный контекст и дополнительное подтверждение", url: "https://www.rbc.ru/quote/" },
-  { id: "google_news", name: "Google News", kind: "Discovery", quality: 74, freshness: "до 7 дней", role: "Поиск публикаций; не считается первичным источником", url: "https://news.google.com/" },
-  { id: "market_background", name: "Рыночный фон", kind: "Контекст", quality: 74, freshness: "до 15 мин", role: "Ставка, рубль, нефть, санкции и общий фон рынка", url: "https://news.google.com/" },
+  { id: "cbr_press", name: "Банк России", kind: "Первичный", quality: 95, freshness: "до 15 мин", role: "Макроэкономические решения и пресс-релизы регулятора", url: "https://www.cbr.ru/press/" },
+  { id: "moex_news", name: "Московская биржа", kind: "Первичный", quality: 95, freshness: "цель ≤ 2 мин", role: "Сообщения биржи и эмитентов", url: "https://www.moex.com/ru/news/" },
+  { id: "interfax", name: "Интерфакс", kind: "Агентство", quality: 90, freshness: "цель ≤ 2 мин", role: "Оперативные корпоративные и рыночные новости", url: "https://www.interfax.ru/business/" },
+  { id: "tass", name: "ТАСС", kind: "Агентство", quality: 82, freshness: "цель ≤ 2 мин", role: "Подтверждение значимых событий", url: "https://tass.ru/ekonomika" },
+  { id: "rbc", name: "РБК", kind: "Медиа", quality: 78, freshness: "цель ≤ 2 мин", role: "Рыночный контекст и дополнительное подтверждение", url: "https://www.rbc.ru/quote/" },
+  { id: "google_news", name: "Google News", kind: "Discovery", quality: 74, freshness: "до 5 мин", role: "Поиск публикаций; не считается первичным источником", url: "https://news.google.com/" },
+  { id: "market_background", name: "Рыночный фон", kind: "Контекст", quality: 74, freshness: "до 5 мин", role: "Ставка, рубль, нефть, санкции и общий фон рынка", url: "https://news.google.com/" },
   { id: "moex_iss", name: "MOEX ISS", kind: "Рыночные данные", quality: 100, freshness: "до 60 сек", role: "Цена, объём, свечи, ликвидность и волатильность", url: "https://iss.moex.com/iss/" },
 ];
 
@@ -1179,7 +1179,7 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
           <button type="button" key={signal.ticker} className={ticker === signal.ticker ? "is-active" : ""} onClick={() => setTicker(signal.ticker)}><CompanyMark signal={signal} small />{signal.ticker}</button>
         ))}
       </div>
-      <div className="pipeline-status"><span><i /> Сбор работает</span><strong>Проверка новых публикаций каждые {Math.round((newsMeta.poll_interval_seconds || 900) / 60)} мин</strong><small>{newsMeta.last_ingested_at ? `Последняя новая запись ${formatRelative(newsMeta.last_ingested_at)}` : "Ожидаем первую публикацию"}</small></div>
+      <div className="pipeline-status"><span><i /> Быстрый сбор работает</span><strong>Приоритетные источники проверяются каждую минуту</strong><small>{newsMeta.last_ingested_at ? `Последняя новая запись ${formatRelative(newsMeta.last_ingested_at)} · цель доставки до ${Math.round((newsMeta.delivery_target_seconds || 120) / 60)} мин` : "Ожидаем первую публикацию"}</small></div>
       <section className="news-feed">
         <div className="feed-heading"><span>{ticker === "all" && !query ? newsMeta.total || items.length : items.length} публикаций</span><small>{newsMeta.sources?.length || 0} активных источника · события отделены от фоновых новостей</small></div>
         {items.map((item) => (
@@ -1332,7 +1332,16 @@ function ApiScreen() {
     "url": "https://www.moex.com/n…",
     "related_signals": [{"ticker":"SBER","direction":"up","score":24.8}]
   }],
-  "meta": {"limit":20,"total":84,"has_more":true,"sources":[{"source_id":"interfax","count":24,"signal_count":5}]}
+  "meta": {
+    "limit":20,
+    "total":84,
+    "has_more":true,
+    "poll_interval_seconds":60,
+    "client_refresh_interval_seconds":30,
+    "delivery_target_seconds":120,
+    "collection_lanes":[{"id":"fast","interval_seconds":60,"source_ids":["interfax","tass","rbc","moex_news"]}],
+    "sources":[{"source_id":"interfax","count":24,"signal_count":5}]
+  }
 }` : `{
   "data": [
     {
@@ -1454,7 +1463,10 @@ export default function App() {
   useEffect(() => {
     const controller = new AbortController();
     let loaded = false;
+    let refreshing = false;
     const load = async () => {
+      if (refreshing || (loaded && document.visibilityState === "hidden")) return;
+      refreshing = true;
       if (!loaded) setDataStatus("loading");
       setDataError("");
       try {
@@ -1497,13 +1509,21 @@ export default function App() {
           setDataError(error.message || "Неизвестная ошибка загрузки.");
           setDataStatus("error");
         }
+      } finally {
+        refreshing = false;
       }
     };
     load();
-    const interval = window.setInterval(load, 300000);
+    const refreshMs = 30000;
+    const interval = window.setInterval(load, refreshMs);
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
     return () => {
       controller.abort();
       window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, [reloadKey]);
 

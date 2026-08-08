@@ -21,7 +21,10 @@ from starlette.middleware.gzip import GZipMiddleware
 from eventedge import __version__
 from eventedge.collectors import (
     collect_cbr_press,
+    collect_discovery_news,
+    collect_fast_news,
     collect_market_news,
+    collect_slow_news,
     is_moex_equity_title,
 )
 from eventedge.llm import analyzer_from_environment
@@ -46,6 +49,26 @@ REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 SIGNAL_ID_PATTERN = re.compile(r"^sig_[0-9A-HJKMNP-TV-Z]{26}$")
 JOB_ID_PATTERN = re.compile(r"^job_[0-9A-HJKMNP-TV-Z]{26}$")
 PUBLIC_HIDDEN_SOURCE_IDS = frozenset({"eventedge_smoke"})
+NEWS_COLLECTION_INTERVAL_SECONDS = 60
+NEWS_CLIENT_REFRESH_INTERVAL_SECONDS = 30
+NEWS_DELIVERY_TARGET_SECONDS = 120
+NEWS_COLLECTION_LANES = (
+    {
+        "id": "fast",
+        "interval_seconds": 60,
+        "source_ids": ["interfax", "tass", "rbc", "moex_news"],
+    },
+    {
+        "id": "discovery",
+        "interval_seconds": 300,
+        "source_ids": ["google_news", "market_background"],
+    },
+    {
+        "id": "slow",
+        "interval_seconds": 900,
+        "source_ids": ["cbr_press"],
+    },
+)
 
 
 class NewsIngestRequest(BaseModel):
@@ -129,6 +152,9 @@ app.state.news_repository = repository_from_environment(os.environ)
 app.state.market_data_client = MoexMarketDataClient()
 app.state.collectors = {
     "cbr_press": collect_cbr_press,
+    "fast_news": collect_fast_news,
+    "discovery_news": collect_discovery_news,
+    "slow_news": collect_slow_news,
     # Keep the current trigger payload backward compatible while widening the
     # collector from exchange notices to the complete market-news surface.
     "moex_news": collect_market_news,
@@ -438,7 +464,10 @@ async def list_news(
                     if visible_news
                     else None
                 ),
-                "poll_interval_seconds": 900,
+                "poll_interval_seconds": NEWS_COLLECTION_INTERVAL_SECONDS,
+                "client_refresh_interval_seconds": NEWS_CLIENT_REFRESH_INTERVAL_SECONDS,
+                "delivery_target_seconds": NEWS_DELIVERY_TARGET_SECONDS,
+                "collection_lanes": NEWS_COLLECTION_LANES,
                 "sources": sorted(
                     source_stats.values(),
                     key=lambda item: (-int(item["count"]), str(item["source_id"])),

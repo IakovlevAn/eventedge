@@ -72,6 +72,36 @@ def test_timer_event_dispatches_private_collector() -> None:
     }
 
 
+def test_fast_news_timer_dispatches_minute_collector() -> None:
+    original = app.state.collectors["fast_news"]
+
+    async def fake_collector(repository: object) -> dict[str, int]:
+        return {"fetched": 4, "accepted": 1, "replayed": 3, "failed": 0}
+
+    app.state.collectors["fast_news"] = fake_collector
+    try:
+        response = client.post(
+            "/",
+            json={
+                "messages": [
+                    {
+                        "event_metadata": {
+                            "event_type": (
+                                "yandex.cloud.events.serverless.triggers.TimerMessage"
+                            )
+                        },
+                        "details": {"payload": "fast_news"},
+                    }
+                ]
+            },
+        )
+    finally:
+        app.state.collectors["fast_news"] = original
+
+    assert response.status_code == 200
+    assert response.json()["collectors"]["fast_news"]["accepted"] == 1
+
+
 def test_signal_list_has_contract_shape_and_etag() -> None:
     response = client.get("/v1/signals", params={"ticker": "SBER", "limit": 10})
 
@@ -152,6 +182,26 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
 
     news = client.get("/v1/news", params={"source_id": "interfax"})
     assert news.status_code == 200
+    assert news.json()["meta"]["poll_interval_seconds"] == 60
+    assert news.json()["meta"]["client_refresh_interval_seconds"] == 30
+    assert news.json()["meta"]["delivery_target_seconds"] == 120
+    assert news.json()["meta"]["collection_lanes"] == [
+        {
+            "id": "fast",
+            "interval_seconds": 60,
+            "source_ids": ["interfax", "tass", "rbc", "moex_news"],
+        },
+        {
+            "id": "discovery",
+            "interval_seconds": 300,
+            "source_ids": ["google_news", "market_background"],
+        },
+        {
+            "id": "slow",
+            "interval_seconds": 900,
+            "source_ids": ["cbr_press"],
+        },
+    ]
     stored = next(
         item
         for item in news.json()["data"]

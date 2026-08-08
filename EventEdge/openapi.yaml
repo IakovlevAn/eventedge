@@ -1669,10 +1669,35 @@ components:
           type: string
           format: date-time
 
+    NewsCollectionLane:
+      type: object
+      additionalProperties: false
+      required: [id, interval_seconds, source_ids]
+      properties:
+        id:
+          type: string
+          enum: [fast, discovery, slow]
+        interval_seconds:
+          type: integer
+          minimum: 1
+        source_ids:
+          type: array
+          items:
+            type: string
+
     NewsPageMeta:
       type: object
       additionalProperties: false
-      required: [limit, total, has_more, last_ingested_at, poll_interval_seconds, sources]
+      required:
+        - limit
+        - total
+        - has_more
+        - last_ingested_at
+        - poll_interval_seconds
+        - client_refresh_interval_seconds
+        - delivery_target_seconds
+        - collection_lanes
+        - sources
       properties:
         limit:
           type: integer
@@ -1691,6 +1716,16 @@ components:
         poll_interval_seconds:
           type: integer
           minimum: 1
+        client_refresh_interval_seconds:
+          type: integer
+          minimum: 1
+        delivery_target_seconds:
+          type: integer
+          minimum: 1
+        collection_lanes:
+          type: array
+          items:
+            $ref: '#/components/schemas/NewsCollectionLane'
         sources:
           type: array
           items:

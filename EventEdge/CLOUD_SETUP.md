@@ -15,7 +15,9 @@ cloud: eventedge
 │   ├── Serverless Container: eventedge-api
 │   ├── API Gateway: eventedge-api
 │   ├── YDB Serverless: eventedge-prod
-│   ├── Timer trigger: eventedge-moex-news
+│   ├── Timer trigger: eventedge-fast-news
+│   ├── Timer trigger: eventedge-discovery-news
+│   ├── Timer trigger: eventedge-slow-news
 │   └── VPC: eventedge-prod (без подсетей и разрешающих правил)
 └── folder: dev
 ```
@@ -46,7 +48,9 @@ cloud: eventedge
 | Service account | `eventedge-gateway` | Вызов только приватного контейнера API |
 | API Gateway | `eventedge-api` | Публичная точка входа и маршрутизация к контейнеру |
 | YDB Serverless | `eventedge-prod` | Новости, признаки, сигналы, idempotency-записи и jobs |
-| Timer trigger | `eventedge-moex-news` | Опрос официального RSS Московской биржи раз в 15 минут |
+| Timer trigger | `eventedge-fast-news` | Интерфакс, ТАСС, РБК и Московская биржа каждую минуту |
+| Timer trigger | `eventedge-discovery-news` | Расширенный discovery Google News каждые 5 минут |
+| Timer trigger | `eventedge-slow-news` | Макроэкономический фон Банка России каждые 15 минут |
 
 ## CI/CD и автоматические merge
 
@@ -74,7 +78,7 @@ Gateway и YDB-backed ревизия контейнера развёрнуты. 
 
 Приватный production smoke test подтвердил запись синтетической новости в `eventedge-prod`, повтор запроса с тем же `Idempotency-Key` без дубля и последующее чтение созданного job. Все YDB-запросы дополнительно проходят server-side validation при старте контейнера.
 
-Первый источник сигналов — [официальный RSS Московской биржи](https://www.moex.com/a40). Предфильтр оставляет только новости по наблюдаемым компаниям и отбрасывает механические уведомления долгового и биржевого контура; после этого YandexGPT извлекает строгие семантические признаки, а версия `news-baseline-0.1.1` детерминированно рассчитывает направление и действие. Trigger `eventedge-moex-news` работает раз в 15 минут, использует существующий `eventedge-gateway` и делает до трёх попыток с интервалом 30 секунд.
+Приоритетный контур собирает прямые RSS Интерфакса, ТАСС, РБК и Московской биржи каждую минуту. Медленные или широкие источники вынесены из него: Google News обновляется каждые 5 минут, Банк России — каждые 15 минут. Поэтому недоступность одного фида не задерживает остальные. Предфильтр оставляет новости по наблюдаемым компаниям и отбрасывает механические уведомления долгового и биржевого контура; только новый сильный кандидат отправляется в YandexGPT, после чего версия `news-baseline-0.1.1` детерминированно рассчитывает направление и действие. Интерфейс проверяет API каждые 30 секунд; целевая задержка от появления материала в приоритетном RSS до EventEdge — не более 2 минут.
 
 ## Проверка
 

@@ -144,6 +144,7 @@ async def collect_rss_feed(
     fetcher: Callable[[str, float], bytes] = fetch_rss,
     item_filter: Callable[[RssItem], bool] | None = None,
     signal_filter: Callable[[RssItem], bool] | None = None,
+    stop_after_replays: int | None = None,
 ) -> dict[str, int]:
     feed = await asyncio.to_thread(fetcher, config.url, config.timeout_seconds)
     items = parse_rss(feed, max_items=config.max_items)
@@ -151,6 +152,7 @@ async def collect_rss_feed(
     replayed = 0
     matched = 0
     signal_candidates = 0
+    consecutive_replays = 0
 
     for item in items:
         if item_filter is not None and not item_filter(item):
@@ -193,7 +195,9 @@ async def collect_rss_feed(
             source_id=config.source_id,
             external_id=item.external_id,
             published_at=item.published_at,
-            received_at=item.published_at,
+            # Publication time belongs to the source. Receipt time is when the
+            # item actually entered EventEdge and is needed for delivery SLOs.
+            received_at=datetime.now(UTC),
             title=item.title,
             url=item.url,
             content=item.content,
@@ -212,8 +216,15 @@ async def collect_rss_feed(
         )
         if result.replayed:
             replayed += 1
+            consecutive_replays += 1
+            if (
+                stop_after_replays is not None
+                and consecutive_replays >= stop_after_replays
+            ):
+                break
         else:
             accepted += 1
+            consecutive_replays = 0
 
     return {
         "fetched": len(items),
@@ -545,18 +556,35 @@ MARKET_NEWS_FEEDS = (
     ),
 )
 
+FAST_NEWS_FEEDS = (
+    *(config for config in MARKET_NEWS_FEEDS if config.source_id in {"interfax", "tass", "rbc"}),
+    RssFeedConfig(
+        source_id=MOEX_NEWS_FEED.source_id,
+        url=MOEX_NEWS_FEED.url,
+        max_items=100,
+        timeout_seconds=10,
+    ),
+)
 
-async def collect_moex_news(repository: NewsRepository) -> dict[str, int]:
-    return await collect_rss_feed(
-        repository,
-        MOEX_NEWS_FEED,
-        item_filter=is_market_signal_candidate,
-    )
+DISCOVERY_NEWS_FEEDS = tuple(
+    config
+    for config in MARKET_NEWS_FEEDS
+    if config.source_id in {"google_news", "market_background"}
+)
 
 
-async def collect_market_news(repository: NewsRepository) -> dict[str, int]:
-    """Backfill and refresh the complete low-cost market news surface."""
-    totals = {
+def collection_filters(
+    config: RssFeedConfig,
+) -> tuple[Callable[[RssItem], bool], Callable[[RssItem], bool]]:
+    if config.source_id == "google_news":
+        return is_google_company_news_candidate, is_google_market_signal_candidate
+    if config.source_id == "market_background":
+        return is_google_market_background_candidate, lambda item: False
+    return is_company_news_candidate, is_market_signal_candidate
+
+
+def empty_collection_totals() -> dict[str, int]:
+    return {
         "fetched": 0,
         "matched": 0,
         "signal_candidates": 0,
@@ -564,32 +592,12 @@ async def collect_market_news(repository: NewsRepository) -> dict[str, int]:
         "replayed": 0,
         "failed": 0,
     }
-    results = await asyncio.gather(
-        *(
-            collect_rss_feed(
-                repository,
-                config,
-                item_filter=(
-                    is_google_company_news_candidate
-                    if config.source_id == "google_news"
-                    else is_google_market_background_candidate
-                    if config.source_id == "market_background"
-                    else is_company_news_candidate
-                ),
-                signal_filter=(
-                    is_google_market_signal_candidate
-                    if config.source_id == "google_news"
-                    else (lambda item: False)
-                    if config.source_id == "market_background"
-                    else is_market_signal_candidate
-                ),
-            )
-            for config in MARKET_NEWS_FEEDS
-        ),
-        collect_cbr_press(repository),
-        collect_moex_news(repository),
-        return_exceptions=True,
-    )
+
+
+def aggregate_collection_results(
+    results: list[dict[str, int] | BaseException],
+) -> dict[str, int]:
+    totals = empty_collection_totals()
     for result in results:
         if isinstance(result, asyncio.CancelledError):
             raise result
@@ -603,3 +611,85 @@ async def collect_market_news(repository: NewsRepository) -> dict[str, int]:
         for key in totals:
             totals[key] += result.get(key, 0)
     return totals
+
+
+async def collect_feed_group(
+    repository: NewsRepository,
+    feeds: tuple[RssFeedConfig, ...],
+    *,
+    stop_after_replays: int | None,
+) -> dict[str, int]:
+    results = await asyncio.gather(
+        *(
+            collect_rss_feed(
+                repository,
+                config,
+                item_filter=collection_filters(config)[0],
+                signal_filter=collection_filters(config)[1],
+                stop_after_replays=stop_after_replays,
+            )
+            for config in feeds
+        ),
+        return_exceptions=True,
+    )
+    return aggregate_collection_results(results)
+
+
+async def collect_fast_news(repository: NewsRepository) -> dict[str, int]:
+    """Refresh direct priority feeds every minute without discovery latency."""
+    return await collect_feed_group(
+        repository,
+        FAST_NEWS_FEEDS,
+        stop_after_replays=5,
+    )
+
+
+async def collect_discovery_news(repository: NewsRepository) -> dict[str, int]:
+    """Refresh broad Google News discovery independently of the fast lane."""
+    return await collect_feed_group(
+        repository,
+        DISCOVERY_NEWS_FEEDS,
+        stop_after_replays=10,
+    )
+
+
+async def collect_slow_news(repository: NewsRepository) -> dict[str, int]:
+    """Refresh macro context that does not require minute-level polling."""
+    result = await asyncio.gather(
+        collect_rss_feed(
+            repository,
+            CBR_PRESS_FEED,
+            item_filter=is_cbr_market_news,
+            signal_filter=lambda item: False,
+            stop_after_replays=5,
+        ),
+        return_exceptions=True,
+    )
+    return aggregate_collection_results(result)
+
+
+async def collect_moex_news(repository: NewsRepository) -> dict[str, int]:
+    return await collect_rss_feed(
+        repository,
+        MOEX_NEWS_FEED,
+        item_filter=is_market_signal_candidate,
+    )
+
+
+async def collect_market_news(repository: NewsRepository) -> dict[str, int]:
+    """Backfill and refresh the complete low-cost market news surface."""
+    results = await asyncio.gather(
+        *(
+            collect_rss_feed(
+                repository,
+                config,
+                item_filter=collection_filters(config)[0],
+                signal_filter=collection_filters(config)[1],
+            )
+            for config in MARKET_NEWS_FEEDS
+        ),
+        collect_cbr_press(repository),
+        collect_moex_news(repository),
+        return_exceptions=True,
+    )
+    return aggregate_collection_results(results)
