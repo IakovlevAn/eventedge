@@ -1,6 +1,8 @@
 import asyncio
 from datetime import UTC, datetime
 
+import ydb
+
 from eventedge.storage import MemoryNewsRepository, NewsDocument, stable_id
 
 
@@ -37,3 +39,9 @@ def test_stable_id_uses_eventedge_crockford_format() -> None:
     assert len(identifier) == 30
     assert identifier.startswith("job_")
     assert not set(identifier.removeprefix("job_")) & set("ILOU")
+
+
+def test_runtime_metadata_credentials_can_be_constructed() -> None:
+    credentials = ydb.iam.MetadataUrlCredentials()
+
+    assert credentials is not None
