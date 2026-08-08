@@ -82,37 +82,10 @@ jobs:
           docker build --platform linux/amd64 --tag "$IMAGE_URL" .
           docker push "$IMAGE_URL"
 
-      - name: Install Yandex Cloud CLI
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl --silent --show-error --location \
-            https://storage.yandexcloud.net/yandexcloud-yc/install.sh \
-            | bash -s -- -i "${RUNNER_TEMP}/yandex-cloud" -n
-          echo "${RUNNER_TEMP}/yandex-cloud/bin" >> "$GITHUB_PATH"
-
       - name: Deploy budget-capped serverless revision
         env:
-          YC_TOKEN: ${{ steps.yandex-iam.outputs.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          yc serverless container revision deploy \
-            --folder-id "$YC_FOLDER_ID" \
-            --container-id "$YC_CONTAINER_ID" \
-            --image "$IMAGE_URL" \
-            --service-account-id "$YC_RUNTIME_SERVICE_ACCOUNT_ID" \
-            --memory 256MB \
-            --cores 1 \
-            --core-fraction 100 \
-            --execution-timeout 10s \
-            --concurrency 8 \
-            --min-instances 0 \
-            --zone-instances-limit 1 \
-            --zone-requests-limit 50 \
-            --runtime http \
-            --environment APP_ENV=prod \
-            --description "GitHub ${DEPLOY_SHA}"
+          IAM_TOKEN: ${{ steps.yandex-iam.outputs.token }}
+        run: python scripts/deploy_serverless.py
 
       - name: Smoke test through API Gateway
         shell: bash

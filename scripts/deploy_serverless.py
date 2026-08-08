@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections.abc import Mapping
+
+DEPLOY_URL = (
+    "https://serverless-containers.api.cloud.yandex.net/containers/v1/revisions:deploy"
+)
+OPERATION_URL = "https://operation.api.cloud.yandex.net/operations/{}"
+SECRET_PATTERN = re.compile(r"(?:y[01]_|t[01]_|AQAD-)[A-Za-z0-9_-]+")
+
+
+def build_payload(environment: Mapping[str, str]) -> dict[str, object]:
+    return {
+        "containerId": environment["YC_CONTAINER_ID"],
+        "description": f"GitHub {environment['DEPLOY_SHA']}",
+        "resources": {
+            "memory": "268435456",
+            "cores": "1",
+            "coreFraction": "100",
+        },
+        "executionTimeout": "10s",
+        "serviceAccountId": environment["YC_RUNTIME_SERVICE_ACCOUNT_ID"],
+        "imageSpec": {
+            "imageUrl": environment["IMAGE_URL"],
+            "environment": {"APP_ENV": "prod"},
+        },
+        "concurrency": "8",
+        "provisionPolicy": {"minInstances": "0"},
+        "scalingPolicy": {
+            "zoneInstancesLimit": "1",
+            "zoneRequestsLimit": "50",
+        },
+        "runtime": {"http": {}},
+    }
+
+
+def masked(text: str) -> str:
+    return SECRET_PATTERN.sub("***", text)[:2000]
+
+
+def request_json(
+    url: str,
+    *,
+    token: str,
+    method: str = "GET",
+    payload: dict[str, object] | None = None,
+) -> dict[str, object]:
+    data = json.dumps(payload).encode() if payload is not None else None
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        response_text = exc.read(2000).decode("utf-8", errors="replace")
+        raise RuntimeError(f"Yandex Cloud API HTTP {exc.code}: {masked(response_text)}") from exc
+
+
+def wait_for_operation(operation: dict[str, object], *, token: str) -> None:
+    operation_id = str(operation["id"])
+    current = operation
+    for _ in range(60):
+        if current.get("error"):
+            error = current["error"]
+            raise RuntimeError(f"Yandex Cloud operation failed: {masked(json.dumps(error))}")
+        if current.get("done"):
+            print(f"Serverless revision deployed; operation {operation_id}")
+            return
+        time.sleep(2)
+        encoded_id = urllib.parse.quote(operation_id, safe="")
+        current = request_json(OPERATION_URL.format(encoded_id), token=token)
+    raise TimeoutError(f"Yandex Cloud operation {operation_id} did not finish in 120 seconds")
+
+
+def main() -> None:
+    token = os.environ["IAM_TOKEN"]
+    operation = request_json(
+        DEPLOY_URL,
+        token=token,
+        method="POST",
+        payload=build_payload(os.environ),
+    )
+    wait_for_operation(operation, token=token)
+
+
+if __name__ == "__main__":
+    main()
