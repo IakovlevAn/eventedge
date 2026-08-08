@@ -28,7 +28,7 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-eventedge = ["static/*", "static/assets/*"]
+eventedge = ["static/*", "static/assets/*", "static/brands/*"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

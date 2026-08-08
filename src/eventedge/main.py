@@ -23,6 +23,12 @@ from eventedge.collectors import (
     is_moex_equity_title,
 )
 from eventedge.llm import analyzer_from_environment
+from eventedge.market import (
+    InstrumentNotFoundError,
+    MarketDataUnavailableError,
+    MoexMarketDataClient,
+    scenario_range,
+)
 from eventedge.storage import (
     IdempotencyConflictError,
     MemoryNewsRepository,
@@ -115,6 +121,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.state.news_repository = repository_from_environment(os.environ)
+app.state.market_data_client = MoexMarketDataClient()
 app.state.collectors = {
     "cbr_press": collect_cbr_press,
     # Keep the current trigger payload backward compatible while widening the
@@ -482,9 +489,95 @@ async def get_signal(
     return JSONResponse(content={"data": data}, headers={"ETag": etag})
 
 
+@app.get("/v1/instruments/{ticker}/snapshot", tags=["Instruments"])
+async def get_instrument_snapshot(
+    request: Request,
+    ticker: str,
+    if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
+) -> Response:
+    normalized_ticker = ticker.upper()
+    if not re.fullmatch(r"[A-Z0-9]{1,12}", normalized_ticker):
+        return problem_response(
+            request,
+            status=400,
+            code="INVALID_PARAMETER",
+            title="Invalid instrument ticker",
+            detail="ticker must contain only uppercase Latin letters and digits.",
+        )
+
+    market_data_client: MoexMarketDataClient = request.app.state.market_data_client
+    try:
+        market_snapshot = await market_data_client.snapshot(normalized_ticker)
+    except InstrumentNotFoundError:
+        return problem_response(
+            request,
+            status=404,
+            code="INSTRUMENT_NOT_FOUND",
+            title="Instrument not found",
+            detail="The instrument is not available on the MOEX TQBR board.",
+        )
+    except MarketDataUnavailableError:
+        return problem_response(
+            request,
+            status=503,
+            code="MARKET_DATA_UNAVAILABLE",
+            title="Market data is unavailable",
+            detail="The MOEX ISS market-data source did not return a usable snapshot.",
+        )
+
+    repository: NewsRepository = request.app.state.news_repository
+    signals = await repository.list_signals(
+        ticker=normalized_ticker,
+        directions=None,
+        status="active",
+        min_confidence=None,
+        limit=1,
+    )
+    active_signal = signals[0] if signals else None
+    scenario = None
+    if active_signal is not None:
+        scenario = scenario_range(
+            market_snapshot,
+            direction=active_signal.direction,
+            score=active_signal.score,
+            confidence=active_signal.confidence,
+            horizon_value=active_signal.horizon_value,
+            horizon_unit=active_signal.horizon_unit,
+        )
+
+    market = {
+        key: value
+        for key, value in market_snapshot.items()
+        if key not in {"ticker", "name"}
+    }
+    data = {
+        "ticker": normalized_ticker,
+        "name": market_snapshot["name"],
+        "as_of": market_snapshot["observed_at"],
+        "market": market,
+        "scenario": scenario,
+        "active_signal": active_signal.as_api_dict() if active_signal else None,
+        "recent_events": [],
+    }
+    etag = f'"{canonical_payload_hash(data)[:24]}"'
+    if if_none_match == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return JSONResponse(content={"data": data}, headers={"ETag": etag})
+
+
 STATIC_DIR = Path(__file__).with_name("static")
 if STATIC_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="web-assets")
+    if (STATIC_DIR / "brands").is_dir():
+        app.mount("/brands", StaticFiles(directory=STATIC_DIR / "brands"), name="brand-assets")
+
+    @app.get("/favicon.png", include_in_schema=False)
+    async def favicon() -> FileResponse:
+        return FileResponse(STATIC_DIR / "favicon.png")
+
+    @app.get("/apple-touch-icon.png", include_in_schema=False)
+    async def apple_touch_icon() -> FileResponse:
+        return FileResponse(STATIC_DIR / "apple-touch-icon.png")
 
     @app.get("/", include_in_schema=False)
     async def web_app() -> FileResponse:

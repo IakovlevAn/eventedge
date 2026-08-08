@@ -32,6 +32,44 @@ paths:
         type: serverless_containers
         container_id: __API_CONTAINER_ID__
         service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /brands/{asset}:
+    get:
+      operationId: getCompanyBrandAsset
+      parameters:
+        - name: asset
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Local company logo.
+        '404':
+          description: Asset not found.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /favicon.png:
+    get:
+      operationId: getFavicon
+      responses:
+        '200':
+          description: EventEdge favicon.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /apple-touch-icon.png:
+    get:
+      operationId: getAppleTouchIcon
+      responses:
+        '200':
+          description: EventEdge touch icon.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
   /health/live:
     get:
       operationId: getLiveness
@@ -112,6 +150,32 @@ paths:
           description: News list with related signals.
         '400':
           description: Invalid request.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /v1/instruments/{ticker}/snapshot:
+    get:
+      operationId: getInstrumentSnapshot
+      parameters:
+        - name: ticker
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: If-None-Match
+          in: header
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current MOEX instrument snapshot and scenario range.
+        '304':
+          description: Cached representation is current.
+        '404':
+          description: Instrument not found.
+        '503':
+          description: Market-data source is unavailable.
       x-yc-apigateway-integration:
         type: serverless_containers
         container_id: __API_CONTAINER_ID__
