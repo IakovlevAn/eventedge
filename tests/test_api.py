@@ -252,3 +252,50 @@ def test_instrument_snapshot_exposes_market_data_and_etag() -> None:
     assert response.json()["data"]["market"]["last_price"] == "283.65"
     assert response.json()["data"]["market"]["source"]["name"] == "MOEX ISS"
     assert cached.status_code == 304
+
+
+def test_instrument_snapshot_does_not_revive_hidden_exchange_noise() -> None:
+    noisy_news = {
+        **NEWS_PAYLOAD,
+        "source_id": "moex_news",
+        "external_id": "moex-hidden-ydex-001",
+        "title": "О начале торгов ценными бумагами YDEX",
+        "content": "Механическое уведомление биржевого контура по YDEX.",
+    }
+    accepted = client.post(
+        "/v1/internal/news",
+        json=noisy_news,
+        headers={"Idempotency-Key": "moex-hidden-ydex-001"},
+    )
+    assert accepted.status_code == 202
+
+    original = app.state.market_data_client
+
+    class FakeMarketDataClient:
+        async def snapshot(self, ticker: str) -> dict[str, object]:
+            return {
+                "ticker": ticker,
+                "name": "Яндекс",
+                "last_price": "3995.5",
+                "currency": "RUB",
+                "observed_at": "2026-08-08T16:00:08Z",
+                "daily_change_pct": 0.41,
+                "volume_shares": 10,
+                "value_rub": 1_000.0,
+                "lot_size": 1,
+                "liquidity_status": "limited",
+                "daily_volatility_pct": 2.0,
+                "annualized_volatility_pct": 31.75,
+                "candles": [],
+                "source": {"name": "MOEX ISS", "url": "https://iss.moex.com/iss/"},
+            }
+
+    app.state.market_data_client = FakeMarketDataClient()
+    try:
+        response = client.get("/v1/instruments/YDEX/snapshot")
+    finally:
+        app.state.market_data_client = original
+
+    assert response.status_code == 200
+    assert response.json()["data"]["active_signal"] is None
+    assert response.json()["data"]["scenario"] is None

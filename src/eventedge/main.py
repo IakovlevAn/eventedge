@@ -531,9 +531,18 @@ async def get_instrument_snapshot(
         directions=None,
         status="active",
         min_confidence=None,
-        limit=1,
+        limit=1000,
     )
-    active_signal = signals[0] if signals else None
+    news = await repository.list_news(source_id=None, limit=1000)
+    hidden_news_ids = {
+        item.id
+        for item in news
+        if item.source_id == "moex_news" and not is_moex_equity_title(item.title)
+    }
+    active_signal = next(
+        (signal for signal in signals if signal.news_id not in hidden_news_ids),
+        None,
+    )
     scenario = None
     if active_signal is not None:
         scenario = scenario_range(
