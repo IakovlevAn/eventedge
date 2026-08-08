@@ -37,6 +37,41 @@ def test_invalid_request_id_is_replaced() -> None:
     assert response.headers["X-Request-Id"].startswith("req_")
 
 
+def test_timer_event_dispatches_private_collector() -> None:
+    original = app.state.collectors["cbr_press"]
+
+    async def fake_collector(repository: object) -> dict[str, int]:
+        return {"fetched": 2, "accepted": 1, "replayed": 1}
+
+    app.state.collectors["cbr_press"] = fake_collector
+    try:
+        response = client.post(
+            "/",
+            json={
+                "messages": [
+                    {
+                        "event_metadata": {
+                            "event_type": (
+                                "yandex.cloud.events.serverless.triggers.TimerMessage"
+                            )
+                        },
+                        "details": {"payload": "cbr_press"},
+                    }
+                ]
+            },
+        )
+    finally:
+        app.state.collectors["cbr_press"] = original
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "collectors": {
+            "cbr_press": {"fetched": 2, "accepted": 1, "replayed": 1}
+        },
+    }
+
+
 def test_signal_list_has_contract_shape_and_etag() -> None:
     response = client.get("/v1/signals", params={"ticker": "SBER", "limit": 10})
 

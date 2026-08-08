@@ -18,6 +18,7 @@ from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from eventedge import __version__
+from eventedge.collectors import collect_cbr_press
 from eventedge.storage import (
     IdempotencyConflictError,
     MemoryNewsRepository,
@@ -60,6 +61,23 @@ class NewsIngestRequest(BaseModel):
         return value
 
 
+class TimerEventMetadata(BaseModel):
+    event_type: Literal["yandex.cloud.events.serverless.triggers.TimerMessage"]
+
+
+class TimerDetails(BaseModel):
+    payload: Annotated[str, Field(min_length=1, max_length=4096)]
+
+
+class TimerMessage(BaseModel):
+    event_metadata: TimerEventMetadata
+    details: TimerDetails
+
+
+class TimerEnvelope(BaseModel):
+    messages: Annotated[list[TimerMessage], Field(min_length=1, max_length=100)]
+
+
 def repository_from_environment(environment: Mapping[str, str]) -> NewsRepository:
     endpoint = environment.get("YDB_ENDPOINT")
     database = environment.get("YDB_DATABASE")
@@ -88,6 +106,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.state.news_repository = repository_from_environment(os.environ)
+app.state.collectors = {"cbr_press": collect_cbr_press}
 
 
 def utc_now() -> str:
@@ -204,6 +223,27 @@ async def readiness(request: Request) -> Response:
             detail="The structured data store is not ready.",
         )
     return JSONResponse(health_payload())
+
+
+@app.post("/", include_in_schema=False)
+async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONResponse:
+    repository: NewsRepository = request.app.state.news_repository
+    collectors = request.app.state.collectors
+    results: dict[str, dict[str, int]] = {}
+    for collector_name in dict.fromkeys(
+        message.details.payload for message in envelope.messages
+    ):
+        collector = collectors.get(collector_name)
+        if collector is None:
+            return problem_response(
+                request,
+                status=400,
+                code="UNKNOWN_COLLECTOR",
+                title="Unknown collector",
+                detail=f"Collector {collector_name!r} is not configured.",
+            )
+        results[collector_name] = await collector(repository)
+    return JSONResponse({"status": "ok", "collectors": results})
 
 
 @app.post("/v1/internal/news", tags=["Internal ingestion"], status_code=202)
