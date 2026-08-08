@@ -150,34 +150,39 @@ class YdbNewsRepository:
         database: str,
         credentials: ydb.Credentials | None = None,
     ) -> None:
-        credentials = credentials or ydb.iam.MetadataUrlCredentials()
-        config = ydb.DriverConfig(
-            endpoint=endpoint,
-            database=database,
-            credentials=credentials,
-            root_certificates=ydb.load_ydb_root_certificate(),
-        )
-        self._driver = ydb.aio.Driver(config)
+        self._endpoint = endpoint
+        self._database = database
+        self._credentials = credentials or ydb.iam.MetadataUrlCredentials()
+        self._driver: ydb.aio.Driver | None = None
         self._pool: ydb.aio.QuerySessionPool | None = None
 
     async def start(self) -> None:
         try:
-            await self._driver.wait(timeout=10, fail_fast=True)
+            config = ydb.DriverConfig(
+                endpoint=self._endpoint,
+                database=self._database,
+                credentials=self._credentials,
+                root_certificates=ydb.load_ydb_root_certificate(),
+            )
+            self._driver = ydb.aio.Driver(config)
+            await self._driver.wait(timeout=15, fail_fast=True)
             self._pool = ydb.aio.QuerySessionPool(self._driver, size=2)
             for statement in SCHEMA_STATEMENTS:
                 await self._pool.execute_with_retries(statement)
-        except Exception:
-            if self._pool is not None:
-                await self._pool.stop()
-                self._pool = None
-            await self._driver.stop(timeout=5)
+        except (Exception, asyncio.CancelledError):
+            await self._close()
             raise
 
     async def stop(self) -> None:
+        await self._close()
+
+    async def _close(self) -> None:
         if self._pool is not None:
             await self._pool.stop()
             self._pool = None
-        await self._driver.stop(timeout=5)
+        if self._driver is not None:
+            await self._driver.stop(timeout=5)
+            self._driver = None
 
     async def ready(self) -> bool:
         pool = self._require_pool()

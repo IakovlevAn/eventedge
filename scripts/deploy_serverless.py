@@ -25,7 +25,7 @@ def build_payload(environment: Mapping[str, str]) -> dict[str, object]:
             "cores": "1",
             "coreFraction": "100",
         },
-        "executionTimeout": "10s",
+        "executionTimeout": "30s",
         "serviceAccountId": environment["YC_RUNTIME_SERVICE_ACCOUNT_ID"],
         "imageSpec": {
             "imageUrl": environment["IMAGE_URL"],
