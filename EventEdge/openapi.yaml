@@ -10,7 +10,7 @@ info:
   contact:
     name: EventEdge team
 servers:
-  - url: https://api.eventedge.example/v1
+  - url: https://api.eventedge.example
     description: Production placeholder
 
 tags:
@@ -27,7 +27,7 @@ security:
   - bearerAuth: []
 
 paths:
-  /signals:
+  /v1/signals:
     get:
       tags: [Signals]
       summary: List signal revisions
@@ -86,7 +86,7 @@ paths:
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
-  /signals/{signal_id}:
+  /v1/signals/{signal_id}:
     parameters:
       - $ref: '#/components/parameters/SignalId'
     get:
@@ -116,7 +116,7 @@ paths:
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
-  /signals/{signal_id}/feedback:
+  /v1/signals/{signal_id}/feedback:
     parameters:
       - $ref: '#/components/parameters/SignalId'
     post:
@@ -155,7 +155,7 @@ paths:
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
-  /events:
+  /v1/events:
     get:
       tags: [Events]
       summary: List normalized news events
@@ -198,7 +198,7 @@ paths:
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
-  /events/{event_id}:
+  /v1/events/{event_id}:
     parameters:
       - $ref: '#/components/parameters/EventId'
     get:
@@ -222,7 +222,7 @@ paths:
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
-  /instruments/{ticker}/snapshot:
+  /v1/instruments/{ticker}/snapshot:
     parameters:
       - $ref: '#/components/parameters/TickerPath'
     get:
@@ -252,7 +252,7 @@ paths:
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
-  /internal/news:
+  /v1/internal/news:
     post:
       tags: [Internal ingestion]
       summary: Submit one source document for asynchronous processing
@@ -296,7 +296,7 @@ paths:
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
-  /jobs/{job_id}:
+  /v1/jobs/{job_id}:
     parameters:
       - $ref: '#/components/parameters/JobId'
     get:
@@ -325,7 +325,7 @@ paths:
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
-  /admin/sources:
+  /v1/admin/sources:
     get:
       tags: [Admin]
       summary: List configured news sources
@@ -398,7 +398,7 @@ paths:
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
-  /admin/sources/{source_id}:
+  /v1/admin/sources/{source_id}:
     parameters:
       - $ref: '#/components/parameters/SourceId'
     get:
@@ -467,7 +467,7 @@ paths:
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
-  /admin/sources/{source_id}/validate:
+  /v1/admin/sources/{source_id}/validate:
     parameters:
       - $ref: '#/components/parameters/SourceId'
     post:
@@ -503,7 +503,7 @@ paths:
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
-  /admin/scoring-config:
+  /v1/admin/scoring-config:
     get:
       tags: [Admin]
       summary: Get the active scoring configuration

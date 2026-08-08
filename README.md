@@ -1,0 +1,17 @@
+# EventEdge
+
+EventEdge — API-first платформа краткосрочных сигналов по российским акциям.
+
+- [Понятное описание продукта](EventEdge/README.md)
+- [Технический дизайн](EventEdge/TECHNICAL_DESIGN.md)
+- [OpenAPI-контракт](EventEdge/openapi.yaml)
+- [Подключение Yandex Cloud](EventEdge/CLOUD_SETUP.md)
+
+## Локальная проверка
+
+```bash
+uv sync --locked --dev
+uv run ruff check .
+uv run pytest
+uv run python scripts/validate_openapi.py
+```

@@ -1,0 +1,133 @@
+name: Deploy production
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
+      IMAGE_URL: cr.yandex/${{ vars.YC_REGISTRY_ID }}/eventedge-api:${{ github.event.workflow_run.head_sha }}
+      YC_CONTAINER_ID: ${{ vars.YC_CONTAINER_ID }}
+      YC_FOLDER_ID: ${{ vars.YC_FOLDER_ID }}
+      YC_RUNTIME_SERVICE_ACCOUNT_ID: ${{ vars.YC_RUNTIME_SERVICE_ACCOUNT_ID }}
+      EVENTEDGE_API_URL: ${{ vars.EVENTEDGE_API_URL }}
+    steps:
+      - name: Check out the tested main revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Request GitHub OIDC token
+        id: github-oidc
+        uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71 # v9.0.0
+        with:
+          script: |
+            const audience = `https://github.com/${context.repo.owner}`;
+            const token = await core.getIDToken(audience);
+            core.setSecret(token);
+            core.setOutput('token', token);
+
+      - name: Exchange OIDC token for Yandex Cloud IAM token
+        id: yandex-iam
+        env:
+          GITHUB_OIDC_TOKEN: ${{ steps.github-oidc.outputs.token }}
+          YC_SERVICE_ACCOUNT_ID: ${{ vars.YC_SERVICE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          response_file="${RUNNER_TEMP}/yc-token-response.json"
+          http_code="$(curl --silent --show-error \
+            --output "$response_file" \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+            --data-urlencode 'requested_token_type=urn:ietf:params:oauth:token-type:access_token' \
+            --data-urlencode "audience=${YC_SERVICE_ACCOUNT_ID}" \
+            --data-urlencode "subject_token=${GITHUB_OIDC_TOKEN}" \
+            --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:id_token' \
+            'https://auth.yandex.cloud/oauth/token')"
+
+          if [[ "$http_code" != "200" ]]; then
+            echo "Yandex Cloud token exchange failed with HTTP ${http_code}" >&2
+            jq -c 'del(.access_token, .refresh_token)' "$response_file" >&2
+            exit 1
+          fi
+
+          iam_token="$(jq -er '.access_token' "$response_file")"
+          echo "::add-mask::${iam_token}"
+          echo "token=${iam_token}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push immutable image
+        env:
+          IAM_TOKEN: ${{ steps.yandex-iam.outputs.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$IAM_TOKEN" | docker login --username iam --password-stdin cr.yandex
+          docker build --platform linux/amd64 --tag "$IMAGE_URL" .
+          docker push "$IMAGE_URL"
+
+      - name: Install Yandex Cloud CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --silent --show-error --location \
+            https://storage.yandexcloud.net/yandexcloud-yc/install.sh \
+            | bash -s -- -i "${RUNNER_TEMP}/yandex-cloud" -n
+          echo "${RUNNER_TEMP}/yandex-cloud/bin" >> "$GITHUB_PATH"
+
+      - name: Deploy budget-capped serverless revision
+        env:
+          YC_TOKEN: ${{ steps.yandex-iam.outputs.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          yc serverless container revision deploy \
+            --folder-id "$YC_FOLDER_ID" \
+            --container-id "$YC_CONTAINER_ID" \
+            --image "$IMAGE_URL" \
+            --service-account-id "$YC_RUNTIME_SERVICE_ACCOUNT_ID" \
+            --memory 256MB \
+            --cores 1 \
+            --core-fraction 100 \
+            --execution-timeout 10s \
+            --concurrency 8 \
+            --min-instances 0 \
+            --zone-instances-limit 1 \
+            --zone-requests-limit 50 \
+            --runtime http \
+            --environment APP_ENV=prod \
+            --description "GitHub ${DEPLOY_SHA}"
+
+      - name: Smoke test through API Gateway
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in {1..12}; do
+            if curl --fail --silent --show-error \
+              --max-time 10 \
+              "${EVENTEDGE_API_URL}/health/ready" \
+              | jq -e '.status == "ok"' >/dev/null; then
+              echo "Production API is ready"
+              exit 0
+            fi
+            echo "Waiting for production revision (${attempt}/12)"
+            sleep 5
+          done
+          echo "Production API did not become ready" >&2
+          exit 1
