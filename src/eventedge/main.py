@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import uuid
@@ -15,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.gzip import GZipMiddleware
 
 from eventedge import __version__
 from eventedge.collectors import (
@@ -33,7 +35,9 @@ from eventedge.storage import (
     IdempotencyConflictError,
     MemoryNewsRepository,
     NewsDocument,
+    NewsRecord,
     NewsRepository,
+    SignalRecord,
     YdbNewsRepository,
     canonical_payload_hash,
 )
@@ -41,6 +45,7 @@ from eventedge.storage import (
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 SIGNAL_ID_PATTERN = re.compile(r"^sig_[0-9A-HJKMNP-TV-Z]{26}$")
 JOB_ID_PATTERN = re.compile(r"^job_[0-9A-HJKMNP-TV-Z]{26}$")
+PUBLIC_HIDDEN_SOURCE_IDS = frozenset({"eventedge_smoke"})
 
 
 class NewsIngestRequest(BaseModel):
@@ -129,10 +134,29 @@ app.state.collectors = {
     "moex_news": collect_market_news,
     "market_news": collect_market_news,
 }
+app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=5)
 
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def public_news(items: list[NewsRecord]) -> list[NewsRecord]:
+    return [
+        item
+        for item in items
+        if item.source_id not in PUBLIC_HIDDEN_SOURCE_IDS
+        and (item.source_id != "moex_news" or is_moex_equity_title(item.title))
+    ]
+
+
+def hidden_news_ids(items: list[NewsRecord]) -> set[str]:
+    return {
+        item.id
+        for item in items
+        if item.source_id in PUBLIC_HIDDEN_SOURCE_IDS
+        or (item.source_id == "moex_news" and not is_moex_equity_title(item.title))
+    }
 
 
 def health_payload() -> dict[str, str]:
@@ -183,6 +207,10 @@ async def attach_request_id(request: Request, call_next):
     )
     response = await call_next(request)
     response.headers["X-Request-Id"] = request.state.request_id
+    if request.url.path.startswith("/assets/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif request.url.path.startswith(("/brands/", "/favicon", "/apple-touch-icon")):
+        response.headers["Cache-Control"] = "public, max-age=86400"
     return response
 
 
@@ -351,12 +379,9 @@ async def list_news(
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> JSONResponse:
     repository: NewsRepository = request.app.state.news_repository
-    news = await repository.list_news(source_id=source_id, limit=1000)
-    news = [
-        item
-        for item in news
-        if item.source_id != "moex_news" or is_moex_equity_title(item.title)
-    ][:limit]
+    stored_news = await repository.list_news(source_id=source_id, limit=1000)
+    visible_news = public_news(stored_news)
+    news = visible_news[:limit]
     signals = await repository.list_signals(
         ticker=None,
         directions=None,
@@ -377,6 +402,21 @@ async def list_news(
                 "status": signal.status,
             }
         )
+    source_stats: dict[str, dict[str, object]] = {}
+    for item in visible_news:
+        stat = source_stats.setdefault(
+            item.source_id,
+            {
+                "source_id": item.source_id,
+                "count": 0,
+                "signal_count": 0,
+                "last_published_at": item.as_api_dict()["published_at"],
+            },
+        )
+        stat["count"] = int(stat["count"]) + 1
+        stat["signal_count"] = int(stat["signal_count"]) + len(
+            signals_by_news.get(item.id, [])
+        )
     data = []
     for item in news:
         record = item.as_api_dict()
@@ -385,7 +425,16 @@ async def list_news(
     return JSONResponse(
         content={
             "data": data,
-            "meta": {"limit": limit, "has_more": False, "next_cursor": None},
+            "meta": {
+                "limit": limit,
+                "total": len(visible_news),
+                "has_more": len(visible_news) > limit,
+                "next_cursor": None,
+                "sources": sorted(
+                    source_stats.values(),
+                    key=lambda item: (-int(item["count"]), str(item["source_id"])),
+                ),
+            },
         }
     )
 
@@ -427,12 +476,8 @@ async def list_signals(
         limit=1000,
     )
     news = await repository.list_news(source_id=None, limit=1000)
-    hidden_news_ids = {
-        item.id
-        for item in news
-        if item.source_id == "moex_news" and not is_moex_equity_title(item.title)
-    }
-    signals = [signal for signal in signals if signal.news_id not in hidden_news_ids][
+    hidden_ids = hidden_news_ids(news)
+    signals = [signal for signal in signals if signal.news_id not in hidden_ids][
         :limit
     ]
     data = [signal.as_api_dict() for signal in signals]
@@ -489,6 +534,111 @@ async def get_signal(
     return JSONResponse(content={"data": data}, headers={"ETag": etag})
 
 
+def instrument_data(
+    ticker: str,
+    market_snapshot: dict[str, object],
+    active_signal: SignalRecord | None,
+) -> dict[str, object]:
+    scenario = None
+    if active_signal is not None:
+        scenario = scenario_range(
+            market_snapshot,
+            direction=active_signal.direction,
+            score=active_signal.score,
+            confidence=active_signal.confidence,
+            horizon_value=active_signal.horizon_value,
+            horizon_unit=active_signal.horizon_unit,
+        )
+
+    market = {
+        key: value
+        for key, value in market_snapshot.items()
+        if key not in {"ticker", "name"}
+    }
+    return {
+        "ticker": ticker,
+        "name": market_snapshot["name"],
+        "as_of": market_snapshot["observed_at"],
+        "market": market,
+        "scenario": scenario,
+        "active_signal": active_signal.as_api_dict() if active_signal else None,
+        "recent_events": [],
+    }
+
+
+async def active_signals_by_ticker(repository: NewsRepository) -> dict[str, SignalRecord]:
+    signals, news = await asyncio.gather(
+        repository.list_signals(
+            ticker=None,
+            directions=None,
+            status="active",
+            min_confidence=None,
+            limit=1000,
+        ),
+        repository.list_news(source_id=None, limit=1000),
+    )
+    hidden_ids = hidden_news_ids(news)
+    result: dict[str, SignalRecord] = {}
+    for signal in signals:
+        if signal.news_id not in hidden_ids and signal.ticker not in result:
+            result[signal.ticker] = signal
+    return result
+
+
+@app.get("/v1/instruments/snapshots", tags=["Instruments"])
+async def list_instrument_snapshots(
+    request: Request,
+    tickers: Annotated[str, Query(min_length=1, max_length=260)],
+) -> JSONResponse:
+    normalized = list(
+        dict.fromkeys(part.strip().upper() for part in tickers.split(",") if part.strip())
+    )
+    if not normalized or len(normalized) > 20 or any(
+        not re.fullmatch(r"[A-Z0-9]{1,12}", ticker) for ticker in normalized
+    ):
+        return problem_response(
+            request,
+            status=400,
+            code="INVALID_PARAMETER",
+            title="Invalid instrument tickers",
+            detail="tickers must contain 1 to 20 comma-separated MOEX tickers.",
+        )
+
+    repository: NewsRepository = request.app.state.news_repository
+    market_data_client: MoexMarketDataClient = request.app.state.market_data_client
+    active_by_ticker, market_results = await asyncio.gather(
+        active_signals_by_ticker(repository),
+        asyncio.gather(
+            *(market_data_client.snapshot(ticker) for ticker in normalized),
+            return_exceptions=True,
+        ),
+    )
+    data = []
+    errors = []
+    for ticker, result in zip(normalized, market_results, strict=True):
+        if isinstance(result, asyncio.CancelledError):
+            raise result
+        if isinstance(result, InstrumentNotFoundError):
+            errors.append({"ticker": ticker, "code": "INSTRUMENT_NOT_FOUND"})
+            continue
+        if isinstance(result, BaseException):
+            errors.append({"ticker": ticker, "code": "MARKET_DATA_UNAVAILABLE"})
+            continue
+        data.append(instrument_data(ticker, result, active_by_ticker.get(ticker)))
+
+    return JSONResponse(
+        content={
+            "data": data,
+            "errors": errors,
+            "meta": {
+                "requested": len(normalized),
+                "returned": len(data),
+                "refresh_after_seconds": 60,
+            },
+        }
+    )
+
+
 @app.get("/v1/instruments/{ticker}/snapshot", tags=["Instruments"])
 async def get_instrument_snapshot(
     request: Request,
@@ -526,48 +676,8 @@ async def get_instrument_snapshot(
         )
 
     repository: NewsRepository = request.app.state.news_repository
-    signals = await repository.list_signals(
-        ticker=normalized_ticker,
-        directions=None,
-        status="active",
-        min_confidence=None,
-        limit=1000,
-    )
-    news = await repository.list_news(source_id=None, limit=1000)
-    hidden_news_ids = {
-        item.id
-        for item in news
-        if item.source_id == "moex_news" and not is_moex_equity_title(item.title)
-    }
-    active_signal = next(
-        (signal for signal in signals if signal.news_id not in hidden_news_ids),
-        None,
-    )
-    scenario = None
-    if active_signal is not None:
-        scenario = scenario_range(
-            market_snapshot,
-            direction=active_signal.direction,
-            score=active_signal.score,
-            confidence=active_signal.confidence,
-            horizon_value=active_signal.horizon_value,
-            horizon_unit=active_signal.horizon_unit,
-        )
-
-    market = {
-        key: value
-        for key, value in market_snapshot.items()
-        if key not in {"ticker", "name"}
-    }
-    data = {
-        "ticker": normalized_ticker,
-        "name": market_snapshot["name"],
-        "as_of": market_snapshot["observed_at"],
-        "market": market,
-        "scenario": scenario,
-        "active_signal": active_signal.as_api_dict() if active_signal else None,
-        "recent_events": [],
-    }
+    active_signal = (await active_signals_by_ticker(repository)).get(normalized_ticker)
+    data = instrument_data(normalized_ticker, market_snapshot, active_signal)
     etag = f'"{canonical_payload_hash(data)[:24]}"'
     if if_none_match == etag:
         return Response(status_code=304, headers={"ETag": etag})

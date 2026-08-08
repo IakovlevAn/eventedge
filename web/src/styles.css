@@ -4157,3 +4157,140 @@ kbd {
   .scenario-method > p { grid-column: 1; }
   .source-method__grid { grid-template-columns: 1fr; }
 }
+
+/* P0.1 — price, volume and news events share one readable timeline. */
+.price-chart-shell {
+  margin: 14px 0 2px;
+  padding: 10px 12px 8px;
+  border: 1px solid #242832;
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 12% 5%, rgba(127, 118, 166, 0.08), transparent 32%),
+    #0d0f13;
+}
+
+.price-chart-shell .price-chart {
+  height: 286px;
+  margin: 0;
+}
+
+.price-chart .chart-grid {
+  stroke: rgba(255, 255, 255, 0.055);
+  stroke-dasharray: 2 5;
+}
+
+.price-chart .chart-axis-label,
+.price-chart .chart-date-label {
+  fill: #606773;
+  font-size: 8px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.price-chart .chart-area {
+  fill: rgba(155, 149, 198, 0.06);
+}
+
+.price-chart--up .chart-area { fill: rgba(105, 201, 155, 0.055); }
+.price-chart--down .chart-area { fill: rgba(222, 116, 133, 0.055); }
+
+.price-chart .chart-price-line {
+  fill: none;
+  stroke: #9b95c6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 5px 12px rgba(155, 149, 198, 0.22));
+}
+
+.price-chart--up .chart-price-line { stroke: #69c99b; filter: drop-shadow(0 5px 12px rgba(105, 201, 155, 0.2)); }
+.price-chart--down .chart-price-line { stroke: #de7485; filter: drop-shadow(0 5px 12px rgba(222, 116, 133, 0.2)); }
+
+.price-chart .chart-volume {
+  fill: rgba(126, 133, 148, 0.28);
+}
+
+.price-chart .chart-volume-base {
+  stroke: rgba(255, 255, 255, 0.08);
+}
+
+.chart-event {
+  cursor: pointer;
+  outline: none;
+}
+
+.chart-event line {
+  stroke: rgba(255, 255, 255, 0.16);
+  stroke-dasharray: 2 3;
+}
+
+.chart-event circle {
+  stroke: rgba(255, 255, 255, 0.54);
+  stroke-width: 1.2;
+  transition: filter 140ms ease, stroke-width 140ms ease;
+}
+
+.chart-event text {
+  fill: #0b0d10;
+  font-size: 7px;
+  font-weight: 800;
+  pointer-events: none;
+}
+
+.chart-event--up circle { fill: #69c99b; }
+.chart-event--down circle { fill: #de7485; }
+.chart-event--neutral circle { fill: #aaa4d2; }
+.chart-event:hover circle,
+.chart-event:focus-visible circle { stroke-width: 2.4; filter: brightness(1.16) drop-shadow(0 0 8px rgba(255, 255, 255, 0.2)); }
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding-top: 7px;
+  color: #656c78;
+  font-size: 7px;
+  border-top: 1px solid #22262e;
+}
+
+.chart-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.chart-legend i { display: inline-block; width: 13px; height: 2px; border-radius: 2px; background: #8f8aaa; }
+.chart-legend .legend-volume { height: 6px; background: #545a66; }
+.chart-legend .legend-event { width: 7px; height: 7px; border-radius: 50%; background: #69c99b; }
+
+.market-source {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.market-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.market-refresh i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #69c99b;
+  box-shadow: 0 0 0 3px rgba(105, 201, 155, 0.07);
+}
+
+.market-refresh--loading i { animation: event-pulse 1.2s ease-in-out infinite; }
+.market-refresh--error i,
+.market-strip i.is-error { background: #de7485; box-shadow: 0 0 0 3px rgba(222, 116, 133, 0.07); }
+
+@keyframes event-pulse {
+  50% { opacity: 0.35; transform: scale(0.72); }
+}
+
+@media (max-width: 720px) {
+  .price-chart-shell { padding: 7px 8px; }
+  .price-chart-shell .price-chart { height: 230px; }
+  .chart-legend { gap: 9px; }
+  .market-source { align-items: flex-start; flex-direction: column; }
+}

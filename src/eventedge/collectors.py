@@ -32,7 +32,6 @@ class RssFeedConfig:
     url: str
     language: str = "ru"
     max_items: int = 20
-    max_accepted: int | None = None
     timeout_seconds: float = 15
 
 
@@ -144,21 +143,40 @@ async def collect_rss_feed(
     *,
     fetcher: Callable[[str, float], bytes] = fetch_rss,
     item_filter: Callable[[RssItem], bool] | None = None,
+    signal_filter: Callable[[RssItem], bool] | None = None,
 ) -> dict[str, int]:
     feed = await asyncio.to_thread(fetcher, config.url, config.timeout_seconds)
     items = parse_rss(feed, max_items=config.max_items)
     accepted = 0
     replayed = 0
     matched = 0
+    signal_candidates = 0
 
     for item in items:
         if item_filter is not None and not item_filter(item):
             continue
         matched += 1
+        generate_signals = signal_filter(item) if signal_filter is not None else True
+        if generate_signals:
+            signal_candidates += 1
+        features = RuleBasedNewsExtractor().extract(
+            NewsAnalysisInput(
+                source_id=config.source_id,
+                title=item.title,
+                content=item.content,
+                language=config.language,
+            )
+        )
         source_metadata = {
             "collector": "rss",
             "feed_url": config.url,
             "categories": list(item.categories),
+            "signal_candidate": generate_signals,
+            "tickers": [
+                instrument.ticker
+                for instrument in features.instruments
+                if instrument.relevance >= 0.6 and instrument.ticker != "MOEX"
+            ],
         }
         hash_payload = {
             "source_id": config.source_id,
@@ -187,17 +205,20 @@ async def collect_rss_feed(
             "ing_",
             f"{config.source_id}\x00{item.external_id}\x00{payload_hash}",
         )
-        result = await repository.ingest(idempotency_key, document)
+        result = await repository.ingest(
+            idempotency_key,
+            document,
+            generate_signals=generate_signals,
+        )
         if result.replayed:
             replayed += 1
         else:
             accepted += 1
-            if config.max_accepted is not None and accepted >= config.max_accepted:
-                break
 
     return {
         "fetched": len(items),
         "matched": matched,
+        "signal_candidates": signal_candidates,
         "accepted": accepted,
         "replayed": replayed,
     }
@@ -207,7 +228,6 @@ CBR_PRESS_FEED = RssFeedConfig(
     source_id="cbr_press",
     url="https://www.cbr.ru/rss/RssPress",
     max_items=10,
-    max_accepted=3,
 )
 
 CBR_MARKET_MARKERS = (
@@ -236,6 +256,7 @@ async def collect_cbr_press(repository: NewsRepository) -> dict[str, int]:
         repository,
         CBR_PRESS_FEED,
         item_filter=is_cbr_market_news,
+        signal_filter=lambda item: False,
     )
 
 
@@ -243,7 +264,6 @@ MOEX_NEWS_FEED = RssFeedConfig(
     source_id="moex_news",
     url="https://www.moex.com/export/news.aspx?cat=100",
     max_items=1000,
-    max_accepted=3,
     timeout_seconds=20,
 )
 
@@ -379,6 +399,27 @@ def is_market_signal_candidate(item: RssItem) -> bool:
     return True
 
 
+def is_company_news_candidate(item: RssItem) -> bool:
+    """Keep readable company news even when it is not strong enough for a signal."""
+    if not is_moex_equity_title(item.title):
+        return False
+    normalized_title = item.title.casefold()
+    if any(marker in normalized_title for marker in MARKET_NOISE_TITLE_MARKERS):
+        return False
+    features = RuleBasedNewsExtractor().extract(
+        NewsAnalysisInput(
+            source_id="market_news",
+            title=item.title,
+            content=item.content,
+            language="ru",
+        )
+    )
+    return any(
+        instrument.relevance >= 0.6 and instrument.ticker != "MOEX"
+        for instrument in features.instruments
+    )
+
+
 GOOGLE_TRUSTED_PUBLISHERS = (
     "бкс экспресс",
     "интерфакс",
@@ -405,9 +446,16 @@ def is_google_market_signal_candidate(item: RssItem) -> bool:
     return any(publisher in normalized_title for publisher in GOOGLE_TRUSTED_PUBLISHERS)
 
 
+def is_google_company_news_candidate(item: RssItem) -> bool:
+    if not is_company_news_candidate(item):
+        return False
+    normalized_title = item.title.casefold()
+    return any(publisher in normalized_title for publisher in GOOGLE_TRUSTED_PUBLISHERS)
+
+
 def google_news_search_url(query: str) -> str:
     return "https://news.google.com/rss/search?" + urllib.parse.urlencode(
-        {"q": f"({query}) when:7d", "hl": "ru", "gl": "RU", "ceid": "RU:ru"}
+        {"q": f"({query}) when:30d", "hl": "ru", "gl": "RU", "ceid": "RU:ru"}
     )
 
 
@@ -416,7 +464,6 @@ MARKET_NEWS_FEEDS = (
         source_id="google_news",
         url=google_news_search_url("Сбербанк OR ВТБ"),
         max_items=100,
-        max_accepted=2,
     ),
     RssFeedConfig(
         source_id="google_news",
@@ -424,7 +471,6 @@ MARKET_NEWS_FEEDS = (
             "Лукойл OR Газпром OR Роснефть OR Новатэк OR Татнефть"
         ),
         max_items=100,
-        max_accepted=2,
     ),
     RssFeedConfig(
         source_id="google_news",
@@ -432,25 +478,21 @@ MARKET_NEWS_FEEDS = (
             "Яндекс OR Норникель OR Магнит OR Полюс OR Северсталь OR АЛРОСА"
         ),
         max_items=100,
-        max_accepted=2,
     ),
     RssFeedConfig(
         source_id="interfax",
         url="https://www.interfax.ru/rss",
         max_items=50,
-        max_accepted=3,
     ),
     RssFeedConfig(
         source_id="tass",
         url="https://tass.ru/rss/v2.xml",
         max_items=100,
-        max_accepted=3,
     ),
     RssFeedConfig(
         source_id="rbc",
         url="https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
         max_items=50,
-        max_accepted=3,
     ),
 )
 
@@ -468,6 +510,7 @@ async def collect_market_news(repository: NewsRepository) -> dict[str, int]:
     totals = {
         "fetched": 0,
         "matched": 0,
+        "signal_candidates": 0,
         "accepted": 0,
         "replayed": 0,
         "failed": 0,
@@ -478,6 +521,11 @@ async def collect_market_news(repository: NewsRepository) -> dict[str, int]:
                 repository,
                 config,
                 item_filter=(
+                    is_google_company_news_candidate
+                    if config.source_id == "google_news"
+                    else is_company_news_candidate
+                ),
+                signal_filter=(
                     is_google_market_signal_candidate
                     if config.source_id == "google_news"
                     else is_market_signal_candidate

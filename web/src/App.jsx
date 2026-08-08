@@ -409,12 +409,16 @@ function hydrateSignalWithMarket(signal, snapshot) {
     change: formatPct(snapshot.market.daily_change_pct),
     market: snapshot.market,
     scenario: snapshot.scenario,
-    series: (snapshot.market.candles || []).map((candle) => candle.close),
+    series: snapshot.market.candles || [],
   };
 }
 
 function newsFromApi(item, signalsById) {
   const related = item.related_signals?.[0];
+  const tickers = [...new Set([
+    ...(item.source_metadata?.tickers || []),
+    ...(related?.ticker ? [related.ticker] : []),
+  ])];
   const [company, sector] = related ? companyMeta[related.ticker] || [related.ticker, "Российский рынок"] : [];
   const signal = related ? signalsById.get(related.id) || {
     ...related,
@@ -437,6 +441,12 @@ function newsFromApi(item, signalsById) {
     content: item.content,
     url: item.url,
     signal,
+    tickers,
+    companySignal: !signal && tickers[0] ? {
+      ticker: tickers[0],
+      company: companyMeta[tickers[0]]?.[0] || tickers[0],
+      sector: companyMeta[tickers[0]]?.[1] || "Российский рынок",
+    } : null,
   };
 }
 
@@ -455,8 +465,10 @@ function titleTokens(title) {
 }
 
 function sameNewsEvent(left, right) {
-  if (!left.signal || !right.signal) return false;
-  if (left.signal.ticker !== right.signal.ticker || left.signal.direction !== right.signal.direction) return false;
+  const leftTicker = left.signal?.ticker || left.tickers?.[0];
+  const rightTicker = right.signal?.ticker || right.tickers?.[0];
+  if (leftTicker && rightTicker && leftTicker !== rightTicker) return false;
+  if (left.signal && right.signal && left.signal.direction !== right.signal.direction) return false;
   if (Math.abs(new Date(left.publishedAt) - new Date(right.publishedAt)) > 48 * 60 * 60 * 1000) return false;
   const leftTokens = titleTokens(left.title);
   const rightTokens = titleTokens(right.title);
@@ -478,6 +490,8 @@ function groupNewsEvents(items) {
       });
       return;
     }
+    if (!group.signal && item.signal) group.signal = item.signal;
+    group.tickers = [...new Set([...(group.tickers || []), ...(item.tickers || [])])];
     group.corroborations.push(item);
     if (!group.sources.some((source) => source.name === item.source && source.url === item.url)) {
       group.sources.push({ id: item.sourceId, name: item.source, url: item.url, publishedAt: item.publishedAt });
@@ -540,25 +554,90 @@ function EventBubbles({ events = [], onOpen, compact = false }) {
   );
 }
 
-function PriceChart({ series = [], direction = "neutral" }) {
+function PriceChart({ series = [], direction = "neutral", events = [], onOpen }) {
   if (series.length < 2) return <div className="price-chart__empty">Недостаточно свечей MOEX</div>;
-  const width = 640;
-  const height = 180;
-  const min = Math.min(...series);
-  const max = Math.max(...series);
+  const candles = series.map((item, index) => typeof item === "number" ? {
+    begin: new Date(Date.now() - (series.length - index) * 86400000).toISOString(),
+    open: item,
+    close: item,
+    high: item,
+    low: item,
+    volume_shares: 0,
+  } : item);
+  const width = 760;
+  const height = 286;
+  const plotTop = 18;
+  const plotBottom = 202;
+  const volumeTop = 222;
+  const volumeBottom = 258;
+  const labelRight = 56;
+  const plotWidth = width - labelRight;
+  const lows = candles.map((candle) => Number(candle.low ?? candle.close));
+  const highs = candles.map((candle) => Number(candle.high ?? candle.close));
+  const min = Math.min(...lows);
+  const max = Math.max(...highs);
   const spread = Math.max(max - min, 0.01);
-  const points = series.map((value, index) => {
-    const x = (index / (series.length - 1)) * width;
-    const y = height - ((value - min) / spread) * (height - 20) - 10;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(" ");
+  const volumes = candles.map((candle) => Number(candle.volume_shares || 0));
+  const maxVolume = Math.max(...volumes, 1);
+  const xForIndex = (index) => (index / (candles.length - 1)) * plotWidth;
+  const yForPrice = (value) => plotBottom - ((Number(value) - min) / spread) * (plotBottom - plotTop);
+  const points = candles.map((candle, index) => `${xForIndex(index).toFixed(1)},${yForPrice(candle.close).toFixed(1)}`).join(" ");
+  const startTime = new Date(candles[0].begin).getTime();
+  const endTime = new Date(candles[candles.length - 1].begin).getTime();
+  const timeSpread = Math.max(endTime - startTime, 1);
+  const eventMarkers = events
+    .filter((event) => event.publishedAt)
+    .slice(0, 10)
+    .map((event, index) => {
+      const timestamp = new Date(event.publishedAt).getTime();
+      const ratio = Math.min(1, Math.max(0, (timestamp - startTime) / timeSpread));
+      const candleIndex = Math.min(candles.length - 1, Math.max(0, Math.round(ratio * (candles.length - 1))));
+      const impact = Math.min(Math.abs(event.signal?.score || 0), 100);
+      return {
+        event,
+        x: xForIndex(candleIndex),
+        y: Math.max(plotTop + 10, yForPrice(candles[candleIndex].close) - 16 - (index % 2) * 8),
+        radius: 6 + impact * 0.055 + Math.min((event.sourceCount || 1) - 1, 3),
+        direction: event.signal?.direction || "neutral",
+      };
+    });
+  const tickIndexes = [0, Math.floor((candles.length - 1) / 2), candles.length - 1];
   return (
-    <svg className={`price-chart price-chart--${direction}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Динамика цены по дневным свечам MOEX">
-      <line x1="0" y1="45" x2={width} y2="45" />
-      <line x1="0" y1="90" x2={width} y2="90" />
-      <line x1="0" y1="135" x2={width} y2="135" />
-      <polyline points={points} />
-    </svg>
+    <div className="price-chart-shell">
+      <svg className={`price-chart price-chart--${direction}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Цена, объём и события по дневным свечам MOEX">
+        {[0, 0.5, 1].map((ratio) => {
+          const y = plotTop + ratio * (plotBottom - plotTop);
+          const price = max - ratio * spread;
+          return <g key={ratio}><line className="chart-grid" x1="0" y1={y} x2={plotWidth} y2={y} /><text className="chart-axis-label" x={plotWidth + 8} y={y + 3}>{new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 }).format(price)}</text></g>;
+        })}
+        <polygon className="chart-area" points={`0,${plotBottom} ${points} ${plotWidth},${plotBottom}`} />
+        <polyline className="chart-price-line" points={points} />
+        {candles.map((candle, index) => {
+          const barWidth = Math.max(2, plotWidth / candles.length - 3);
+          const barHeight = (Number(candle.volume_shares || 0) / maxVolume) * (volumeBottom - volumeTop);
+          return <rect className="chart-volume" key={candle.begin || index} x={xForIndex(index) - barWidth / 2} y={volumeBottom - barHeight} width={barWidth} height={barHeight} rx="1" />;
+        })}
+        <line className="chart-volume-base" x1="0" y1={volumeBottom} x2={plotWidth} y2={volumeBottom} />
+        {tickIndexes.map((index) => <text className="chart-date-label" key={index} x={xForIndex(index)} y="279" textAnchor={index === 0 ? "start" : index === candles.length - 1 ? "end" : "middle"}>{new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short" }).format(new Date(candles[index].begin))}</text>)}
+        {eventMarkers.map(({ event, x, y, radius, direction: eventDirection }) => (
+          <g
+            className={`chart-event chart-event--${eventDirection}`}
+            key={event.id}
+            role="button"
+            tabIndex="0"
+            aria-label={`Открыть событие: ${event.title}`}
+            onClick={() => onOpen?.(event)}
+            onKeyDown={(keyboardEvent) => { if (keyboardEvent.key === "Enter" || keyboardEvent.key === " ") onOpen?.(event); }}
+          >
+            <title>{event.title}</title>
+            <line x1={x} y1={y + radius} x2={x} y2={Math.min(plotBottom, y + radius + 15)} />
+            <circle cx={x} cy={y} r={radius} />
+            {(event.sourceCount || 1) > 1 && <text x={x} y={y + 2.7} textAnchor="middle">{event.sourceCount}</text>}
+          </g>
+        ))}
+      </svg>
+      <div className="chart-legend"><span><i className="legend-price" /> Цена</span><span><i className="legend-volume" /> Объём</span><span><i className="legend-event" /> Событие: цвет — направление, размер — вес</span></div>
+    </div>
   );
 }
 
@@ -660,7 +739,7 @@ function AppHeader({ view, signals, onNavigate, onSelect, onOpenNews }) {
   );
 }
 
-function SignalsScreen({ signals, onSelect, onOpenNews, onMethodology, onReadNews }) {
+function SignalsScreen({ signals, marketStatus, marketUpdatedAt, onSelect, onOpenNews, onMethodology, onReadNews }) {
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
@@ -743,7 +822,7 @@ function SignalsScreen({ signals, onSelect, onOpenNews, onMethodology, onReadNew
         </div>
 
         <div className="market-strip">
-          <span><i /> MOEX ISS · данные по {signals.filter((signal) => signal.market).length} компаниям</span>
+          <span><i className={marketStatus === "error" ? "is-error" : ""} /> MOEX ISS · {marketStatus === "loading" && !marketUpdatedAt ? "загружаем котировки" : marketUpdatedAt ? `обновлено ${formatRelative(marketUpdatedAt)}` : "данные временно недоступны"}</span>
           <span>Модель <strong>news-baseline-0.1.1</strong></span>
           <span>Шкала сигнала <strong>от −100 до +100</strong></span>
           <span className="market-strip__right"><strong>{signals.length}</strong> активных · {companyCards.length} в наблюдении</span>
@@ -816,7 +895,7 @@ function SignalsScreen({ signals, onSelect, onOpenNews, onMethodology, onReadNew
   );
 }
 
-function CompanyScreen({ signal, onBack, onMethodology, onOpenNews, onReadNews }) {
+function CompanyScreen({ signal, marketStatus, marketUpdatedAt, onBack, onMethodology, onOpenNews, onReadNews }) {
   const factors = signal.factors;
 
   return (
@@ -844,14 +923,14 @@ function CompanyScreen({ signal, onBack, onMethodology, onOpenNews, onReadNews }
               <span>{formatScenario(signal.scenario)} · {signal.horizon}</span>
             </div>
           </div>
-          <PriceChart series={signal.series} direction={signal.direction} />
+          <PriceChart series={signal.series} direction={signal.direction} events={signal.evidence} onOpen={onReadNews} />
           <div className="market-facts">
             <span><small>Объём</small><strong>{formatCompact(signal.market?.volume_shares)} акций</strong></span>
             <span><small>Оборот</small><strong>{formatCompact(signal.market?.value_rub)} ₽</strong></span>
             <span><small>Дневная волатильность</small><strong>{formatPct(signal.market?.daily_volatility_pct, { sign: false })}</strong></span>
             <span><small>Ликвидность</small><strong>{signal.market?.liquidity_status === "sufficient" ? "Достаточная" : signal.market?.liquidity_status === "limited" ? "Ограниченная" : "Нет данных"}</strong></span>
           </div>
-          <footer className="market-source">Источник: <a href={signal.market?.source?.url || "https://iss.moex.com/iss/"} target="_blank" rel="noreferrer">MOEX ISS <ArrowUpRight size={10} /></a> · 30 дневных свечей</footer>
+          <footer className="market-source"><span>Источник: <a href={signal.market?.source?.url || "https://iss.moex.com/iss/"} target="_blank" rel="noreferrer">MOEX ISS <ArrowUpRight size={10} /></a> · 30 дневных свечей</span><span className={`market-refresh market-refresh--${marketStatus}`}><i /> {marketUpdatedAt ? `Обновлено ${formatRelative(marketUpdatedAt)}` : marketStatus === "loading" ? "Обновляем…" : "Ожидаем данные"}</span></footer>
         </div>
 
         <div className="analysis-grid">
@@ -901,15 +980,6 @@ function CompanyScreen({ signal, onBack, onMethodology, onOpenNews, onReadNews }
           </section>
         </div>
 
-        <section className="event-map-card">
-          <div className="section-heading">
-            <span><CircleGauge size={15} /> Карта событий</span>
-            <small>цвет — направление · размер — вес · число — источники</small>
-          </div>
-          <EventBubbles events={signal.evidence} onOpen={onReadNews} />
-          <p>Каждый круг — одно событие. Повторные публикации объединены и усиливают подтверждение, но не создают новый сигнал.</p>
-        </section>
-
         <section className="news-card">
           <div className="section-heading">
             <span><Newspaper size={15} /> Новости, изменившие сигнал</span>
@@ -938,7 +1008,7 @@ function CompanyScreen({ signal, onBack, onMethodology, onOpenNews, onReadNews }
   );
 }
 
-function NewsScreen({ signals, allNews, initialTicker, onReadNews }) {
+function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
   const [ticker, setTicker] = useState(initialTicker || "all");
   const [query, setQuery] = useState("");
 
@@ -947,8 +1017,8 @@ function NewsScreen({ signals, allNews, initialTicker, onReadNews }) {
   const items = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("ru-RU");
     return allNews.filter((item) => {
-      const matchesTicker = ticker === "all" || item.signal?.ticker === ticker;
-      const haystack = `${item.title} ${item.source} ${item.signal?.ticker || ""} ${item.signal?.company || ""}`.toLocaleLowerCase("ru-RU");
+      const matchesTicker = ticker === "all" || item.tickers?.includes(ticker);
+      const haystack = `${item.title} ${item.source} ${(item.tickers || []).join(" ")} ${item.signal?.company || item.companySignal?.company || ""}`.toLocaleLowerCase("ru-RU");
       return matchesTicker && (!normalized || haystack.includes(normalized));
     });
   }, [ticker, query]);
@@ -966,10 +1036,10 @@ function NewsScreen({ signals, allNews, initialTicker, onReadNews }) {
         ))}
       </div>
       <section className="news-feed">
-        <div className="feed-heading"><span>{items.length} публикаций</span><small>официальные источники</small></div>
+        <div className="feed-heading"><span>{ticker === "all" && !query ? newsMeta.total || items.length : items.length} публикаций</span><small>{newsMeta.sources?.length || 0} активных источника · события отделены от фоновых новостей</small></div>
         {items.map((item) => (
           <button type="button" className="feed-item" key={item.id} onClick={() => onReadNews(item)}>
-            {item.signal ? <CompanyMark signal={item.signal} /> : <span className="company-mark"><Newspaper size={17} /></span>}
+            {item.signal || item.companySignal ? <CompanyMark signal={item.signal || item.companySignal} /> : <span className="company-mark"><Newspaper size={17} /></span>}
             <div className="feed-copy"><div><span>{item.source}</span><i>{item.tag}</i>{item.sourceCount > 1 && <i className="source-count">{item.sourceCount} источника</i>}<time>{item.time}</time></div><h2>{item.title}</h2><p>{item.content}</p>{item.signal && <footer><strong>{item.signal.ticker}</strong><Direction direction={item.signal.direction} /><span>{formatScore(item.signal.score)} п.</span></footer>}</div>
             <BookOpen size={17} />
           </button>
@@ -980,7 +1050,7 @@ function NewsScreen({ signals, allNews, initialTicker, onReadNews }) {
   );
 }
 
-function MethodologyScreen({ onApi, allNews }) {
+function MethodologyScreen({ onApi, allNews, newsMeta }) {
   const sample = methodologySignals[0];
   const sampleFactors = scoreFactors(sample.score);
   const recentBySource = useMemo(() => {
@@ -1040,13 +1110,14 @@ function MethodologyScreen({ onApi, allNews }) {
         <div className="source-method__grid">
           {methodologySources.map((source) => {
             const lastSeen = recentBySource.get(source.id);
+            const sourceStat = newsMeta.sources?.find((item) => item.source_id === source.id);
             const hasData = source.id === "moex_iss" || Boolean(lastSeen);
             return (
               <a href={source.url} target="_blank" rel="noreferrer" key={source.id} className="source-card">
                 <header><span>{source.kind}</span><strong>{source.quality}/100</strong></header>
                 <h3>{source.name}<ArrowUpRight size={12} /></h3>
                 <p>{source.role}</p>
-                <footer><span className={hasData ? "is-live" : "is-waiting"}><i /> {hasData ? "Есть данные" : "Подключён · без событий"}</span><time>{lastSeen ? formatRelative(lastSeen) : source.freshness}</time></footer>
+                <footer><span className={hasData ? "is-live" : "is-waiting"}><i /> {hasData ? sourceStat ? `${sourceStat.count} публикаций` : "Есть данные" : "Подключён · без событий"}</span><time>{lastSeen ? formatRelative(lastSeen) : source.freshness}</time></footer>
               </a>
             );
           })}
@@ -1068,6 +1139,7 @@ const apiEndpoints = [
   { id: "news", method: "GET", path: "/v1/news?limit=20", title: "Лента новостей", description: "Исходные публикации и сигналы, которые с ними связаны." },
   { id: "ticker", method: "GET", path: "/v1/signals?ticker=SBER&limit=1", title: "Сигнал компании", description: "Последний доступный сигнал по выбранному тикеру." },
   { id: "snapshot", method: "GET", path: "/v1/instruments/SBER/snapshot", title: "Рыночный snapshot", description: "Цена, объём, волатильность, дневные свечи MOEX и честный сценарный диапазон для активного сигнала." },
+  { id: "snapshots", method: "GET", path: "/v1/instruments/snapshots?tickers=SBER,LKOH,YDEX", title: "Котировки списком", description: "До 20 рыночных snapshot одним запросом. Подходит для минутного обновления интерфейса." },
   { id: "health", method: "GET", path: "/health/ready", title: "Готовность сервиса", description: "Проверка приложения и соединения с хранилищем." },
 ];
 
@@ -1092,6 +1164,13 @@ function ApiScreen() {
       "label": "Сценарный диапазон, не таргет"
     }
   }
+}` : endpoint.id === "snapshots" ? `{
+  "data": [
+    {"ticker":"SBER","market":{"last_price":"283.65"}},
+    {"ticker":"LKOH","market":{"last_price":"6714.0"}}
+  ],
+  "errors": [],
+  "meta": {"requested":2,"returned":2,"refresh_after_seconds":60}
 }` : endpoint.id === "news" ? `{
   "data": [{
     "id": "news_…",
@@ -1100,7 +1179,7 @@ function ApiScreen() {
     "url": "https://www.moex.com/n…",
     "related_signals": [{"ticker":"SBER","direction":"up","score":24.8}]
   }],
-  "meta": {"limit": 20, "has_more": false, "next_cursor": null}
+  "meta": {"limit":20,"total":84,"has_more":true,"sources":[{"source_id":"interfax","count":24,"signal_count":5}]}
 }` : `{
   "data": [
     {
@@ -1165,11 +1244,12 @@ function ApiScreen() {
 function NewsReader({ item, onClose }) {
   if (!item) return null;
   const { signal } = item;
+  const companySignal = signal || item.companySignal;
   return (
     <div className="reader-overlay">
       <button className="overlay-dismiss" type="button" aria-label="Закрыть новость" onClick={onClose} />
       <article className="reader-dialog" role="dialog" aria-modal="true" aria-label="Просмотр новости">
-        <header><div>{signal ? <CompanyMark signal={signal} /> : <span className="company-mark"><Newspaper size={17} /></span>}<span><strong>{signal?.ticker || "Новость"}</strong><small>{signal ? `${signal.company} · ` : ""}{item.source}</small></span></div><button type="button" onClick={onClose} aria-label="Закрыть"><X size={18} /></button></header>
+        <header><div>{companySignal ? <CompanyMark signal={companySignal} /> : <span className="company-mark"><Newspaper size={17} /></span>}<span><strong>{companySignal?.ticker || "Новость"}</strong><small>{companySignal ? `${companySignal.company} · ` : ""}{item.source}</small></span></div><button type="button" onClick={onClose} aria-label="Закрыть"><X size={18} /></button></header>
         <div className="reader-meta"><span>{item.tag}</span><time><Clock3 size={12} /> {new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" }).format(new Date(item.publishedAt))}</time></div>
         <h1>{item.title}</h1>
         <div className="reader-body"><p>{item.content}</p>{signal && <p>EventEdge связал публикацию с {signal.ticker} и алгоритмически рассчитал на горизонте {signal.horizon} оценку <strong>{formatScore(signal.score)} пункта</strong>.</p>}</div>
@@ -1205,8 +1285,11 @@ export default function App() {
   const [readerItem, setReaderItem] = useState(null);
   const [signals, setSignals] = useState([]);
   const [allNews, setAllNews] = useState([]);
+  const [newsMeta, setNewsMeta] = useState({ total: 0, sources: [] });
   const [dataStatus, setDataStatus] = useState("loading");
   const [dataError, setDataError] = useState("");
+  const [marketStatus, setMarketStatus] = useState("loading");
+  const [marketUpdatedAt, setMarketUpdatedAt] = useState(null);
   const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
@@ -1239,20 +1322,9 @@ export default function App() {
         nextNews.forEach((item) => {
           if (item.signal) item.signal.evidence.push(item);
         });
-        const marketEntries = await Promise.all(nextSignals.map(async (signal) => {
-          try {
-            const response = await fetch(`/v1/instruments/${encodeURIComponent(signal.ticker)}/snapshot`, { signal: controller.signal });
-            if (!response.ok) return [signal.ticker, null];
-            const payload = await response.json();
-            return [signal.ticker, payload.data];
-          } catch (error) {
-            if (error.name === "AbortError") throw error;
-            return [signal.ticker, null];
-          }
-        }));
-        const marketByTicker = new Map(marketEntries);
-        setSignals(nextSignals.map((signal) => hydrateSignalWithMarket(signal, marketByTicker.get(signal.ticker))));
+        setSignals(nextSignals);
         setAllNews(nextNews);
+        setNewsMeta(newsPayload.meta || { total: nextNews.length, sources: [] });
         setDataStatus("ready");
       } catch (error) {
         if (error.name === "AbortError") return;
@@ -1263,6 +1335,43 @@ export default function App() {
     load();
     return () => controller.abort();
   }, [reloadKey]);
+
+  const tickerKey = signals.map((signal) => signal.ticker).join(",");
+
+  useEffect(() => {
+    if (!tickerKey) return undefined;
+    const controller = new AbortController();
+    let refreshing = false;
+
+    const refreshMarket = async () => {
+      if (document.visibilityState === "hidden" || refreshing) return;
+      refreshing = true;
+      setMarketStatus("loading");
+      try {
+        const response = await fetch(`/v1/instruments/snapshots?tickers=${encodeURIComponent(tickerKey)}`, { signal: controller.signal });
+        if (!response.ok) throw new Error("MOEX snapshot unavailable");
+        const payload = await response.json();
+        const marketByTicker = new Map(payload.data.map((item) => [item.ticker, item]));
+        setSignals((current) => current.map((signal) => hydrateSignalWithMarket(signal, marketByTicker.get(signal.ticker))));
+        setMarketUpdatedAt(new Date().toISOString());
+        setMarketStatus(payload.data.length ? "ready" : "error");
+      } catch (error) {
+        if (error.name !== "AbortError") setMarketStatus("error");
+      } finally {
+        refreshing = false;
+      }
+    };
+
+    refreshMarket();
+    const interval = window.setInterval(refreshMarket, 60000);
+    const handleVisibility = () => { if (document.visibilityState === "visible") refreshMarket(); };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      controller.abort();
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [tickerKey, reloadKey]);
 
   const navigate = (view, ticker = null) => {
     const nextHash = `#${view}${ticker ? `/${ticker}` : ""}`;
@@ -1278,10 +1387,10 @@ export default function App() {
     <div className="app-shell">
       <AppHeader view={route.view} signals={signals} onNavigate={navigate} onSelect={(ticker) => navigate("signal", ticker)} onOpenNews={(ticker) => navigate("news", ticker)} />
       {needsData && dataStatus !== "ready" && <DataState error={dataStatus === "error" ? dataError : ""} onRetry={() => setReloadKey((value) => value + 1)} />}
-      {dataStatus === "ready" && route.view === "signals" && <SignalsScreen signals={signals} onSelect={(ticker) => navigate("signal", ticker)} onOpenNews={(ticker) => navigate("news", ticker)} onMethodology={() => navigate("methodology")} onReadNews={setReaderItem} />}
-      {dataStatus === "ready" && route.view === "signal" && (selectedSignal ? <CompanyScreen signal={selectedSignal} onBack={() => navigate("signals")} onMethodology={() => navigate("methodology")} onOpenNews={() => navigate("news", selectedSignal.ticker)} onReadNews={setReaderItem} /> : <DataState error="Сигнал ещё не рассчитан." onRetry={() => navigate("signals")} />)}
-      {dataStatus === "ready" && route.view === "news" && <NewsScreen signals={signals} allNews={allNews} initialTicker={route.ticker} onReadNews={setReaderItem} />}
-      {route.view === "methodology" && <MethodologyScreen onApi={() => navigate("api")} allNews={allNews} />}
+      {dataStatus === "ready" && route.view === "signals" && <SignalsScreen signals={signals} marketStatus={marketStatus} marketUpdatedAt={marketUpdatedAt} onSelect={(ticker) => navigate("signal", ticker)} onOpenNews={(ticker) => navigate("news", ticker)} onMethodology={() => navigate("methodology")} onReadNews={setReaderItem} />}
+      {dataStatus === "ready" && route.view === "signal" && (selectedSignal ? <CompanyScreen signal={selectedSignal} marketStatus={marketStatus} marketUpdatedAt={marketUpdatedAt} onBack={() => navigate("signals")} onMethodology={() => navigate("methodology")} onOpenNews={() => navigate("news", selectedSignal.ticker)} onReadNews={setReaderItem} /> : <DataState error="Сигнал ещё не рассчитан." onRetry={() => navigate("signals")} />)}
+      {dataStatus === "ready" && route.view === "news" && <NewsScreen signals={signals} allNews={allNews} newsMeta={newsMeta} initialTicker={route.ticker} onReadNews={setReaderItem} />}
+      {route.view === "methodology" && <MethodologyScreen onApi={() => navigate("api")} allNews={allNews} newsMeta={newsMeta} />}
       {route.view === "api" && <ApiScreen />}
       <NewsReader item={readerItem} onClose={() => setReaderItem(null)} />
     </div>
