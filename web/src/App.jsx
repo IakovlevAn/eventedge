@@ -24,9 +24,9 @@ import {
   Terminal,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-const signals = [
+const methodologySignals = [
   {
     ticker: "SBER",
     company: "Сбербанк",
@@ -269,6 +269,34 @@ const companyBrands = {
   ROSN: { colors: ["#f2c500", "#111216"], glyph: "Р", domain: "rosneft.ru" },
   GMKN: { colors: ["#1f7ca8", "#124b72"], glyph: "Н", domain: "nornickel.ru" },
   MGNT: { colors: ["#ef3340", "#a71930"], glyph: "М", domain: "magnit.com" },
+  GAZP: { colors: ["#1686c8", "#075487"], glyph: "Г", domain: "gazprom.ru" },
+  VTBR: { colors: ["#1783ca", "#174687"], glyph: "В", domain: "vtb.ru" },
+  PLZL: { colors: ["#d9aa36", "#8d6712"], glyph: "П", domain: "polyus.com" },
+  CHMF: { colors: ["#202d3d", "#0b1119"], glyph: "С", domain: "severstal.com" },
+  ALRS: { colors: ["#45a4b3", "#236a77"], glyph: "А", domain: "alrosa.ru" },
+  MOEX: { colors: ["#174d86", "#112f53"], glyph: "М", domain: "moex.com" },
+};
+
+const companyMeta = {
+  SBER: ["Сбербанк", "Финансы"], LKOH: ["Лукойл", "Нефть и газ"],
+  YDEX: ["Яндекс", "Технологии"], NVTK: ["Новатэк", "Нефть и газ"],
+  TATN: ["Татнефть", "Нефть и газ"], ROSN: ["Роснефть", "Нефть и газ"],
+  GMKN: ["Норникель", "Металлы"], MGNT: ["Магнит", "Ритейл"],
+  GAZP: ["Газпром", "Нефть и газ"], VTBR: ["ВТБ", "Финансы"],
+  PLZL: ["Полюс", "Металлы"], CHMF: ["Северсталь", "Металлы"],
+  ALRS: ["АЛРОСА", "Металлы"], MOEX: ["Московская биржа", "Финансы"],
+};
+
+const actionLabels = {
+  consider_buy: "Рассмотреть позицию",
+  no_action: "Ничего не делать",
+  review_position: "Пересмотреть риск",
+};
+
+const sourceLabels = {
+  moex_news: "Московская биржа",
+  cbr_press: "Банк России",
+  interfax: "Интерфакс",
 };
 
 const scoreFactorDefinitions = [
@@ -294,14 +322,63 @@ function formatScore(score) {
   return `${score > 0 ? "+" : ""}${score.toFixed(1)}`;
 }
 
-const allNews = signals.flatMap((signal) =>
-  signal.evidence.map((item, index) => ({
+function formatRelative(timestamp) {
+  const elapsed = Math.max(0, Date.now() - new Date(timestamp).getTime());
+  const minutes = Math.floor(elapsed / 60000);
+  if (minutes < 1) return "только что";
+  if (minutes < 60) return `${minutes} мин`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} ч`;
+  return new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short" }).format(new Date(timestamp));
+}
+
+function formatTime(timestamp) {
+  return new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(new Date(timestamp));
+}
+
+function horizonLabel(horizon) {
+  const units = horizon.unit === "calendar_days" ? "дн." : horizon.unit === "trading_days" ? "торг. дн." : "ч";
+  return `${horizon.value} ${units}`;
+}
+
+function signalFromApi(item) {
+  const [company, sector] = companyMeta[item.ticker] || [item.ticker, "Российский рынок"];
+  return {
     ...item,
-    id: `${signal.ticker}-${index}`,
+    company,
+    sector,
+    confidence: Math.round(item.confidence * 100),
+    horizon: horizonLabel(item.horizon),
+    event: "Новостное событие",
+    price: "—",
+    change: "—",
+    updated: formatRelative(item.as_of),
+    action: actionLabels[item.action] || item.action,
+    invalidation: (item.invalidation_conditions || []).join(" "),
+    factors: (item.factor_contributions || []).map((factor) => ({
+      label: factor.label,
+      contribution: Number((factor.contribution * 100).toFixed(1)),
+    })),
+    evidence: [],
+  };
+}
+
+function newsFromApi(item, signalsById) {
+  const related = item.related_signals?.[0];
+  const signal = related ? signalsById.get(related.id) : null;
+  return {
+    id: item.id,
+    source: sourceLabels[item.source_id] || item.source_id,
+    sourceId: item.source_id,
+    time: formatTime(item.published_at),
+    publishedAt: item.published_at,
+    tag: signal ? "Учтено в сигнале" : "Без сигнала",
+    title: item.title,
+    content: item.content,
+    url: item.url,
     signal,
-    index,
-  })),
-);
+  };
+}
 
 function BrandMark() {
   return (
@@ -316,7 +393,7 @@ function BrandMark() {
 
 function CompanyMark({ signal, small = false }) {
   const [imageFailed, setImageFailed] = useState(false);
-  const brand = companyBrands[signal.ticker];
+  const brand = companyBrands[signal.ticker] || { colors: ["#717785", "#353945"], glyph: signal.ticker.slice(0, 1), domain: "moex.com" };
   return (
     <span
       className={`company-mark ${small ? "company-mark--small" : ""}`}
@@ -346,93 +423,7 @@ function Direction({ direction }) {
   );
 }
 
-function PriceChart({ signal }) {
-  const ref = useRef(null);
-
-  useEffect(() => {
-    const canvas = ref.current;
-    if (!canvas) return undefined;
-
-    const draw = () => {
-      const rect = canvas.getBoundingClientRect();
-      if (!rect.width || !rect.height) return;
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = Math.round(rect.width * dpr);
-      canvas.height = Math.round(rect.height * dpr);
-      const context = canvas.getContext("2d");
-      context.setTransform(dpr, 0, 0, dpr, 0, 0);
-      context.clearRect(0, 0, rect.width, rect.height);
-
-      const padding = { top: 24, right: 24, bottom: 24, left: 24 };
-      const chartWidth = rect.width - padding.left - padding.right;
-      const chartHeight = rect.height - padding.top - padding.bottom;
-      const min = Math.min(...signal.series);
-      const max = Math.max(...signal.series);
-      const spread = Math.max(max - min, 1);
-      const points = signal.series.map((value, index) => ({
-        x: padding.left + (index / (signal.series.length - 1)) * chartWidth,
-        y: padding.top + (1 - (value - min) / spread) * chartHeight,
-      }));
-
-      context.fillStyle = "rgba(115, 121, 133, 0.18)";
-      for (let x = padding.left; x < rect.width - padding.right; x += 12) {
-        for (let y = padding.top; y < rect.height - padding.bottom; y += 12) {
-          context.fillRect(x, y, 1, 1);
-        }
-      }
-
-      const baselineY = points[Math.floor(points.length * 0.28)].y;
-      context.save();
-      context.setLineDash([3, 5]);
-      context.strokeStyle = "rgba(139, 145, 158, 0.24)";
-      context.lineWidth = 1;
-      context.beginPath();
-      context.moveTo(points[Math.floor(points.length * 0.28)].x, padding.top);
-      context.lineTo(points[Math.floor(points.length * 0.28)].x, rect.height - padding.bottom);
-      context.stroke();
-      context.restore();
-
-      const lineGradient = context.createLinearGradient(padding.left, 0, rect.width - padding.right, 0);
-      lineGradient.addColorStop(0, "#5d626d");
-      lineGradient.addColorStop(0.36, "#7e78c8");
-      lineGradient.addColorStop(0.72, signal.direction === "down" ? "#df7789" : signal.direction === "neutral" ? "#aaa5ba" : "#dac2dc");
-      lineGradient.addColorStop(1, signal.direction === "down" ? "#e87486" : signal.direction === "neutral" ? "#b9b6c4" : "#f0bca8");
-
-      context.beginPath();
-      points.forEach((point, index) => {
-        if (index === 0) context.moveTo(point.x, point.y);
-        else context.lineTo(point.x, point.y);
-      });
-      context.lineWidth = 2;
-      context.lineJoin = "round";
-      context.lineCap = "round";
-      context.strokeStyle = lineGradient;
-      context.stroke();
-
-      const last = points.at(-1);
-      context.fillStyle = signal.direction === "down" ? "#e87486" : signal.direction === "neutral" ? "#aaa5ba" : "#efb9a5";
-      context.beginPath();
-      context.arc(last.x, last.y, 3.4, 0, Math.PI * 2);
-      context.fill();
-      context.strokeStyle = signal.direction === "down" ? "rgba(232,116,134,.22)" : "rgba(239,185,165,.2)";
-      context.lineWidth = 8;
-      context.stroke();
-
-      context.fillStyle = "rgba(151, 157, 169, 0.58)";
-      context.font = "10px ui-sans-serif, system-ui";
-      context.fillText("Предыдущее закрытие", Math.max(points[Math.floor(points.length * 0.28)].x - 55, 8), Math.max(baselineY - 12, 14));
-    };
-
-    draw();
-    const observer = new ResizeObserver(draw);
-    observer.observe(canvas);
-    return () => observer.disconnect();
-  }, [signal]);
-
-  return <canvas className="price-chart" ref={ref} aria-label={`Динамика цены ${signal.ticker}`} />;
-}
-
-function AppHeader({ view, onNavigate, onSelect }) {
+function AppHeader({ view, signals, onNavigate, onSelect }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -506,7 +497,7 @@ function AppHeader({ view, onNavigate, onSelect }) {
                   <CompanyMark signal={signal} small />
                   <span><strong>{signal.ticker}</strong><small>{signal.company} · {signal.sector}</small></span>
                   <Direction direction={signal.direction} />
-                  <em>{signal.price}</em>
+                  <em>{formatScore(signal.score)} п.</em>
                 </button>
               ))}
             </div>
@@ -518,7 +509,7 @@ function AppHeader({ view, onNavigate, onSelect }) {
   );
 }
 
-function SignalsScreen({ onSelect, onMethodology }) {
+function SignalsScreen({ signals, onSelect, onMethodology }) {
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
@@ -579,8 +570,8 @@ function SignalsScreen({ onSelect, onMethodology }) {
         </div>
 
         <div className="market-strip">
-          <span><i /> Демонстрационный набор</span>
-          <span>Baseline <strong>0.1.0</strong></span>
+          <span><i /> Живые данные · Московская биржа</span>
+          <span>Модель <strong>news-baseline-0.1.0</strong></span>
           <span>Шкала сигнала <strong>от −100 до +100</strong></span>
           <span className="market-strip__right">{filteredSignals.length} из {signals.length} бумаг</span>
         </div>
@@ -621,9 +612,9 @@ function SignalsScreen({ onSelect, onMethodology }) {
 
           {!filteredSignals.length && (
             <div className="empty-state">
-              <Search size={22} />
-              <strong>Сигналы не найдены</strong>
-              <span>Измени запрос или фильтр направления.</span>
+              <CircleGauge size={22} />
+              <strong>{signals.length ? "Сигналы не найдены" : "Ждём существенную новость"}</strong>
+              <span>{signals.length ? "Измени запрос или фильтр направления." : "Здесь появится сигнал, когда официальный источник опубликует новость по отслеживаемой компании."}</span>
             </div>
           )}
         </div>
@@ -638,7 +629,7 @@ function SignalsScreen({ onSelect, onMethodology }) {
 }
 
 function CompanyScreen({ signal, onBack, onMethodology, onOpenNews, onReadNews }) {
-  const factors = scoreFactors(signal.score);
+  const factors = signal.factors;
 
   return (
     <main className="screen screen--company">
@@ -656,16 +647,16 @@ function CompanyScreen({ signal, onBack, onMethodology, onOpenNews, onReadNews }
         <div className="chart-card">
           <div className="chart-summary">
             <div>
-              <span>Динамика бумаги · демо-график за день</span>
-              <strong>{signal.price}</strong>
-              <em className={`change-cell--${signal.direction}`}>{signal.change}</em>
+              <span>Покрытие данных</span>
+              <strong>Новостной сигнал</strong>
+              <em>Цена и объём ещё не подключены</em>
             </div>
             <div className="chart-signal">
               <Direction direction={signal.direction} />
               <span>ожидание на {signal.horizon}</span>
             </div>
           </div>
-          <PriceChart signal={signal} />
+          <div className="empty-state"><Database size={22} /><strong>Без выдуманных рыночных данных</strong><span>График появится после подключения отдельного проверяемого источника котировок.</span></div>
         </div>
 
         <div className="analysis-grid">
@@ -705,7 +696,7 @@ function CompanyScreen({ signal, onBack, onMethodology, onOpenNews, onReadNews }
             <div className="factor-list">
               {factors.map((factor) => (
                 <div className="factor-row" key={factor.label}>
-                  <div><span>{factor.label}<small>{Math.round(factor.weight * 100)}%</small></span><strong className={factor.contribution >= 0 ? "factor--positive" : "factor--negative"}>{formatScore(factor.contribution)} п.</strong></div>
+                  <div><span>{factor.label}</span><strong className={factor.contribution >= 0 ? "factor--positive" : "factor--negative"}>{formatScore(factor.contribution)} п.</strong></div>
                   <i><b className={factor.contribution >= 0 ? "factor--positive" : "factor--negative"} style={{ width: `${Math.min(Math.abs(factor.contribution) * 3, 100)}%` }} /></i>
                 </div>
               ))}
@@ -733,6 +724,7 @@ function CompanyScreen({ signal, onBack, onMethodology, onOpenNews, onReadNews }
                 <span className="news-open"><BookOpen size={14} /></span>
               </button>
             ))}
+            {!signal.evidence.length && <div className="empty-state"><Newspaper size={22} /><strong>Источник не найден</strong><span>Новость могла быть удалена или ещё не загружена в ленту.</span></div>}
           </div>
         </section>
 
@@ -742,7 +734,7 @@ function CompanyScreen({ signal, onBack, onMethodology, onOpenNews, onReadNews }
   );
 }
 
-function NewsScreen({ initialTicker, onReadNews }) {
+function NewsScreen({ signals, allNews, initialTicker, onReadNews }) {
   const [ticker, setTicker] = useState(initialTicker || "all");
   const [query, setQuery] = useState("");
 
@@ -751,8 +743,8 @@ function NewsScreen({ initialTicker, onReadNews }) {
   const items = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("ru-RU");
     return allNews.filter((item) => {
-      const matchesTicker = ticker === "all" || item.signal.ticker === ticker;
-      const haystack = `${item.title} ${item.source} ${item.signal.ticker} ${item.signal.company}`.toLocaleLowerCase("ru-RU");
+      const matchesTicker = ticker === "all" || item.signal?.ticker === ticker;
+      const haystack = `${item.title} ${item.source} ${item.signal?.ticker || ""} ${item.signal?.company || ""}`.toLocaleLowerCase("ru-RU");
       return matchesTicker && (!normalized || haystack.includes(normalized));
     });
   }, [ticker, query]);
@@ -770,11 +762,11 @@ function NewsScreen({ initialTicker, onReadNews }) {
         ))}
       </div>
       <section className="news-feed">
-        <div className="feed-heading"><span>{items.length} публикаций</span><small>демонстрационные материалы</small></div>
+        <div className="feed-heading"><span>{items.length} публикаций</span><small>официальные источники</small></div>
         {items.map((item) => (
           <button type="button" className="feed-item" key={item.id} onClick={() => onReadNews(item)}>
-            <CompanyMark signal={item.signal} />
-            <div className="feed-copy"><div><span>{item.source}</span><i>{item.tag}</i><time>{item.time}</time></div><h2>{item.title}</h2><p>{item.signal.summary}</p><footer><strong>{item.signal.ticker}</strong><Direction direction={item.signal.direction} /><span>{formatScore(item.signal.score)} п.</span></footer></div>
+            {item.signal ? <CompanyMark signal={item.signal} /> : <span className="company-mark"><Newspaper size={17} /></span>}
+            <div className="feed-copy"><div><span>{item.source}</span><i>{item.tag}</i><time>{item.time}</time></div><h2>{item.title}</h2><p>{item.content}</p>{item.signal && <footer><strong>{item.signal.ticker}</strong><Direction direction={item.signal.direction} /><span>{formatScore(item.signal.score)} п.</span></footer>}</div>
             <BookOpen size={17} />
           </button>
         ))}
@@ -785,7 +777,7 @@ function NewsScreen({ initialTicker, onReadNews }) {
 }
 
 function MethodologyScreen({ onApi }) {
-  const sample = signals[0];
+  const sample = methodologySignals[0];
   const sampleFactors = scoreFactors(sample.score);
 
   return (
@@ -835,6 +827,7 @@ function MethodologyScreen({ onApi }) {
 
 const apiEndpoints = [
   { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Список сигналов", description: "Последние рассчитанные сигналы с фильтрами по тикеру и направлению." },
+  { id: "news", method: "GET", path: "/v1/news?limit=20", title: "Лента новостей", description: "Исходные публикации и сигналы, которые с ними связаны." },
   { id: "ticker", method: "GET", path: "/v1/signals?ticker=SBER&limit=1", title: "Сигнал компании", description: "Последний доступный сигнал по выбранному тикеру." },
   { id: "health", method: "GET", path: "/health/ready", title: "Готовность сервиса", description: "Проверка приложения и соединения с хранилищем." },
 ];
@@ -845,6 +838,29 @@ function ApiScreen() {
   const [copied, setCopied] = useState("");
   const endpoint = apiEndpoints.find((item) => item.id === selectedId);
   const baseUrl = typeof window === "undefined" ? "" : window.location.origin;
+  const responseExample = endpoint.id === "health" ? `{"status":"ok"}` : endpoint.id === "news" ? `{
+  "data": [{
+    "id": "news_…",
+    "source_id": "moex_news",
+    "title": "Сообщение эмитента",
+    "url": "https://www.moex.com/n…",
+    "related_signals": [{"ticker":"SBER","direction":"up","score":24.8}]
+  }],
+  "meta": {"limit": 20, "has_more": false, "next_cursor": null}
+}` : `{
+  "data": [
+    {
+      "id": "sig_01JZK6K5GDX90Q2X8C0R4D7M9P",
+      "ticker": "SBER",
+      "direction": "up",
+      "score": 42.7,
+      "confidence": 0.76,
+      "horizon": {"value": 3, "unit": "calendar_days"},
+      "model_version": "news-baseline-0.1.0"
+    }
+  ],
+  "meta": {"limit": 20, "has_more": false, "next_cursor": null}
+}`;
 
   const checkApi = async () => {
     setStatus("checking");
@@ -869,7 +885,7 @@ function ApiScreen() {
   return (
     <main className="screen section-screen api-screen">
       <section className="page-hero api-hero">
-        <div><span className="eyebrow"><Braces size={13} /> EventEdge API</span><h1>Получай сигналы через простой HTTP API</h1><p>Интерфейс для внутренних продуктов, аналитических пайплайнов и автоматизации. Сейчас доступно чтение рассчитанных сигналов и health-check.</p></div>
+        <div><span className="eyebrow"><Braces size={13} /> EventEdge API</span><h1>Получай сигналы через простой HTTP API</h1><p>Интерфейс для внутренних продуктов, аналитических пайплайнов и автоматизации. Доступно чтение сигналов, исходных новостей и health-check.</p></div>
         <div className={`api-status api-status--${status}`}><Server size={17} /><span><strong>{status === "checking" ? "Проверяем…" : status === "online" ? "API отвечает" : status === "offline" ? "API недоступен" : "Статус не проверен"}</strong><small>{baseUrl}</small></span><button type="button" onClick={checkApi} disabled={status === "checking"}><RefreshCw size={14} /> Проверить</button></div>
       </section>
 
@@ -885,20 +901,7 @@ function ApiScreen() {
           <h2>{endpoint.title}</h2><p>{endpoint.description}</p>
           {endpoint.id !== "health" && <div className="parameter-table"><div><strong>Параметр</strong><strong>Тип</strong><strong>Описание</strong></div><div><code>{endpoint.id === "ticker" ? "ticker" : "limit"}</code><span>{endpoint.id === "ticker" ? "string" : "integer"}</span><p>{endpoint.id === "ticker" ? "Тикер MOEX, например SBER" : "Количество записей, максимум 100"}</p></div></div>}
           <div className="code-panel"><div><span><Terminal size={13} /> cURL</span><button type="button" onClick={() => copyText(`curl -s '${baseUrl}${endpoint.path}'`, "curl")}><Copy size={13} /> {copied === "curl" ? "Готово" : "Копировать"}</button></div><pre><code>{`curl -s '${baseUrl}${endpoint.path}' \\\n  -H 'Accept: application/json'`}</code></pre></div>
-          <div className="response-panel"><span>Пример ответа</span><pre><code>{endpoint.id === "health" ? `{"status":"ready"}` : `{
-  "data": [
-    {
-      "id": "sig_01JZK6K5GDX90Q2X8C0R4D7M9P",
-      "ticker": "SBER",
-      "direction": "up",
-      "score": 42.7,
-      "confidence": 0.76,
-      "horizon": {"value": 3, "unit": "trading_days"},
-      "model_version": "news-baseline-0.1.0"
-    }
-  ],
-  "meta": {"limit": 20, "has_more": false, "next_cursor": null}
-}`}</code></pre></div>
+          <div className="response-panel"><span>Пример ответа</span><pre><code>{responseExample}</code></pre></div>
         </section>
       </div>
     </main>
@@ -912,12 +915,12 @@ function NewsReader({ item, onClose }) {
     <div className="reader-overlay">
       <button className="overlay-dismiss" type="button" aria-label="Закрыть новость" onClick={onClose} />
       <article className="reader-dialog" role="dialog" aria-modal="true" aria-label="Просмотр новости">
-        <header><div><CompanyMark signal={signal} /><span><strong>{signal.ticker}</strong><small>{signal.company} · {item.source}</small></span></div><button type="button" onClick={onClose} aria-label="Закрыть"><X size={18} /></button></header>
-        <div className="reader-meta"><span>{item.tag}</span><time><Clock3 size={12} /> сегодня, {item.time}</time></div>
+        <header><div>{signal ? <CompanyMark signal={signal} /> : <span className="company-mark"><Newspaper size={17} /></span>}<span><strong>{signal?.ticker || "Новость"}</strong><small>{signal ? `${signal.company} · ` : ""}{item.source}</small></span></div><button type="button" onClick={onClose} aria-label="Закрыть"><X size={18} /></button></header>
+        <div className="reader-meta"><span>{item.tag}</span><time><Clock3 size={12} /> {new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" }).format(new Date(item.publishedAt))}</time></div>
         <h1>{item.title}</h1>
-        <div className="reader-body"><p>{signal.summary}</p><p>EventEdge связал публикацию с событием «{signal.event}», проверил её новизну, существенность и качество источника. На горизонте {signal.horizon} текущая оценка составляет <strong>{formatScore(signal.score)} пункта</strong>.</p></div>
-        <section className="reader-insight"><CircleGauge size={16} /><div><span>Что это меняет</span><strong>{signal.action}</strong><p>{signal.invalidation}</p></div></section>
-        <footer><FileText size={13} /> Это краткое содержание EventEdge для демонстрационного материала, а не полный текст исходной публикации.</footer>
+        <div className="reader-body"><p>{item.content}</p>{signal && <p>EventEdge связал публикацию с {signal.ticker} и алгоритмически рассчитал на горизонте {signal.horizon} оценку <strong>{formatScore(signal.score)} пункта</strong>.</p>}</div>
+        {signal && <section className="reader-insight"><CircleGauge size={16} /><div><span>Что это меняет</span><strong>{signal.action}</strong><p>{signal.summary}</p></div></section>}
+        <footer><FileText size={13} /> Показан текст из RSS источника. <a href={item.url} target="_blank" rel="noreferrer">Открыть оригинал <ArrowUpRight size={11} /></a></footer>
       </article>
     </div>
   );
@@ -929,15 +932,64 @@ function parseRoute() {
   return { view: ["signals", "signal", "news", "methodology", "api"].includes(view) ? view : "signals", ticker: ticker || null };
 }
 
+function DataState({ error, onRetry }) {
+  return (
+    <main className="screen section-screen">
+      <div className="empty-state">
+        {error ? <Server size={24} /> : <RefreshCw className="is-spinning" size={24} />}
+        <strong>{error ? "Не удалось загрузить данные" : "Загружаем живой контур"}</strong>
+        <span>{error || "Получаем последние новости и рассчитанные сигналы."}</span>
+        {error && <button type="button" className="method-link" onClick={onRetry}><RefreshCw size={13} /> Повторить</button>}
+      </div>
+    </main>
+  );
+}
+
 export default function App() {
   const [route, setRoute] = useState(parseRoute);
   const [readerItem, setReaderItem] = useState(null);
+  const [signals, setSignals] = useState([]);
+  const [allNews, setAllNews] = useState([]);
+  const [dataStatus, setDataStatus] = useState("loading");
+  const [dataError, setDataError] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     const handleHashChange = () => setRoute(parseRoute());
     window.addEventListener("hashchange", handleHashChange);
     return () => window.removeEventListener("hashchange", handleHashChange);
   }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const load = async () => {
+      setDataStatus("loading");
+      setDataError("");
+      try {
+        const [signalResponse, newsResponse] = await Promise.all([
+          fetch("/v1/signals?limit=100", { signal: controller.signal }),
+          fetch("/v1/news?limit=100", { signal: controller.signal }),
+        ]);
+        if (!signalResponse.ok || !newsResponse.ok) throw new Error("API вернул ошибку. Попробуй обновить страницу.");
+        const [signalPayload, newsPayload] = await Promise.all([signalResponse.json(), newsResponse.json()]);
+        const nextSignals = signalPayload.data.map(signalFromApi);
+        const signalsById = new Map(nextSignals.map((item) => [item.id, item]));
+        const nextNews = newsPayload.data.map((item) => newsFromApi(item, signalsById));
+        nextNews.forEach((item) => {
+          if (item.signal) item.signal.evidence.push(item);
+        });
+        setSignals(nextSignals);
+        setAllNews(nextNews);
+        setDataStatus("ready");
+      } catch (error) {
+        if (error.name === "AbortError") return;
+        setDataError(error.message || "Неизвестная ошибка загрузки.");
+        setDataStatus("error");
+      }
+    };
+    load();
+    return () => controller.abort();
+  }, [reloadKey]);
 
   const navigate = (view, ticker = null) => {
     const nextHash = `#${view}${ticker ? `/${ticker}` : ""}`;
@@ -947,13 +999,15 @@ export default function App() {
   };
 
   const selectedSignal = signals.find((signal) => signal.ticker === route.ticker) || signals[0];
+  const needsData = ["signals", "signal", "news"].includes(route.view);
 
   return (
     <div className="app-shell">
-      <AppHeader view={route.view} onNavigate={navigate} onSelect={(ticker) => navigate("signal", ticker)} />
-      {route.view === "signals" && <SignalsScreen onSelect={(ticker) => navigate("signal", ticker)} onMethodology={() => navigate("methodology")} />}
-      {route.view === "signal" && <CompanyScreen signal={selectedSignal} onBack={() => navigate("signals")} onMethodology={() => navigate("methodology")} onOpenNews={() => navigate("news", selectedSignal.ticker)} onReadNews={setReaderItem} />}
-      {route.view === "news" && <NewsScreen initialTicker={route.ticker} onReadNews={setReaderItem} />}
+      <AppHeader view={route.view} signals={signals} onNavigate={navigate} onSelect={(ticker) => navigate("signal", ticker)} />
+      {needsData && dataStatus !== "ready" && <DataState error={dataStatus === "error" ? dataError : ""} onRetry={() => setReloadKey((value) => value + 1)} />}
+      {dataStatus === "ready" && route.view === "signals" && <SignalsScreen signals={signals} onSelect={(ticker) => navigate("signal", ticker)} onMethodology={() => navigate("methodology")} />}
+      {dataStatus === "ready" && route.view === "signal" && (selectedSignal ? <CompanyScreen signal={selectedSignal} onBack={() => navigate("signals")} onMethodology={() => navigate("methodology")} onOpenNews={() => navigate("news", selectedSignal.ticker)} onReadNews={setReaderItem} /> : <DataState error="Сигнал ещё не рассчитан." onRetry={() => navigate("signals")} />)}
+      {dataStatus === "ready" && route.view === "news" && <NewsScreen signals={signals} allNews={allNews} initialTicker={route.ticker} onReadNews={setReaderItem} />}
       {route.view === "methodology" && <MethodologyScreen onApi={() => navigate("api")} />}
       {route.view === "api" && <ApiScreen />}
       <NewsReader item={readerItem} onClose={() => setReaderItem(null)} />

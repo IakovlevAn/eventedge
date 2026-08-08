@@ -14,8 +14,9 @@ from ydb.query.base import QueryExecMode
 from eventedge.analysis import (
     NewsAnalysisInput,
     SemanticFeatures,
-    extract_and_score,
+    score_features,
 )
+from eventedge.llm import NewsAnalyzer, RuleBasedNewsAnalyzer
 
 CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
@@ -67,6 +68,36 @@ class Job:
 class IngestResult:
     job: Job
     replayed: bool
+
+
+@dataclass(frozen=True)
+class NewsRecord:
+    id: str
+    source_id: str
+    external_id: str
+    published_at: datetime
+    received_at: datetime
+    title: str
+    url: str
+    content: str
+    language: str
+    source_metadata: Mapping[str, object]
+    created_at: datetime
+
+    def as_api_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "source_id": self.source_id,
+            "external_id": self.external_id,
+            "published_at": to_rfc3339(self.published_at),
+            "received_at": to_rfc3339(self.received_at),
+            "title": self.title,
+            "url": self.url,
+            "content": self.content,
+            "language": self.language,
+            "source_metadata": dict(self.source_metadata),
+            "created_at": to_rfc3339(self.created_at),
+        }
 
 
 @dataclass(frozen=True)
@@ -136,6 +167,13 @@ class NewsRepository(Protocol):
 
     async def get_job(self, job_id: str) -> Job | None: ...
 
+    async def list_news(
+        self,
+        *,
+        source_id: str | None,
+        limit: int,
+    ) -> list[NewsRecord]: ...
+
     async def list_signals(
         self,
         *,
@@ -179,16 +217,17 @@ def canonical_payload_hash(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def process_document(document: NewsDocument, *, now: datetime | None = None) -> ProcessedNews:
+def process_document(
+    document: NewsDocument,
+    features: SemanticFeatures,
+    *,
+    now: datetime | None = None,
+) -> ProcessedNews:
     created_at = now or utc_now()
     news_id = stable_id("news_", f"{document.source_id}\x00{document.external_id}")
-    features, baseline_signals = extract_and_score(
-        NewsAnalysisInput(
-            source_id=document.source_id,
-            title=document.title,
-            content=document.content,
-            language=document.language,
-        )
+    baseline_signals = score_features(
+        features,
+        source_id=document.source_id,
     )
     feature_set_id = stable_id(
         "feat_",
@@ -261,9 +300,11 @@ def filter_signals(
 
 
 class MemoryNewsRepository:
-    def __init__(self) -> None:
+    def __init__(self, *, analyzer: NewsAnalyzer | None = None) -> None:
+        self._analyzer = analyzer or RuleBasedNewsAnalyzer()
         self._requests: dict[str, tuple[str, str]] = {}
         self._jobs: dict[str, Job] = {}
+        self._news: dict[str, NewsRecord] = {}
         self._signals: dict[str, SignalRecord] = {}
         self._lock = asyncio.Lock()
 
@@ -286,7 +327,15 @@ class MemoryNewsRepository:
                 return IngestResult(job=self._jobs[job_id], replayed=True)
 
             now = utc_now()
-            processed = process_document(document, now=now)
+            features = await self._analyzer.extract(
+                NewsAnalysisInput(
+                    source_id=document.source_id,
+                    title=document.title,
+                    content=document.content,
+                    language=document.language,
+                )
+            )
+            processed = process_document(document, features, now=now)
             result_ref = (
                 processed.signals[0].id
                 if processed.signals
@@ -303,6 +352,19 @@ class MemoryNewsRepository:
                 completed_at=now,
             )
             self._jobs[job.id] = job
+            self._news[processed.news_id] = NewsRecord(
+                id=processed.news_id,
+                source_id=document.source_id,
+                external_id=document.external_id,
+                published_at=document.published_at,
+                received_at=document.received_at,
+                title=document.title,
+                url=document.url,
+                content=document.content,
+                language=document.language,
+                source_metadata=document.source_metadata,
+                created_at=now,
+            )
             self._signals.update(
                 {signal.id: signal for signal in processed.signals}
             )
@@ -311,6 +373,23 @@ class MemoryNewsRepository:
 
     async def get_job(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
+
+    async def list_news(
+        self,
+        *,
+        source_id: str | None,
+        limit: int,
+    ) -> list[NewsRecord]:
+        records = (
+            item
+            for item in self._news.values()
+            if source_id is None or item.source_id == source_id
+        )
+        return sorted(
+            records,
+            key=lambda item: (item.published_at, item.id),
+            reverse=True,
+        )[:limit]
 
     async def list_signals(
         self,
@@ -341,10 +420,12 @@ class YdbNewsRepository:
         endpoint: str,
         database: str,
         credentials: ydb.Credentials | None = None,
+        analyzer: NewsAnalyzer | None = None,
     ) -> None:
         self._endpoint = endpoint
         self._database = database
         self._credentials = credentials or ydb.iam.MetadataUrlCredentials()
+        self._analyzer = analyzer or RuleBasedNewsAnalyzer()
         self._driver: ydb.aio.Driver | None = None
         self._pool: ydb.aio.QuerySessionPool | None = None
 
@@ -389,6 +470,39 @@ class YdbNewsRepository:
     async def ingest(self, idempotency_key: str, document: NewsDocument) -> IngestResult:
         job_id = stable_id("job_", idempotency_key)
 
+        existing = await self._get_ingest_request(idempotency_key)
+        if existing:
+            existing_hash, existing_job = existing
+            if existing_hash != document.payload_hash:
+                raise IdempotencyConflictError
+            return IngestResult(job=existing_job, replayed=True)
+
+        now = utc_now()
+        features = await self._analyzer.extract(
+            NewsAnalysisInput(
+                source_id=document.source_id,
+                title=document.title,
+                content=document.content,
+                language=document.language,
+            )
+        )
+        processed = process_document(document, features, now=now)
+        result_ref = (
+            processed.signals[0].id
+            if processed.signals
+            else processed.feature_set_id
+        )
+        job = Job(
+            id=job_id,
+            kind="news_ingestion",
+            status="succeeded",
+            created_at=now,
+            updated_at=now,
+            progress=1.0,
+            result_ref=result_ref,
+            completed_at=now,
+        )
+
         async def transaction(session: ydb.aio.QuerySession) -> IngestResult:
             tx = session.transaction()
             existing_job: Job | None = None
@@ -409,23 +523,6 @@ class YdbNewsRepository:
                     raise IdempotencyConflictError
                 return IngestResult(job=existing_job, replayed=True)
 
-            now = utc_now()
-            processed = process_document(document, now=now)
-            result_ref = (
-                processed.signals[0].id
-                if processed.signals
-                else processed.feature_set_id
-            )
-            job = Job(
-                id=job_id,
-                kind="news_ingestion",
-                status="succeeded",
-                created_at=now,
-                updated_at=now,
-                progress=1.0,
-                result_ref=result_ref,
-                completed_at=now,
-            )
             parameters = {
                 "$idempotency_key": idempotency_key,
                 "$payload_hash": document.payload_hash,
@@ -482,6 +579,19 @@ class YdbNewsRepository:
 
         return await self._require_pool().retry_operation_async(transaction)
 
+    async def _get_ingest_request(
+        self,
+        idempotency_key: str,
+    ) -> tuple[str, Job] | None:
+        result_sets = await self._require_pool().execute_with_retries(
+            SELECT_REQUEST_QUERY,
+            {"$idempotency_key": idempotency_key},
+        )
+        if not result_sets or not result_sets[0].rows:
+            return None
+        row = result_sets[0].rows[0]
+        return row.payload_hash, job_from_row(row)
+
     async def get_job(self, job_id: str) -> Job | None:
         result_sets = await self._require_pool().execute_with_retries(
             SELECT_JOB_QUERY,
@@ -490,6 +600,23 @@ class YdbNewsRepository:
         if not result_sets or not result_sets[0].rows:
             return None
         return job_from_row(result_sets[0].rows[0])
+
+    async def list_news(
+        self,
+        *,
+        source_id: str | None,
+        limit: int,
+    ) -> list[NewsRecord]:
+        result_sets = await self._require_pool().execute_with_retries(
+            SELECT_NEWS_QUERY
+        )
+        rows = result_sets[0].rows if result_sets else []
+        records = (
+            news_from_row(row)
+            for row in rows
+            if source_id is None or row.source_id == source_id
+        )
+        return list(records)[:limit]
 
     async def list_signals(
         self,
@@ -592,6 +719,31 @@ def json_list(value: object) -> list[object]:
     if not isinstance(decoded, (list, tuple)):
         raise ValueError("stored JSON value must be a list")
     return list(decoded)
+
+
+def json_object(value: object) -> dict[str, object]:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    decoded = json.loads(value) if isinstance(value, str) else value
+    if not isinstance(decoded, dict):
+        raise ValueError("stored JSON value must be an object")
+    return {str(key): item for key, item in decoded.items()}
+
+
+def news_from_row(row: object) -> NewsRecord:
+    return NewsRecord(
+        id=row.news_id,
+        source_id=row.source_id,
+        external_id=row.external_id,
+        published_at=row.published_at,
+        received_at=row.received_at,
+        title=row.title,
+        url=row.url,
+        content=row.content,
+        language=row.language,
+        source_metadata=json_object(row.source_metadata),
+        created_at=row.created_at,
+    )
 
 
 def signal_from_row(row: object) -> SignalRecord:
@@ -826,6 +978,24 @@ FROM `jobs`
 WHERE job_id = $job_id;
 """
 
+SELECT_NEWS_QUERY = """
+SELECT
+    news_id,
+    source_id,
+    external_id,
+    published_at,
+    received_at,
+    title,
+    url,
+    content,
+    language,
+    source_metadata,
+    created_at
+FROM `news_items`
+ORDER BY published_at DESC, news_id DESC
+LIMIT 1000;
+"""
+
 SIGNAL_SELECT_COLUMNS = """
     signal_id,
     news_id,
@@ -871,6 +1041,7 @@ VALIDATED_QUERIES = (
     INSERT_FEATURE_SET_QUERY,
     INSERT_SIGNAL_QUERY,
     SELECT_JOB_QUERY,
+    SELECT_NEWS_QUERY,
     SELECT_SIGNALS_QUERY,
     SELECT_SIGNAL_QUERY,
 )

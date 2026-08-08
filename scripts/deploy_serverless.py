@@ -25,7 +25,7 @@ def build_payload(environment: Mapping[str, str]) -> dict[str, object]:
             "cores": "1",
             "coreFraction": "100",
         },
-        "executionTimeout": "30s",
+        "executionTimeout": "60s",
         "serviceAccountId": environment["YC_RUNTIME_SERVICE_ACCOUNT_ID"],
         "imageSpec": {
             "imageUrl": environment["IMAGE_URL"],
@@ -34,6 +34,9 @@ def build_payload(environment: Mapping[str, str]) -> dict[str, object]:
                 "APP_REVISION": environment["DEPLOY_SHA"],
                 "YDB_ENDPOINT": environment["YDB_ENDPOINT"],
                 "YDB_DATABASE": environment["YDB_DATABASE"],
+                "YANDEX_GPT_ENABLED": "true",
+                "YANDEX_GPT_FOLDER_ID": environment["YC_FOLDER_ID"],
+                "YANDEX_GPT_MODEL": "yandexgpt-lite",
             },
         },
         "concurrency": "8",

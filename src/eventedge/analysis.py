@@ -362,6 +362,7 @@ SOURCE_QUALITY: dict[str, float] = {
     "company": 0.95,
     "cbr_press": 0.95,
     "moex": 0.95,
+    "moex_news": 0.95,
     "interfax": 0.90,
     "reuters": 0.90,
     "tass": 0.82,

@@ -150,6 +150,17 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
     assert listed.status_code == 200
     assert [item["id"] for item in listed.json()["data"]] == [signal_id]
 
+    news = client.get("/v1/news", params={"source_id": "interfax"})
+    assert news.status_code == 200
+    stored = next(
+        item
+        for item in news.json()["data"]
+        if item["external_id"] == NEWS_PAYLOAD["external_id"]
+    )
+    assert stored["title"] == NEWS_PAYLOAD["title"]
+    assert stored["content"] == NEWS_PAYLOAD["content"]
+    assert stored["related_signals"][0]["id"] == signal_id
+
     cached = client.get(
         f"/v1/signals/{signal_id}",
         headers={"If-None-Match": signal.headers["ETag"]},

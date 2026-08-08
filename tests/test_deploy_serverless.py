@@ -6,6 +6,7 @@ def test_deployment_payload_has_budget_caps() -> None:
         {
             "YC_CONTAINER_ID": "container-id",
             "YC_RUNTIME_SERVICE_ACCOUNT_ID": "runtime-sa-id",
+            "YC_FOLDER_ID": "folder-id",
             "IMAGE_URL": "cr.yandex/registry/eventedge-api:sha",
             "DEPLOY_SHA": "abc123",
             "YDB_ENDPOINT": "grpcs://ydb.example:2135",
@@ -19,7 +20,7 @@ def test_deployment_payload_has_budget_caps() -> None:
         "coreFraction": "100",
     }
     assert payload["provisionPolicy"] == {"minInstances": "0"}
-    assert payload["executionTimeout"] == "30s"
+    assert payload["executionTimeout"] == "60s"
     assert payload["scalingPolicy"] == {
         "zoneInstancesLimit": "1",
         "zoneRequestsLimit": "50",
@@ -30,6 +31,9 @@ def test_deployment_payload_has_budget_caps() -> None:
         "APP_REVISION": "abc123",
         "YDB_ENDPOINT": "grpcs://ydb.example:2135",
         "YDB_DATABASE": "/region/cloud/database",
+        "YANDEX_GPT_ENABLED": "true",
+        "YANDEX_GPT_FOLDER_ID": "folder-id",
+        "YANDEX_GPT_MODEL": "yandexgpt-lite",
     }
 
 

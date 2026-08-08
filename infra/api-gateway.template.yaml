@@ -95,6 +95,27 @@ paths:
         type: serverless_containers
         container_id: __API_CONTAINER_ID__
         service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /v1/news:
+    get:
+      operationId: listNews
+      parameters:
+        - name: source_id
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: News list with related signals.
+        '400':
+          description: Invalid request.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
   /v1/signals/{signal_id}:
     get:
       operationId: getSignal
