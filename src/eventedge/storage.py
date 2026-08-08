@@ -158,19 +158,30 @@ class YdbNewsRepository:
             root_certificates=ydb.load_ydb_root_certificate(),
         )
         self._driver = ydb.aio.Driver(config)
-        self._pool = ydb.aio.QuerySessionPool(self._driver, size=2)
+        self._pool: ydb.aio.QuerySessionPool | None = None
 
     async def start(self) -> None:
-        await self._driver.wait(timeout=10, fail_fast=True)
-        for statement in SCHEMA_STATEMENTS:
-            await self._pool.execute_with_retries(statement)
+        try:
+            await self._driver.wait(timeout=10, fail_fast=True)
+            self._pool = ydb.aio.QuerySessionPool(self._driver, size=2)
+            for statement in SCHEMA_STATEMENTS:
+                await self._pool.execute_with_retries(statement)
+        except Exception:
+            if self._pool is not None:
+                await self._pool.stop()
+                self._pool = None
+            await self._driver.stop(timeout=5)
+            raise
 
     async def stop(self) -> None:
-        await self._pool.stop()
+        if self._pool is not None:
+            await self._pool.stop()
+            self._pool = None
         await self._driver.stop(timeout=5)
 
     async def ready(self) -> bool:
-        result_sets = await self._pool.execute_with_retries("SELECT 1 AS ready;")
+        pool = self._require_pool()
+        result_sets = await pool.execute_with_retries("SELECT 1 AS ready;")
         return bool(result_sets and result_sets[0].rows[0].ready == 1)
 
     async def ingest(self, idempotency_key: str, document: NewsDocument) -> IngestResult:
@@ -235,16 +246,21 @@ class YdbNewsRepository:
                     pass
             return IngestResult(job=job, replayed=False)
 
-        return await self._pool.retry_operation_async(transaction)
+        return await self._require_pool().retry_operation_async(transaction)
 
     async def get_job(self, job_id: str) -> Job | None:
-        result_sets = await self._pool.execute_with_retries(
+        result_sets = await self._require_pool().execute_with_retries(
             SELECT_JOB_QUERY,
             {"$job_id": job_id},
         )
         if not result_sets or not result_sets[0].rows:
             return None
         return job_from_row(result_sets[0].rows[0])
+
+    def _require_pool(self) -> ydb.aio.QuerySessionPool:
+        if self._pool is None:
+            raise RuntimeError("YDB repository has not been started")
+        return self._pool
 
 
 def job_from_row(row: object) -> Job:
