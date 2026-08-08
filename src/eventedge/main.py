@@ -17,7 +17,8 @@ from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from eventedge import __version__
-from eventedge.collectors import collect_cbr_press
+from eventedge.collectors import collect_cbr_press, collect_moex_news
+from eventedge.llm import analyzer_from_environment
 from eventedge.storage import (
     IdempotencyConflictError,
     MemoryNewsRepository,
@@ -78,13 +79,18 @@ class TimerEnvelope(BaseModel):
 
 
 def repository_from_environment(environment: Mapping[str, str]) -> NewsRepository:
+    analyzer = analyzer_from_environment(environment)
     endpoint = environment.get("YDB_ENDPOINT")
     database = environment.get("YDB_DATABASE")
     if endpoint and database:
-        return YdbNewsRepository(endpoint=endpoint, database=database)
+        return YdbNewsRepository(
+            endpoint=endpoint,
+            database=database,
+            analyzer=analyzer,
+        )
     if endpoint or database:
         raise RuntimeError("YDB_ENDPOINT and YDB_DATABASE must be configured together")
-    return MemoryNewsRepository()
+    return MemoryNewsRepository(analyzer=analyzer)
 
 
 @asynccontextmanager
@@ -105,7 +111,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.state.news_repository = repository_from_environment(os.environ)
-app.state.collectors = {"cbr_press": collect_cbr_press}
+app.state.collectors = {
+    "cbr_press": collect_cbr_press,
+    "moex_news": collect_moex_news,
+}
 
 
 def utc_now() -> str:
@@ -316,6 +325,49 @@ async def get_job(request: Request, job_id: str) -> JSONResponse:
             detail="The asynchronous job does not exist.",
         )
     return JSONResponse(content={"data": job.as_api_dict()})
+
+
+@app.get("/v1/news", tags=["News"])
+async def list_news(
+    request: Request,
+    source_id: Annotated[
+        str | None,
+        Query(pattern=r"^[a-z][a-z0-9_-]{2,63}$"),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> JSONResponse:
+    repository: NewsRepository = request.app.state.news_repository
+    news = await repository.list_news(source_id=source_id, limit=limit)
+    signals = await repository.list_signals(
+        ticker=None,
+        directions=None,
+        status=None,
+        min_confidence=None,
+        limit=1000,
+    )
+    signals_by_news: dict[str, list[dict[str, object]]] = {}
+    for signal in signals:
+        signals_by_news.setdefault(signal.news_id, []).append(
+            {
+                "id": signal.id,
+                "ticker": signal.ticker,
+                "direction": signal.direction,
+                "action": signal.action,
+                "score": signal.score,
+                "confidence": signal.confidence,
+            }
+        )
+    data = []
+    for item in news:
+        record = item.as_api_dict()
+        record["related_signals"] = signals_by_news.get(item.id, [])
+        data.append(record)
+    return JSONResponse(
+        content={
+            "data": data,
+            "meta": {"limit": limit, "has_more": False, "next_cursor": None},
+        }
+    )
 
 
 @app.get("/v1/signals", tags=["Signals"])

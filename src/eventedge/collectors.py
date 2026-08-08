@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 
+from eventedge.analysis import NewsAnalysisInput, RuleBasedNewsExtractor
 from eventedge.storage import (
     NewsDocument,
     NewsRepository,
@@ -18,8 +19,9 @@ from eventedge.storage import (
     utc_now,
 )
 
-MAX_FEED_BYTES = 2_000_000
+MAX_FEED_BYTES = 8_000_000
 MAX_CONTENT_LENGTH = 200_000
+RSS_CONTENT_TAG = "{http://purl.org/rss/1.0/modules/content/}encoded"
 
 
 @dataclass(frozen=True)
@@ -28,6 +30,7 @@ class RssFeedConfig:
     url: str
     language: str = "ru"
     max_items: int = 20
+    max_accepted: int | None = None
     timeout_seconds: float = 15
 
 
@@ -79,7 +82,11 @@ def parse_rss(feed: bytes, *, max_items: int) -> list[RssItem]:
         url = (element.findtext("link") or "").strip()
         external_id = (element.findtext("guid") or url).strip()
         published = (element.findtext("pubDate") or "").strip()
-        description = element.findtext("description") or ""
+        description = (
+            element.findtext(RSS_CONTENT_TAG)
+            or element.findtext("description")
+            or ""
+        )
         if not all((title, url, external_id, published)):
             continue
 
@@ -125,14 +132,19 @@ async def collect_rss_feed(
     config: RssFeedConfig,
     *,
     fetcher: Callable[[str, float], bytes] = fetch_rss,
+    item_filter: Callable[[RssItem], bool] | None = None,
 ) -> dict[str, int]:
     feed = await asyncio.to_thread(fetcher, config.url, config.timeout_seconds)
     items = parse_rss(feed, max_items=config.max_items)
     received_at = utc_now()
     accepted = 0
     replayed = 0
+    matched = 0
 
     for item in items:
+        if item_filter is not None and not item_filter(item):
+            continue
+        matched += 1
         source_metadata = {
             "collector": "rss",
             "feed_url": config.url,
@@ -170,8 +182,15 @@ async def collect_rss_feed(
             replayed += 1
         else:
             accepted += 1
+            if config.max_accepted is not None and accepted >= config.max_accepted:
+                break
 
-    return {"fetched": len(items), "accepted": accepted, "replayed": replayed}
+    return {
+        "fetched": len(items),
+        "matched": matched,
+        "accepted": accepted,
+        "replayed": replayed,
+    }
 
 
 CBR_PRESS_FEED = RssFeedConfig(
@@ -183,3 +202,32 @@ CBR_PRESS_FEED = RssFeedConfig(
 
 async def collect_cbr_press(repository: NewsRepository) -> dict[str, int]:
     return await collect_rss_feed(repository, CBR_PRESS_FEED)
+
+
+MOEX_NEWS_FEED = RssFeedConfig(
+    source_id="moex_news",
+    url="https://www.moex.com/export/news.aspx?cat=100",
+    max_items=300,
+    max_accepted=3,
+    timeout_seconds=20,
+)
+
+
+def is_watched_company_news(item: RssItem) -> bool:
+    features = RuleBasedNewsExtractor().extract(
+        NewsAnalysisInput(
+            source_id="moex_news",
+            title=item.title,
+            content=item.content,
+            language="ru",
+        )
+    )
+    return bool(features.instruments)
+
+
+async def collect_moex_news(repository: NewsRepository) -> dict[str, int]:
+    return await collect_rss_feed(
+        repository,
+        MOEX_NEWS_FEED,
+        item_filter=is_watched_company_news,
+    )

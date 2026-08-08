@@ -15,7 +15,7 @@ cloud: eventedge
 │   ├── Serverless Container: eventedge-api
 │   ├── API Gateway: eventedge-api
 │   ├── YDB Serverless: eventedge-prod
-│   ├── Timer trigger: eventedge-cbr-press
+│   ├── Timer trigger: eventedge-moex-news
 │   └── VPC: eventedge-prod (без подсетей и разрешающих правил)
 └── folder: dev
 ```
@@ -46,7 +46,7 @@ cloud: eventedge
 | Service account | `eventedge-gateway` | Вызов только приватного контейнера API |
 | API Gateway | `eventedge-api` | Публичная точка входа и маршрутизация к контейнеру |
 | YDB Serverless | `eventedge-prod` | Новости, признаки, сигналы, idempotency-записи и jobs |
-| Timer trigger | `eventedge-cbr-press` | Опрос официального RSS Банка России раз в 15 минут |
+| Timer trigger | `eventedge-moex-news` | Опрос официального RSS Московской биржи раз в 15 минут |
 
 ## CI/CD и автоматические merge
 
@@ -58,6 +58,7 @@ cloud: eventedge
 - Production-ревизия ограничена 256 MB памяти, одной инстанцией на зону, 50 запросами на зону и `min-instances=0`.
 - YDB не имеет зарезервированной мощности, ограничена 10 RU/с и 1 ГБ, защищена от удаления.
 - Runtime service account имеет `ydb.editor` только на базе `eventedge-prod`; роль не выдана на каталог или облако.
+- Runtime service account имеет `ai.languageModels.user` в production-каталоге для вызова YandexGPT через короткоживущий metadata IAM token.
 
 GitHub Free не предоставляет branch protection для приватного репозитория. Поэтому запрет прямого push в `main` нельзя обеспечить на стороне GitHub без GitHub Pro; автоматический pipeline сам прямой push не использует.
 
@@ -73,7 +74,7 @@ Gateway и YDB-backed ревизия контейнера развёрнуты. 
 
 Приватный production smoke test подтвердил запись синтетической новости в `eventedge-prod`, повтор запроса с тем же `Idempotency-Key` без дубля и последующее чтение созданного job. Все YDB-запросы дополнительно проходят server-side validation при старте контейнера.
 
-Первый реальный источник — [официальный RSS пресс-релизов Банка России](https://www.cbr.ru/rss/RssPress). Production poll загрузил 10 публикаций; повторный poll вернул 10 replay и не создал дублей. Trigger `eventedge-cbr-press` активен с расписанием `0,15,30,45 * ? * * *`, использует существующий `eventedge-gateway` и делает до трёх попыток с интервалом 30 секунд.
+Первый источник сигналов — [официальный RSS Московской биржи](https://www.moex.com/a40). Предфильтр оставляет только новости по наблюдаемым компаниям, после чего YandexGPT извлекает строгие семантические признаки, а версия `news-baseline-0.1.0` детерминированно рассчитывает направление и действие. Trigger `eventedge-moex-news` работает раз в 15 минут, использует существующий `eventedge-gateway` и делает до трёх попыток с интервалом 30 секунд.
 
 ## Проверка
 
@@ -87,4 +88,4 @@ Yandex Cloud OIDC exchange succeeded
 
 ## Следующий этап
 
-Строгий контракт семантических признаков, первая детерминированная версия scoring и атомарное сохранение результата в YDB реализованы: ingest создаёт feature set, рассчитывает сигнал, завершает job и делает сигнал доступным через read API. Следующий этап — заменить rule-based извлечение на YandexGPT со строгим JSON-ответом, не меняя формулу итогового направления. Роль для Yandex Foundation Models будет запрошена отдельно и только перед первым реальным LLM-вызовом; роли для Object Storage и Message Queue добавляются вместе с использующим их инкрементом, а не заранее.
+Следующий этап — добавить отдельные проверяемые блоки котировок и фундаментальных показателей, затем калибровать веса и пороги на исторической выборке. Object Storage и Message Queue не подключаются, пока их необходимость не подтверждена нагрузкой.

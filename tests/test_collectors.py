@@ -58,5 +58,5 @@ def test_rss_collection_is_idempotent() -> None:
 
     first, second = asyncio.run(scenario())
 
-    assert first == {"fetched": 2, "accepted": 2, "replayed": 0}
-    assert second == {"fetched": 2, "accepted": 0, "replayed": 2}
+    assert first == {"fetched": 2, "matched": 2, "accepted": 2, "replayed": 0}
+    assert second == {"fetched": 2, "matched": 2, "accepted": 0, "replayed": 2}

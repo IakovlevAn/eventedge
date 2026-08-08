@@ -683,7 +683,18 @@ kbd {
 }
 
 .empty-state span {
+  max-width: 420px;
   font-size: 9px;
+  text-align: center;
+  line-height: 1.5;
+}
+
+.is-spinning {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 /* Company view */
@@ -2385,6 +2396,19 @@ kbd {
   font-size: 8px;
   border-top: 1px solid #252932;
   background: #0e1014;
+}
+
+.reader-dialog > footer a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  color: #aaa2b9;
+  text-decoration: none;
+}
+
+.reader-dialog > footer a:hover {
+  color: #e2dee8;
 }
 
 /* Methodology */
