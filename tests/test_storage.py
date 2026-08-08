@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 import ydb
@@ -11,6 +12,8 @@ from eventedge.storage import (
     MemoryNewsRepository,
     NewsDocument,
     YdbNewsRepository,
+    filter_signals,
+    signal_from_row,
     stable_id,
 )
 
@@ -136,6 +139,48 @@ def test_runtime_metadata_credentials_can_be_constructed() -> None:
     credentials = ydb.iam.MetadataUrlCredentials()
 
     assert credentials is not None
+
+
+def test_ydb_naive_timestamps_are_normalized_before_expiry_filter() -> None:
+    naive = datetime(2026, 8, 1, 10)
+    row = SimpleNamespace(
+        signal_id="sig_test",
+        news_id="news_test",
+        ticker="SBER",
+        as_of=naive,
+        data_cutoff_at=naive,
+        status="active",
+        direction="up",
+        action="consider_buy",
+        horizon_value=3,
+        horizon_unit="calendar_days",
+        score=25.0,
+        strength=0.25,
+        confidence=0.75,
+        summary="Test signal",
+        factor_contributions="[]",
+        evidence_refs="[]",
+        expires_at=datetime(2026, 8, 4, 10),
+        invalidation_conditions="[]",
+        model_version="news-baseline-0.1.1",
+        config_version=1,
+        created_at=naive,
+    )
+
+    signal = signal_from_row(row)
+    expired = filter_signals(
+        [signal],
+        ticker=None,
+        directions=None,
+        status="expired",
+        min_confidence=None,
+        limit=10,
+    )
+
+    assert signal.as_of.tzinfo is UTC
+    assert signal.expires_at.tzinfo is UTC
+    assert len(expired) == 1
+    assert expired[0].status == "expired"
 
 
 def test_ydb_runtime_is_created_inside_running_event_loop(
