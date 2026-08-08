@@ -27,6 +27,8 @@ jobs:
       YC_FOLDER_ID: ${{ vars.YC_FOLDER_ID }}
       YC_RUNTIME_SERVICE_ACCOUNT_ID: ${{ vars.YC_RUNTIME_SERVICE_ACCOUNT_ID }}
       EVENTEDGE_API_URL: ${{ vars.EVENTEDGE_API_URL }}
+      YDB_ENDPOINT: ${{ vars.YDB_ENDPOINT }}
+      YDB_DATABASE: ${{ vars.YDB_DATABASE }}
     steps:
       - name: Check out the tested main revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

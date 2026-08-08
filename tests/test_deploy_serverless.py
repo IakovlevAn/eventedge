@@ -8,6 +8,8 @@ def test_deployment_payload_has_budget_caps() -> None:
             "YC_RUNTIME_SERVICE_ACCOUNT_ID": "runtime-sa-id",
             "IMAGE_URL": "cr.yandex/registry/eventedge-api:sha",
             "DEPLOY_SHA": "abc123",
+            "YDB_ENDPOINT": "grpcs://ydb.example:2135",
+            "YDB_DATABASE": "/region/cloud/database",
         }
     )
 
@@ -22,6 +24,11 @@ def test_deployment_payload_has_budget_caps() -> None:
         "zoneRequestsLimit": "50",
     }
     assert payload["runtime"] == {"http": {}}
+    assert payload["imageSpec"]["environment"] == {
+        "APP_ENV": "prod",
+        "YDB_ENDPOINT": "grpcs://ydb.example:2135",
+        "YDB_DATABASE": "/region/cloud/database",
+    }
 
 
 def test_api_error_masker_hides_tokens() -> None:

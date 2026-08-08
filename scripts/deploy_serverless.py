@@ -29,7 +29,11 @@ def build_payload(environment: Mapping[str, str]) -> dict[str, object]:
         "serviceAccountId": environment["YC_RUNTIME_SERVICE_ACCOUNT_ID"],
         "imageSpec": {
             "imageUrl": environment["IMAGE_URL"],
-            "environment": {"APP_ENV": "prod"},
+            "environment": {
+                "APP_ENV": "prod",
+                "YDB_ENDPOINT": environment["YDB_ENDPOINT"],
+                "YDB_DATABASE": environment["YDB_DATABASE"],
+            },
         },
         "concurrency": "8",
         "provisionPolicy": {"minInstances": "0"},

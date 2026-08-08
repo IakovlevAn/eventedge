@@ -279,6 +279,10 @@ paths:
               schema:
                 type: string
                 format: uri-reference
+            Idempotency-Replayed:
+              description: Present and equal to true when the same command was accepted earlier.
+              schema:
+                type: boolean
           content:
             application/json:
               schema:
