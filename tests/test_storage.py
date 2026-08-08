@@ -1,9 +1,16 @@
 import asyncio
 from datetime import UTC, datetime
 
+import pytest
 import ydb
 
-from eventedge.storage import MemoryNewsRepository, NewsDocument, stable_id
+from eventedge.storage import (
+    SCHEMA_STATEMENTS,
+    MemoryNewsRepository,
+    NewsDocument,
+    YdbNewsRepository,
+    stable_id,
+)
 
 
 def test_concurrent_retries_create_one_job() -> None:
@@ -45,3 +52,51 @@ def test_runtime_metadata_credentials_can_be_constructed() -> None:
     credentials = ydb.iam.MetadataUrlCredentials()
 
     assert credentials is not None
+
+
+def test_ydb_pool_is_created_inside_running_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+
+    class FakeDriver:
+        async def wait(self, *, timeout: int, fail_fast: bool) -> None:
+            asyncio.get_running_loop()
+            events.append(f"driver.wait:{timeout}:{fail_fast}")
+
+        async def stop(self, *, timeout: int) -> None:
+            events.append(f"driver.stop:{timeout}")
+
+    class FakePool:
+        def __init__(self, driver: FakeDriver, *, size: int) -> None:
+            asyncio.get_running_loop()
+            events.append(f"pool.init:{size}")
+
+        async def execute_with_retries(self, statement: str) -> list[object]:
+            events.append("schema")
+            return []
+
+        async def stop(self) -> None:
+            events.append("pool.stop")
+
+    monkeypatch.setattr(ydb.aio, "Driver", lambda config: FakeDriver())
+    monkeypatch.setattr(ydb.aio, "QuerySessionPool", FakePool)
+
+    repository = YdbNewsRepository(
+        endpoint="grpcs://localhost:2135",
+        database="/local",
+        credentials=ydb.AnonymousCredentials(),
+    )
+    assert events == []
+
+    async def scenario() -> None:
+        await repository.start()
+        await repository.stop()
+
+    asyncio.run(scenario())
+
+    assert events == [
+        "driver.wait:10:True",
+        "pool.init:2",
+        *("schema" for _ in SCHEMA_STATEMENTS),
+        "pool.stop",
+        "driver.stop:5",
+    ]
