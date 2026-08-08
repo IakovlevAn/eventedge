@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
@@ -10,13 +11,12 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 
-from eventedge.analysis import NewsAnalysisInput, RuleBasedNewsExtractor
+from eventedge.analysis import EventType, NewsAnalysisInput, RuleBasedNewsExtractor
 from eventedge.storage import (
     NewsDocument,
     NewsRepository,
     canonical_payload_hash,
     stable_id,
-    utc_now,
 )
 
 MAX_FEED_BYTES = 8_000_000
@@ -82,8 +82,17 @@ def parse_rss(feed: bytes, *, max_items: int) -> list[RssItem]:
         url = (element.findtext("link") or "").strip()
         external_id = (element.findtext("guid") or url).strip()
         published = (element.findtext("pubDate") or "").strip()
+        full_text = next(
+            (
+                child.text
+                for child in element
+                if child.tag.rsplit("}", 1)[-1] == "full-text" and child.text
+            ),
+            None,
+        )
         description = (
-            element.findtext(RSS_CONTENT_TAG)
+            full_text
+            or element.findtext(RSS_CONTENT_TAG)
             or element.findtext("description")
             or ""
         )
@@ -109,7 +118,7 @@ def parse_rss(feed: bytes, *, max_items: int) -> list[RssItem]:
                 categories=categories,
             )
         )
-    return parsed
+    return sorted(parsed, key=lambda item: item.published_at, reverse=True)
 
 
 def fetch_rss(url: str, timeout_seconds: float) -> bytes:
@@ -136,7 +145,6 @@ async def collect_rss_feed(
 ) -> dict[str, int]:
     feed = await asyncio.to_thread(fetcher, config.url, config.timeout_seconds)
     items = parse_rss(feed, max_items=config.max_items)
-    received_at = utc_now()
     accepted = 0
     replayed = 0
     matched = 0
@@ -165,7 +173,7 @@ async def collect_rss_feed(
             source_id=config.source_id,
             external_id=item.external_id,
             published_at=item.published_at,
-            received_at=received_at,
+            received_at=item.published_at,
             title=item.title,
             url=item.url,
             content=item.content,
@@ -197,17 +205,42 @@ CBR_PRESS_FEED = RssFeedConfig(
     source_id="cbr_press",
     url="https://www.cbr.ru/rss/RssPress",
     max_items=10,
+    max_accepted=3,
+)
+
+CBR_MARKET_MARKERS = (
+    "ключевая ставка",
+    "денежно-кредитн",
+    "инфляц",
+    "валют",
+    "курс рубл",
+    "банковский сектор",
+    "банковская статистика",
+    "ликвидност",
+    "кредитован",
+    "капитала банк",
+    "регулирован",
+    "надзор",
 )
 
 
+def is_cbr_market_news(item: RssItem) -> bool:
+    context = " ".join((item.title, item.content, *item.categories)).casefold()
+    return any(marker in context for marker in CBR_MARKET_MARKERS)
+
+
 async def collect_cbr_press(repository: NewsRepository) -> dict[str, int]:
-    return await collect_rss_feed(repository, CBR_PRESS_FEED)
+    return await collect_rss_feed(
+        repository,
+        CBR_PRESS_FEED,
+        item_filter=is_cbr_market_news,
+    )
 
 
 MOEX_NEWS_FEED = RssFeedConfig(
     source_id="moex_news",
     url="https://www.moex.com/export/news.aspx?cat=100",
-    max_items=300,
+    max_items=1000,
     max_accepted=3,
     timeout_seconds=20,
 )
@@ -226,6 +259,7 @@ MOEX_NON_EQUITY_TITLE_MARKERS = (
     "об исключении ценных бумаг из списка",
     "о дополнительных условиях проведения торгов ценными бумагами",
     "об изменении уровня листинга ценных бумаг",
+    "о приостановке торгов",
     "изменены значения верхней границы ценового коридора",
     "изменены значения нижней границы ценового коридора",
 )
@@ -250,9 +284,203 @@ def is_watched_company_news(item: RssItem) -> bool:
     return bool(features.instruments)
 
 
+MARKET_NOISE_TITLE_MARKERS = (
+    "прогноз по цене акций",
+    "стоит ли покупать",
+    "технический анализ",
+    "целевая цена",
+    "акции могут вырасти",
+    "обзор размещения",
+    "идеи на первичном рынке",
+    "итоги недели",
+    "арене",
+    "арена",
+    "футбол",
+    "матч",
+    "многодетн",
+    "знакомит с производством",
+    "в честь пятилетия",
+    "в честь юбилея",
+    "самокат",
+    "воса",
+    "реестр акционеров для участия",
+    "реестр кредиторов",
+    "облигац",
+    "бондов",
+    "благотвор",
+    "фестивал",
+)
+
+MARKET_EVENT_MARKERS = (
+    "дивиденд",
+    "отчетност",
+    "отчётност",
+    "финансовые результат",
+    "прибыл",
+    "выручк",
+    "ebitda",
+    "санкц",
+    "ограничен",
+    "лицензи",
+    "пошлин",
+    "добыч",
+    "производств",
+    "запустил",
+    "увелич",
+    "снизил",
+    "сократил",
+    "сделк",
+    "продал",
+    "купил",
+    "банкрот",
+    "суд ",
+    "директор",
+    "партнерств",
+    "партнёрств",
+    "соглашени",
+    "объединил",
+    "приостанов",
+    "возобнов",
+    "авари",
+    "пожар",
+    "поставк",
+    "экспорт",
+    "налог",
+)
+
+
+def is_market_signal_candidate(item: RssItem) -> bool:
+    """Keep direct, event-like company news and reject opinion/sports collisions."""
+    if not is_moex_equity_title(item.title):
+        return False
+    normalized_title = item.title.casefold()
+    if any(marker in normalized_title for marker in MARKET_NOISE_TITLE_MARKERS):
+        return False
+    if not any(marker in normalized_title for marker in MARKET_EVENT_MARKERS):
+        return False
+    features = RuleBasedNewsExtractor().extract(
+        NewsAnalysisInput(
+            source_id="market_news",
+            title=item.title,
+            content=item.content,
+            language="ru",
+        )
+    )
+    if not features.instruments or features.event_type is EventType.OTHER:
+        return False
+    if all(item.ticker == "MOEX" for item in features.instruments):
+        return features.event_type in {
+            EventType.FINANCIAL_RESULTS,
+            EventType.DIVIDEND,
+            EventType.MANAGEMENT,
+        }
+    return True
+
+
+GOOGLE_TRUSTED_PUBLISHERS = (
+    "бкс экспресс",
+    "интерфакс",
+    "тасс",
+    "рбк",
+    "ведомости",
+    "коммерсант",
+    "риа новости",
+    "прайм",
+    "forbes",
+    "финам",
+    "frank media",
+    "банки.ру",
+    "агентство бизнес новостей",
+    "энергетика и промышленность россии",
+    "нефть и капитал",
+)
+
+
+def is_google_market_signal_candidate(item: RssItem) -> bool:
+    if not is_market_signal_candidate(item):
+        return False
+    normalized_title = item.title.casefold()
+    return any(publisher in normalized_title for publisher in GOOGLE_TRUSTED_PUBLISHERS)
+
+
+def google_news_search_url(query: str) -> str:
+    return "https://news.google.com/rss/search?" + urllib.parse.urlencode(
+        {"q": f"({query}) when:7d", "hl": "ru", "gl": "RU", "ceid": "RU:ru"}
+    )
+
+
+MARKET_NEWS_FEEDS = (
+    RssFeedConfig(
+        source_id="google_news",
+        url=google_news_search_url("Сбербанк OR ВТБ"),
+        max_items=100,
+        max_accepted=2,
+    ),
+    RssFeedConfig(
+        source_id="google_news",
+        url=google_news_search_url(
+            "Лукойл OR Газпром OR Роснефть OR Новатэк OR Татнефть"
+        ),
+        max_items=100,
+        max_accepted=2,
+    ),
+    RssFeedConfig(
+        source_id="google_news",
+        url=google_news_search_url(
+            "Яндекс OR Норникель OR Магнит OR Полюс OR Северсталь OR АЛРОСА"
+        ),
+        max_items=100,
+        max_accepted=2,
+    ),
+    RssFeedConfig(
+        source_id="interfax",
+        url="https://www.interfax.ru/rss",
+        max_items=50,
+        max_accepted=3,
+    ),
+    RssFeedConfig(
+        source_id="tass",
+        url="https://tass.ru/rss/v2.xml",
+        max_items=100,
+        max_accepted=3,
+    ),
+    RssFeedConfig(
+        source_id="rbc",
+        url="https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
+        max_items=50,
+        max_accepted=3,
+    ),
+)
+
+
 async def collect_moex_news(repository: NewsRepository) -> dict[str, int]:
     return await collect_rss_feed(
         repository,
         MOEX_NEWS_FEED,
-        item_filter=is_watched_company_news,
+        item_filter=is_market_signal_candidate,
     )
+
+
+async def collect_market_news(repository: NewsRepository) -> dict[str, int]:
+    """Backfill and refresh the complete low-cost market news surface."""
+    totals = {"fetched": 0, "matched": 0, "accepted": 0, "replayed": 0}
+    results = await asyncio.gather(
+        *(
+            collect_rss_feed(
+                repository,
+                config,
+                item_filter=(
+                    is_google_market_signal_candidate
+                    if config.source_id == "google_news"
+                    else is_market_signal_candidate
+                ),
+            )
+            for config in MARKET_NEWS_FEEDS
+        ),
+        collect_cbr_press(repository),
+        collect_moex_news(repository),
+    )
+    for result in results:
+        for key in totals:
+            totals[key] += result[key]
+    return totals

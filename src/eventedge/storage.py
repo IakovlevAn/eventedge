@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
@@ -225,14 +225,25 @@ def process_document(
 ) -> ProcessedNews:
     created_at = now or utc_now()
     news_id = stable_id("news_", f"{document.source_id}\x00{document.external_id}")
+    signal_instruments = [
+        instrument
+        for instrument in features.instruments
+        if instrument.relevance >= 0.9
+        and not (document.source_id == "moex_news" and instrument.ticker == "MOEX")
+    ]
+    if document.source_id == "cbr_press":
+        signal_instruments = []
+    signal_features = features.model_copy(update={"instruments": signal_instruments})
     baseline_signals = score_features(
-        features,
+        signal_features,
         source_id=document.source_id,
     )
     feature_set_id = stable_id(
         "feat_",
         f"{news_id}\x00{document.payload_hash}\x00{features.extractor_version}",
     )
+    expires_at = document.received_at + timedelta(days=3)
+    signal_status = "active" if expires_at > created_at else "expired"
     signal_records = tuple(
         SignalRecord(
             id=stable_id(
@@ -246,7 +257,7 @@ def process_document(
             ticker=signal.ticker,
             as_of=document.received_at,
             data_cutoff_at=document.received_at,
-            status="active",
+            status=signal_status,
             direction=signal.direction.value,
             action=signal.action.value,
             horizon_value=3,
@@ -260,7 +271,7 @@ def process_document(
                 for contribution in signal.factor_contributions
             ),
             evidence_refs=(news_id,),
-            expires_at=document.received_at + timedelta(days=3),
+            expires_at=expires_at,
             invalidation_conditions=(
                 "Появилась новая существенная информация по компании.",
                 "Истёк горизонт сигнала.",
@@ -288,9 +299,16 @@ def filter_signals(
     min_confidence: float | None,
     limit: int,
 ) -> list[SignalRecord]:
+    current_time = utc_now()
+    normalized = (
+        replace(signal, status="expired")
+        if signal.status == "active" and signal.expires_at <= current_time
+        else signal
+        for signal in signals
+    )
     filtered = (
         signal
-        for signal in signals
+        for signal in normalized
         if (ticker is None or signal.ticker == ticker)
         and (directions is None or signal.direction in directions)
         and (status is None or signal.status == status)

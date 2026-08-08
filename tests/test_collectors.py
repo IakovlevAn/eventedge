@@ -7,6 +7,10 @@ from eventedge.collectors import (
     RssFeedConfig,
     RssItem,
     collect_rss_feed,
+    google_news_search_url,
+    is_cbr_market_news,
+    is_google_market_signal_candidate,
+    is_market_signal_candidate,
     is_moex_equity_title,
     is_watched_company_news,
     parse_rss,
@@ -83,3 +87,93 @@ def test_moex_equity_filter_rejects_mechanical_listing_notice() -> None:
     assert is_watched_company_news(item) is False
     assert is_moex_equity_title(item.title) is False
     assert is_moex_equity_title("Сбербанк опубликовал финансовые результаты") is True
+    assert is_moex_equity_title("О приостановке торгов ценными бумагами") is False
+
+
+def test_market_candidate_requires_company_event_and_rejects_opinion() -> None:
+    material = RssItem(
+        external_id="market-1",
+        published_at=datetime(2026, 8, 8, tzinfo=UTC),
+        title="Совет директоров Яндекса рекомендовал дивиденды",
+        url="https://example.com/market-1",
+        content="Размер выплаты составит 110 рублей на акцию.",
+        categories=("Бизнес",),
+    )
+    opinion = RssItem(
+        external_id="market-2",
+        published_at=datetime(2026, 8, 8, tzinfo=UTC),
+        title="Стоит ли покупать акции Яндекса: прогноз цены",
+        url="https://example.com/market-2",
+        content="Автор ожидает рост котировок.",
+        categories=("Мнение",),
+    )
+
+    assert is_market_signal_candidate(material) is True
+    assert is_market_signal_candidate(opinion) is False
+
+
+def test_market_candidate_rejects_promo_and_debt_noise() -> None:
+    promo = RssItem(
+        external_id="market-3",
+        published_at=datetime(2026, 8, 8, tzinfo=UTC),
+        title="Татнефть знакомит многодетные семьи с производством",
+        url="https://example.com/market-3",
+        content="Гости посетили предприятие.",
+        categories=(),
+    )
+    debt = RssItem(
+        external_id="market-4",
+        published_at=datetime(2026, 8, 8, tzinfo=UTC),
+        title="ВТБ разместил выпуск однодневных бондов",
+        url="https://example.com/market-4",
+        content="Объем выпуска составил 9 млрд рублей.",
+        categories=(),
+    )
+
+    assert is_market_signal_candidate(promo) is False
+    assert is_market_signal_candidate(debt) is False
+
+
+def test_cbr_filter_keeps_market_policy_and_rejects_commemorative_news() -> None:
+    policy, _ = parse_rss(RSS_FIXTURE, max_items=10)
+    coin = RssItem(
+        external_id="cbr-coin",
+        published_at=datetime(2026, 8, 8, tzinfo=UTC),
+        title="Редкие монеты с редкими животными",
+        url="https://www.cbr.ru/coin",
+        content="Банк России выпустил памятные монеты.",
+        categories=("Нумизматика",),
+    )
+
+    assert is_cbr_market_news(policy) is True
+    assert is_cbr_market_news(coin) is False
+
+
+def test_google_news_search_url_is_a_seven_day_russian_feed() -> None:
+    url = google_news_search_url("Сбербанк OR ВТБ")
+
+    assert url.startswith("https://news.google.com/rss/search?")
+    assert "when%3A7d" in url
+    assert "ceid=RU%3Aru" in url
+
+
+def test_google_candidate_requires_trusted_publisher() -> None:
+    trusted = RssItem(
+        external_id="google-1",
+        published_at=datetime(2026, 8, 8, tzinfo=UTC),
+        title="Яндекс рекомендовал дивиденды - БКС Экспресс",
+        url="https://news.google.com/trusted",
+        content="Выплата составит 110 рублей на акцию.",
+        categories=(),
+    )
+    unknown = RssItem(
+        external_id="google-2",
+        published_at=datetime(2026, 8, 8, tzinfo=UTC),
+        title="Яндекс рекомендовал дивиденды - Новости рядом",
+        url="https://news.google.com/unknown",
+        content="Выплата составит 110 рублей на акцию.",
+        categories=(),
+    )
+
+    assert is_google_market_signal_candidate(trusted) is True
+    assert is_google_market_signal_candidate(unknown) is False

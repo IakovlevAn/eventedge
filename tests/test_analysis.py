@@ -129,6 +129,30 @@ def test_exchange_boilerplate_is_not_a_moex_company_mention() -> None:
     assert features.instruments == []
 
 
+def test_gazprom_neft_does_not_also_match_gazprom() -> None:
+    features = RuleBasedNewsExtractor().extract(
+        NewsAnalysisInput(
+            source_id="interfax",
+            title="Газпром нефть запустила новый сервис",
+            content="Компания повысила эффективность производства.",
+        )
+    )
+
+    assert [item.ticker for item in features.instruments] == ["SIBN"]
+
+
+def test_gazprom_and_gazprom_neft_can_both_match() -> None:
+    features = RuleBasedNewsExtractor().extract(
+        NewsAnalysisInput(
+            source_id="interfax",
+            title="Газпром и Газпром нефть подписали соглашение",
+            content="Компании расширят совместный проект.",
+        )
+    )
+
+    assert {item.ticker for item in features.instruments} == {"GAZP", "SIBN"}
+
+
 def test_feature_contract_cannot_accept_llm_direction_or_action() -> None:
     with pytest.raises(ValidationError) as error:
         SemanticFeatures.model_validate(

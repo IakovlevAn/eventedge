@@ -153,6 +153,7 @@ DEFAULT_MOEX_ALIASES: dict[str, tuple[str, ...]] = {
     "ROSN": ("роснефть", "rosneft", "rosn"),
     "GMKN": ("норникель", "норильский никель", "nornickel", "gmkn"),
     "MGNT": ("магнит", "magnit", "mgnt"),
+    "SIBN": ("газпром нефть", "gazprom neft", "sibn"),
     "GAZP": ("газпром", "gazprom", "gazp"),
     "VTBR": ("втб", "vtb", "vtbr"),
     "PLZL": ("полюс", "polyus", "plzl"),
@@ -273,11 +274,13 @@ class RuleBasedNewsExtractor:
         for ticker, aliases in self._aliases.items():
             for alias in aliases:
                 normalized_alias = alias.casefold()
-                if not self._contains(title, normalized_alias) and not self._contains(
-                    body, normalized_alias
+                search_title = self._without_child_company(title, ticker, normalized_alias)
+                search_body = self._without_child_company(body, ticker, normalized_alias)
+                if not self._contains(search_title, normalized_alias) and not self._contains(
+                    search_body, normalized_alias
                 ):
                     continue
-                relevance = 0.96 if self._contains(title, normalized_alias) else 0.78
+                relevance = 0.96 if self._contains(search_title, normalized_alias) else 0.78
                 matches.append(
                     InstrumentMention(
                         ticker=ticker,
@@ -287,6 +290,17 @@ class RuleBasedNewsExtractor:
                 )
                 break
         return matches
+
+    @staticmethod
+    def _without_child_company(text: str, ticker: str, alias: str) -> str:
+        """Prevent the parent Gazprom alias from swallowing Gazprom Neft news."""
+        if ticker != "GAZP":
+            return text
+        if alias == "газпром":
+            return re.sub(r"(?<!\w)газпром\s+нефт(?:ь|и|ью|е)?(?!\w)", " ", text)
+        if alias == "gazprom":
+            return re.sub(r"(?<!\w)gazprom\s+neft(?!\w)", " ", text)
+        return text
 
     @staticmethod
     def _contains(text: str, alias: str) -> bool:
@@ -369,6 +383,8 @@ SOURCE_QUALITY: dict[str, float] = {
     "reuters": 0.90,
     "tass": 0.82,
     "rbc": 0.78,
+    "google_news": 0.74,
+    "market_news": 0.74,
 }
 
 CONTRIBUTION_LABELS = {

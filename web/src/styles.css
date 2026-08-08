@@ -3646,3 +3646,97 @@ kbd {
   .company-card-grid { grid-template-columns: 1fr; }
   .company-signal-card { min-height: 268px; }
 }
+
+/* Selected identity: concept 5 — compact uppercase quant wordmark. */
+
+.brand-wordmark {
+  display: inline-flex;
+  position: relative;
+  align-items: center;
+  color: #f2f3f5;
+  font-family: Inter, "Arial Black", "SF Pro Display", ui-sans-serif, sans-serif;
+  font-size: 17px;
+  font-weight: 900;
+  font-stretch: condensed;
+  letter-spacing: -0.085em;
+  line-height: 0.82;
+  transform: scaleX(0.94);
+  transform-origin: left center;
+}
+
+.brand-wordmark span,
+.brand-wordmark strong {
+  display: block;
+  font: inherit;
+}
+
+.brand-wordmark strong {
+  position: relative;
+  margin-left: -0.015em;
+  isolation: isolate;
+}
+
+.brand-wordmark strong::after {
+  position: absolute;
+  top: 50%;
+  left: -0.035em;
+  z-index: 1;
+  width: 0.46em;
+  height: 0.46em;
+  border-radius: 50%;
+  background: #090a0d;
+  content: "";
+  transform: translate(-42%, -50%);
+}
+
+.brand:hover .brand-wordmark {
+  color: #fff;
+}
+
+.brand:focus-visible {
+  border-radius: 3px;
+}
+
+@media (max-width: 620px) {
+  .brand .brand-wordmark {
+    display: inline-flex;
+    font-size: 14px;
+  }
+}
+
+.company-mark {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: #f4f5f7;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.04), 0 9px 22px rgba(0, 0, 0, 0.2);
+}
+
+.company-mark::after,
+.company-mark > i {
+  display: none;
+}
+
+.company-mark img {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 7px;
+  object-fit: contain;
+  border-radius: inherit;
+  background: #f4f5f7;
+}
+
+.company-mark--small img {
+  padding: 5px;
+}
+
+.company-mark b {
+  position: relative;
+  z-index: 1;
+  color: #fff;
+}
+
+.company-mark:has(b) {
+  background: linear-gradient(145deg, var(--company-color), var(--company-color-deep));
+}

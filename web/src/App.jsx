@@ -269,6 +269,7 @@ const companyBrands = {
   ROSN: { colors: ["#f2c500", "#111216"], glyph: "РН", domain: "rosneft.ru" },
   GMKN: { colors: ["#1f7ca8", "#124b72"], glyph: "НН", domain: "nornickel.ru" },
   MGNT: { colors: ["#ef3340", "#a71930"], glyph: "МГ", domain: "magnit.com" },
+  SIBN: { colors: ["#1686c8", "#075487"], glyph: "ГН", domain: "gazprom-neft.ru" },
   GAZP: { colors: ["#1686c8", "#075487"], glyph: "ГП", domain: "gazprom.ru" },
   VTBR: { colors: ["#1783ca", "#174687"], glyph: "ВТ", domain: "vtb.ru" },
   PLZL: { colors: ["#d9aa36", "#8d6712"], glyph: "ПЛ", domain: "polyus.com" },
@@ -282,6 +283,7 @@ const companyMeta = {
   YDEX: ["Яндекс", "Технологии"], NVTK: ["Новатэк", "Нефть и газ"],
   TATN: ["Татнефть", "Нефть и газ"], ROSN: ["Роснефть", "Нефть и газ"],
   GMKN: ["Норникель", "Металлы"], MGNT: ["Магнит", "Ритейл"],
+  SIBN: ["Газпром нефть", "Нефть и газ"],
   GAZP: ["Газпром", "Нефть и газ"], VTBR: ["ВТБ", "Финансы"],
   PLZL: ["Полюс", "Металлы"], CHMF: ["Северсталь", "Металлы"],
   ALRS: ["АЛРОСА", "Металлы"], MOEX: ["Московская биржа", "Финансы"],
@@ -297,6 +299,9 @@ const sourceLabels = {
   moex_news: "Московская биржа",
   cbr_press: "Банк России",
   interfax: "Интерфакс",
+  tass: "ТАСС",
+  rbc: "РБК",
+  google_news: "Новостная подборка",
 };
 
 const scoreFactorDefinitions = [
@@ -365,14 +370,24 @@ function signalFromApi(item) {
 
 function newsFromApi(item, signalsById) {
   const related = item.related_signals?.[0];
-  const signal = related ? signalsById.get(related.id) : null;
+  const [company, sector] = related ? companyMeta[related.ticker] || [related.ticker, "Российский рынок"] : [];
+  const signal = related ? signalsById.get(related.id) || {
+    ...related,
+    company,
+    sector,
+    confidence: Math.round(related.confidence * 100),
+    horizon: "3 дн.",
+    action: actionLabels[related.action] || related.action,
+    summary: "Ретроспективная оценка эффекта новости на момент её публикации.",
+    evidence: [],
+  } : null;
   return {
     id: item.id,
     source: sourceLabels[item.source_id] || item.source_id,
     sourceId: item.source_id,
     time: formatTime(item.published_at),
     publishedAt: item.published_at,
-    tag: signal ? "Учтено в сигнале" : "Без сигнала",
+    tag: signal ? related.status === "active" ? "Активный сигнал" : "Исторический сигнал" : "Без сигнала",
     title: item.title,
     content: item.content,
     url: item.url,
@@ -380,28 +395,17 @@ function newsFromApi(item, signalsById) {
   };
 }
 
-function BrandMark() {
-  return (
-    <svg className="brand-mark" viewBox="0 0 36 36" aria-hidden="true">
-      <defs>
-        <linearGradient id="edge-surface" x1="3" y1="2" x2="33" y2="35" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#292D38" />
-          <stop offset="1" stopColor="#0E1015" />
-        </linearGradient>
-        <linearGradient id="edge-line" x1="8" y1="28" x2="29" y2="7" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#8984E7" />
-          <stop offset=".55" stopColor="#C7A5E7" />
-          <stop offset="1" stopColor="#F3B293" />
-        </linearGradient>
-      </defs>
-      <rect x="1" y="1" width="34" height="34" rx="10" fill="url(#edge-surface)" stroke="rgba(255,255,255,.16)" />
-      <path d="M9 9.5h15M9 18h8.5l8-7M9 26.5h7l11-9" fill="none" stroke="url(#edge-line)" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx="27" cy="17.5" r="2.3" fill="#F3B293" stroke="#171920" strokeWidth="1.2" />
-    </svg>
-  );
+function newsEventKey(item) {
+  if (!item.signal) return item.id;
+  return [
+    item.signal.ticker,
+    item.signal.direction,
+    item.publishedAt.slice(0, 10),
+  ].join(":");
 }
 
 function CompanyMark({ signal, small = false }) {
+  const [imageFailed, setImageFailed] = useState(false);
   const brand = companyBrands[signal.ticker] || { colors: ["#717785", "#353945"], glyph: signal.ticker.slice(0, 1), domain: "moex.com" };
   return (
     <span
@@ -409,8 +413,8 @@ function CompanyMark({ signal, small = false }) {
       style={{ "--company-color": brand.colors[0], "--company-color-deep": brand.colors[1] }}
       data-ticker={signal.ticker}
     >
-      <i aria-hidden="true" />
-      <b aria-hidden="true">{brand.glyph}</b>
+      {!imageFailed && <img src={`https://www.google.com/s2/favicons?domain=${encodeURIComponent(brand.domain)}&sz=128`} alt="" loading="lazy" referrerPolicy="no-referrer" onError={() => setImageFailed(true)} />}
+      {imageFailed && <b aria-hidden="true">{brand.glyph}</b>}
     </span>
   );
 }
@@ -469,8 +473,9 @@ function AppHeader({ view, signals, onNavigate, onSelect, onOpenNews }) {
     <>
       <header className="app-header">
         <button className="brand" type="button" onClick={() => navigate("signals")} aria-label="EventEdge — на главную">
-          <BrandMark />
-          <span>EventEdge<small>market intelligence</small></span>
+          <span className="brand-wordmark" aria-hidden="true">
+            <span>EVENTE</span><strong>D</strong><span>GE</span>
+          </span>
         </button>
 
         <nav className={`primary-nav ${mobileOpen ? "is-open" : ""}`} aria-label="Основная навигация">
@@ -1020,7 +1025,15 @@ export default function App() {
           seenTickers.add(item.ticker);
           return true;
         });
-        const nextNews = newsPayload.data.map((item) => newsFromApi(item, signalsById));
+        const seenNewsEvents = new Set();
+        const nextNews = newsPayload.data
+          .map((item) => newsFromApi(item, signalsById))
+          .filter((item) => {
+            const eventKey = newsEventKey(item);
+            if (seenNewsEvents.has(eventKey)) return false;
+            seenNewsEvents.add(eventKey);
+            return true;
+          });
         nextNews.forEach((item) => {
           if (item.signal) item.signal.evidence.push(item);
         });
