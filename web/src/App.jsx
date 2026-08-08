@@ -261,20 +261,20 @@ const directionMeta = {
 };
 
 const companyBrands = {
-  SBER: { colors: ["#21a366", "#0c7650"], glyph: "С", domain: "sberbank.ru" },
-  LKOH: { colors: ["#ee2d33", "#9c101d"], glyph: "Л", domain: "lukoil.ru" },
+  SBER: { colors: ["#21a366", "#0c7650"], glyph: "СБ", domain: "sberbank.ru" },
+  LKOH: { colors: ["#ee2d33", "#9c101d"], glyph: "ЛК", domain: "lukoil.ru" },
   YDEX: { colors: ["#ffcc00", "#f04b3f"], glyph: "Я", domain: "yandex.ru" },
-  NVTK: { colors: ["#2863b3", "#173f7d"], glyph: "N", domain: "novatek.ru" },
-  TATN: { colors: ["#008d6b", "#006047"], glyph: "Т", domain: "tatneft.ru" },
-  ROSN: { colors: ["#f2c500", "#111216"], glyph: "Р", domain: "rosneft.ru" },
-  GMKN: { colors: ["#1f7ca8", "#124b72"], glyph: "Н", domain: "nornickel.ru" },
-  MGNT: { colors: ["#ef3340", "#a71930"], glyph: "М", domain: "magnit.com" },
-  GAZP: { colors: ["#1686c8", "#075487"], glyph: "Г", domain: "gazprom.ru" },
-  VTBR: { colors: ["#1783ca", "#174687"], glyph: "В", domain: "vtb.ru" },
-  PLZL: { colors: ["#d9aa36", "#8d6712"], glyph: "П", domain: "polyus.com" },
-  CHMF: { colors: ["#202d3d", "#0b1119"], glyph: "С", domain: "severstal.com" },
-  ALRS: { colors: ["#45a4b3", "#236a77"], glyph: "А", domain: "alrosa.ru" },
-  MOEX: { colors: ["#174d86", "#112f53"], glyph: "М", domain: "moex.com" },
+  NVTK: { colors: ["#2863b3", "#173f7d"], glyph: "НТ", domain: "novatek.ru" },
+  TATN: { colors: ["#008d6b", "#006047"], glyph: "ТН", domain: "tatneft.ru" },
+  ROSN: { colors: ["#f2c500", "#111216"], glyph: "РН", domain: "rosneft.ru" },
+  GMKN: { colors: ["#1f7ca8", "#124b72"], glyph: "НН", domain: "nornickel.ru" },
+  MGNT: { colors: ["#ef3340", "#a71930"], glyph: "МГ", domain: "magnit.com" },
+  GAZP: { colors: ["#1686c8", "#075487"], glyph: "ГП", domain: "gazprom.ru" },
+  VTBR: { colors: ["#1783ca", "#174687"], glyph: "ВТ", domain: "vtb.ru" },
+  PLZL: { colors: ["#d9aa36", "#8d6712"], glyph: "ПЛ", domain: "polyus.com" },
+  CHMF: { colors: ["#586474", "#151a21"], glyph: "СВ", domain: "severstal.com" },
+  ALRS: { colors: ["#45a4b3", "#236a77"], glyph: "АЛ", domain: "alrosa.ru" },
+  MOEX: { colors: ["#174d86", "#112f53"], glyph: "МБ", domain: "moex.com" },
 };
 
 const companyMeta = {
@@ -382,32 +382,35 @@ function newsFromApi(item, signalsById) {
 
 function BrandMark() {
   return (
-    <span className="brand-mark" aria-hidden="true">
-      <i className="brand-mark__axis" />
-      <i className="brand-mark__up" />
-      <i className="brand-mark__down" />
-      <i className="brand-mark__dot" />
-    </span>
+    <svg className="brand-mark" viewBox="0 0 36 36" aria-hidden="true">
+      <defs>
+        <linearGradient id="edge-surface" x1="3" y1="2" x2="33" y2="35" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#292D38" />
+          <stop offset="1" stopColor="#0E1015" />
+        </linearGradient>
+        <linearGradient id="edge-line" x1="8" y1="28" x2="29" y2="7" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#8984E7" />
+          <stop offset=".55" stopColor="#C7A5E7" />
+          <stop offset="1" stopColor="#F3B293" />
+        </linearGradient>
+      </defs>
+      <rect x="1" y="1" width="34" height="34" rx="10" fill="url(#edge-surface)" stroke="rgba(255,255,255,.16)" />
+      <path d="M9 9.5h15M9 18h8.5l8-7M9 26.5h7l11-9" fill="none" stroke="url(#edge-line)" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="27" cy="17.5" r="2.3" fill="#F3B293" stroke="#171920" strokeWidth="1.2" />
+    </svg>
   );
 }
 
 function CompanyMark({ signal, small = false }) {
-  const [imageFailed, setImageFailed] = useState(false);
   const brand = companyBrands[signal.ticker] || { colors: ["#717785", "#353945"], glyph: signal.ticker.slice(0, 1), domain: "moex.com" };
   return (
     <span
       className={`company-mark ${small ? "company-mark--small" : ""}`}
       style={{ "--company-color": brand.colors[0], "--company-color-deep": brand.colors[1] }}
+      data-ticker={signal.ticker}
     >
-      {!imageFailed && (
-        <img
-          src={`https://${brand.domain}/favicon.ico`}
-          alt=""
-          loading="lazy"
-          onError={() => setImageFailed(true)}
-        />
-      )}
-      {imageFailed && <b aria-hidden="true">{brand.glyph}</b>}
+      <i aria-hidden="true" />
+      <b aria-hidden="true">{brand.glyph}</b>
     </span>
   );
 }
@@ -423,11 +426,18 @@ function Direction({ direction }) {
   );
 }
 
-function AppHeader({ view, signals, onNavigate, onSelect }) {
+function AppHeader({ view, signals, onNavigate, onSelect, onOpenNews }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const searchResults = signals.filter((signal) =>
+  const searchUniverse = useMemo(() => {
+    const activeTickers = new Set(signals.map((signal) => signal.ticker));
+    const waitingCompanies = Object.entries(companyMeta)
+      .filter(([ticker]) => !activeTickers.has(ticker))
+      .map(([ticker, [company, sector]]) => ({ ticker, company, sector, available: false }));
+    return [...signals, ...waitingCompanies];
+  }, [signals]);
+  const searchResults = searchUniverse.filter((signal) =>
     `${signal.ticker} ${signal.company}`.toLocaleLowerCase("ru-RU").includes(searchQuery.trim().toLocaleLowerCase("ru-RU")),
   );
 
@@ -443,8 +453,9 @@ function AppHeader({ view, signals, onNavigate, onSelect }) {
     return () => window.removeEventListener("keydown", handleShortcut);
   }, []);
 
-  const chooseResult = (ticker) => {
-    onSelect(ticker);
+  const chooseResult = (signal) => {
+    if (signal.available === false) onOpenNews(signal.ticker);
+    else onSelect(signal.ticker);
     setSearchOpen(false);
     setSearchQuery("");
   };
@@ -492,14 +503,17 @@ function AppHeader({ view, signals, onNavigate, onSelect }) {
             </div>
             <div className="search-dialog__label">Компании российского рынка</div>
             <div className="search-results">
-              {searchResults.slice(0, 6).map((signal, index) => (
-                <button type="button" key={signal.ticker} className={index === 0 ? "is-active" : ""} onClick={() => chooseResult(signal.ticker)}>
-                  <CompanyMark signal={signal} small />
-                  <span><strong>{signal.ticker}</strong><small>{signal.company} · {signal.sector}</small></span>
-                  <Direction direction={signal.direction} />
-                  <em>{formatScore(signal.score)} п.</em>
-                </button>
-              ))}
+              {searchResults.slice(0, 6).map((signal, index) => {
+                const available = signal.available !== false;
+                return (
+                  <button type="button" key={signal.ticker} className={index === 0 ? "is-active" : ""} onClick={() => chooseResult(signal)}>
+                    <CompanyMark signal={signal} small />
+                    <span><strong>{signal.ticker}</strong><small>{signal.company} · {signal.sector}</small></span>
+                    {available ? <Direction direction={signal.direction} /> : <span className="waiting-badge"><i /> Наблюдение</span>}
+                    <em>{available ? `${formatScore(signal.score)} п.` : "Лента"}</em>
+                  </button>
+                );
+              })}
             </div>
             <footer><span>Нажми на компанию, чтобы открыть сигнал</span><span>⌘ K — поиск</span></footer>
           </section>
@@ -509,29 +523,51 @@ function AppHeader({ view, signals, onNavigate, onSelect }) {
   );
 }
 
-function SignalsScreen({ signals, onSelect, onMethodology }) {
+function SignalsScreen({ signals, onSelect, onOpenNews, onMethodology }) {
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
   const [sortByConfidence, setSortByConfidence] = useState(false);
 
+  const companyCards = useMemo(() => {
+    const activeTickers = new Set(signals.map((signal) => signal.ticker));
+    const waitingCards = Object.entries(companyMeta)
+      .filter(([ticker]) => !activeTickers.has(ticker))
+      .map(([ticker, [company, sector]]) => ({
+        ticker,
+        company,
+        sector,
+        available: false,
+        direction: null,
+        score: null,
+        confidence: 0,
+        horizon: "—",
+        updated: "ожидаем событие",
+        summary: "Активного сигнала нет. Компания остаётся в наблюдении до появления новой существенной информации.",
+        evidence: [],
+      }));
+    return [...signals, ...waitingCards];
+  }, [signals]);
+
   const filteredSignals = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("ru-RU");
-    const result = signals.filter((signal) => {
+    const result = companyCards.filter((signal) => {
       const matchesFilter = filter === "all" || signal.direction === filter;
-      const matchesQuery = !normalized || `${signal.ticker} ${signal.company}`.toLocaleLowerCase("ru-RU").includes(normalized);
+      const matchesQuery = !normalized || `${signal.ticker} ${signal.company} ${signal.sector}`.toLocaleLowerCase("ru-RU").includes(normalized);
       return matchesFilter && matchesQuery;
     });
-    if (sortByConfidence) return [...result].sort((a, b) => b.confidence - a.confidence);
-    return result;
-  }, [filter, query, sortByConfidence]);
+    return [...result].sort((a, b) => {
+      if (sortByConfidence) return b.confidence - a.confidence;
+      return Number(b.available !== false) - Number(a.available !== false);
+    });
+  }, [companyCards, filter, query, sortByConfidence]);
 
   return (
     <main className="screen screen--signals">
       <section className="terminal-window">
         <div className="terminal-toolbar">
           <div className="terminal-title">
-            <h1>Сигналы рынка</h1>
+            <div><span className="workspace-kicker">Live intelligence</span><h1>Компании в фокусе</h1></div>
             <div className="filter-wrap">
               <button type="button" className={`text-button ${filter !== "all" ? "is-active" : ""}`} onClick={() => setFilterOpen((value) => !value)}>
                 <Filter size={14} />
@@ -573,48 +609,52 @@ function SignalsScreen({ signals, onSelect, onMethodology }) {
           <span><i /> Живые данные · Московская биржа</span>
           <span>Модель <strong>news-baseline-0.1.1</strong></span>
           <span>Шкала сигнала <strong>от −100 до +100</strong></span>
-          <span className="market-strip__right">{filteredSignals.length} из {signals.length} бумаг</span>
+          <span className="market-strip__right"><strong>{signals.length}</strong> активных · {companyCards.length} в наблюдении</span>
         </div>
 
-        <div className="signals-table">
-          <div className="signal-grid table-head" aria-hidden="true">
-            <span>Компания</span>
-            <span>Сектор</span>
-            <span>Сигнал</span>
-            <span>Оценка</span>
-            <span>Событие</span>
-            <span>Уверенность</span>
-            <span>Горизонт</span>
-            <span>Цена</span>
-            <span>День</span>
-            <span>Обновлено</span>
-          </div>
-
-          <div className="table-body">
-            {filteredSignals.map((signal) => (
-              <button className="signal-grid table-row" type="button" key={signal.ticker} onClick={() => onSelect(signal.ticker)}>
-                <span className="company-cell">
-                  <CompanyMark signal={signal} small />
-                  <span><strong>{signal.ticker}</strong><small>{signal.company}</small></span>
-                </span>
-                <span className="sector-cell">{signal.sector}</span>
-                <Direction direction={signal.direction} />
-                <span className={`score-cell score-cell--${signal.direction}`}>{formatScore(signal.score)}<small> п.</small></span>
-                <span className="event-cell">{signal.event}</span>
-                <span className="confidence-cell"><i><b style={{ width: `${signal.confidence}%` }} /></i>{signal.confidence}%</span>
-                <span className="horizon-cell">{signal.horizon}</span>
-                <span className="price-cell">{signal.price}</span>
-                <span className={`change-cell change-cell--${signal.direction}`}>{signal.change}</span>
-                <span className="updated-cell">{signal.updated}</span>
-              </button>
-            ))}
+        <div className="company-card-area">
+          <div className="company-card-grid">
+            {filteredSignals.map((signal) => {
+              const available = signal.available !== false;
+              const evidence = signal.evidence?.[0];
+              return (
+                <button
+                  className={`company-signal-card ${available ? `company-signal-card--${signal.direction}` : "company-signal-card--waiting"}`}
+                  type="button"
+                  key={signal.ticker}
+                  onClick={() => available ? onSelect(signal.ticker) : onOpenNews(signal.ticker)}
+                >
+                  <span className="company-signal-card__glow" aria-hidden="true" />
+                  <header>
+                    <span className="company-signal-card__identity"><CompanyMark signal={signal} /><span><strong>{signal.ticker}</strong><small>{signal.company}</small></span></span>
+                    {available ? <Direction direction={signal.direction} /> : <span className="waiting-badge"><i /> Наблюдение</span>}
+                  </header>
+                  <div className="company-signal-card__body">
+                    <div className="company-signal-card__score">
+                      <span>{available ? "Сила гипотезы" : signal.sector}</span>
+                      {available ? <strong className={`score-cell--${signal.direction}`}>{formatScore(signal.score)}<small> / 100</small></strong> : <strong>Нет сигнала</strong>}
+                    </div>
+                    <p>{signal.summary}</p>
+                  </div>
+                  <div className="company-signal-card__metrics">
+                    <span><small>Уверенность</small><strong>{available ? `${signal.confidence}%` : "—"}</strong></span>
+                    <span><small>Горизонт</small><strong>{signal.horizon}</strong></span>
+                    <span><small>Обновлено</small><strong>{signal.updated}</strong></span>
+                  </div>
+                  <footer>
+                    <span><Newspaper size={12} /> {evidence ? evidence.title : available ? "Открыть источник сигнала" : "Посмотреть ленту компании"}</span>
+                    <ArrowUpRight size={15} />
+                  </footer>
+                </button>
+              );
+            })}
           </div>
 
           {!filteredSignals.length && (
             <div className="empty-state">
               <CircleGauge size={22} />
-              <strong>{signals.length ? "Сигналы не найдены" : "Ждём существенную новость"}</strong>
-              <span>{signals.length ? "Измени запрос или фильтр направления." : "Здесь появится сигнал, когда официальный источник опубликует новость по отслеживаемой компании."}</span>
+              <strong>Компании не найдены</strong>
+              <span>Измени запрос или фильтр направления.</span>
             </div>
           )}
         </div>
@@ -972,8 +1012,14 @@ export default function App() {
         ]);
         if (!signalResponse.ok || !newsResponse.ok) throw new Error("API вернул ошибку. Попробуй обновить страницу.");
         const [signalPayload, newsPayload] = await Promise.all([signalResponse.json(), newsResponse.json()]);
-        const nextSignals = signalPayload.data.map(signalFromApi);
-        const signalsById = new Map(nextSignals.map((item) => [item.id, item]));
+        const allSignals = signalPayload.data.map(signalFromApi);
+        const signalsById = new Map(allSignals.map((item) => [item.id, item]));
+        const seenTickers = new Set();
+        const nextSignals = allSignals.filter((item) => {
+          if (seenTickers.has(item.ticker)) return false;
+          seenTickers.add(item.ticker);
+          return true;
+        });
         const nextNews = newsPayload.data.map((item) => newsFromApi(item, signalsById));
         nextNews.forEach((item) => {
           if (item.signal) item.signal.evidence.push(item);
@@ -1003,9 +1049,9 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <AppHeader view={route.view} signals={signals} onNavigate={navigate} onSelect={(ticker) => navigate("signal", ticker)} />
+      <AppHeader view={route.view} signals={signals} onNavigate={navigate} onSelect={(ticker) => navigate("signal", ticker)} onOpenNews={(ticker) => navigate("news", ticker)} />
       {needsData && dataStatus !== "ready" && <DataState error={dataStatus === "error" ? dataError : ""} onRetry={() => setReloadKey((value) => value + 1)} />}
-      {dataStatus === "ready" && route.view === "signals" && <SignalsScreen signals={signals} onSelect={(ticker) => navigate("signal", ticker)} onMethodology={() => navigate("methodology")} />}
+      {dataStatus === "ready" && route.view === "signals" && <SignalsScreen signals={signals} onSelect={(ticker) => navigate("signal", ticker)} onOpenNews={(ticker) => navigate("news", ticker)} onMethodology={() => navigate("methodology")} />}
       {dataStatus === "ready" && route.view === "signal" && (selectedSignal ? <CompanyScreen signal={selectedSignal} onBack={() => navigate("signals")} onMethodology={() => navigate("methodology")} onOpenNews={() => navigate("news", selectedSignal.ticker)} onReadNews={setReaderItem} /> : <DataState error="Сигнал ещё не рассчитан." onRetry={() => navigate("signals")} />)}
       {dataStatus === "ready" && route.view === "news" && <NewsScreen signals={signals} allNews={allNews} initialTicker={route.ticker} onReadNews={setReaderItem} />}
       {route.view === "methodology" && <MethodologyScreen onApi={() => navigate("api")} />}
