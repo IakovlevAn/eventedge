@@ -571,7 +571,7 @@ function SignalsScreen({ signals, onSelect, onMethodology }) {
 
         <div className="market-strip">
           <span><i /> Живые данные · Московская биржа</span>
-          <span>Модель <strong>news-baseline-0.1.0</strong></span>
+          <span>Модель <strong>news-baseline-0.1.1</strong></span>
           <span>Шкала сигнала <strong>от −100 до +100</strong></span>
           <span className="market-strip__right">{filteredSignals.length} из {signals.length} бумаг</span>
         </div>
@@ -856,7 +856,7 @@ function ApiScreen() {
       "score": 42.7,
       "confidence": 0.76,
       "horizon": {"value": 3, "unit": "calendar_days"},
-      "model_version": "news-baseline-0.1.0"
+      "model_version": "news-baseline-0.1.1"
     }
   ],
   "meta": {"limit": 20, "has_more": false, "next_cursor": null}

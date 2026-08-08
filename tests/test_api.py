@@ -143,7 +143,7 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
     assert signal.json()["data"]["ticker"] == "SBER"
     assert signal.json()["data"]["direction"] == "up"
     assert signal.json()["data"]["action"] == "consider_buy"
-    assert signal.json()["data"]["model_version"] == "news-baseline-0.1.0"
+    assert signal.json()["data"]["model_version"] == "news-baseline-0.1.1"
     assert len(signal.json()["data"]["factor_contributions"]) == 5
 
     listed = client.get("/v1/signals", params={"ticker": "SBER", "direction": "up"})
