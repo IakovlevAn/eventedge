@@ -61,7 +61,7 @@ GitHub Free не предоставляет branch protection для прива�
 https://d5d8smlpd6q241aquti1.kocrdvxt.apigw.yandexcloud.net
 ```
 
-Gateway создан; рабочая ревизия контейнера публикуется первым успешным deployment workflow.
+Gateway и рабочая ревизия контейнера развёрнуты. Полная цепочка `CI → OIDC → image → revision → smoke test` подтверждена успешным [production deployment](https://github.com/IakovlevAn/eventedge/actions/runs/31261742339) 8 августа 2026 года.
 
 ## Проверка
 
