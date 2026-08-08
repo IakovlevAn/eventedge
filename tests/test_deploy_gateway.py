@@ -19,6 +19,7 @@ def test_gateway_deployment_renders_current_routes() -> None:
     )
 
     assert "/v1/instruments/snapshots:" in spec
+    assert "/v1/instruments/{ticker}/candles:" in spec
     assert "container_id: container-id" in spec
     assert "service_account_id: gateway-sa-id" in spec
     assert "__API_CONTAINER_ID__" not in spec

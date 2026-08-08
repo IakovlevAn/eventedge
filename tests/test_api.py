@@ -297,8 +297,60 @@ def test_batch_instrument_snapshots_return_partial_results() -> None:
     assert response.json()["meta"] == {
         "requested": 3,
         "returned": 2,
-        "refresh_after_seconds": 60,
+        "refresh_after_seconds": 30,
     }
+
+
+def test_intraday_candles_endpoint_returns_ten_minute_series() -> None:
+    original = app.state.market_data_client
+
+    class FakeMarketDataClient:
+        async def candles(
+            self,
+            ticker: str,
+            *,
+            interval: int,
+            lookback_days: int,
+        ) -> dict[str, object]:
+            assert interval == 10
+            assert lookback_days == 14
+            return {
+                "ticker": ticker,
+                "interval_minutes": interval,
+                "observed_at": "2026-08-07T07:10:00Z",
+                "candles": [
+                    {
+                        "begin": "2026-08-07T07:10:00Z",
+                        "open": 283.1,
+                        "close": 283.8,
+                        "high": 284.0,
+                        "low": 282.9,
+                        "value_rub": 52_000_000.0,
+                        "volume_shares": 184_220,
+                    }
+                ],
+                "source": {"name": "MOEX ISS", "url": "https://iss.moex.com/iss/"},
+            }
+
+    app.state.market_data_client = FakeMarketDataClient()
+    try:
+        response = client.get(
+            "/v1/instruments/SBER/candles",
+            params={"interval": 10, "lookback_days": 14},
+        )
+    finally:
+        app.state.market_data_client = original
+
+    assert response.status_code == 200
+    assert response.json()["data"]["interval_minutes"] == 10
+    assert response.json()["meta"]["refresh_after_seconds"] == 60
+
+
+def test_intraday_candles_endpoint_rejects_unsupported_interval() -> None:
+    response = client.get("/v1/instruments/SBER/candles", params={"interval": 5})
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "INVALID_PARAMETER"
 
 
 def test_batch_instrument_snapshots_validate_tickers() -> None:

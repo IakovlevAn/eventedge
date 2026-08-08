@@ -280,6 +280,43 @@ paths:
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
+  /v1/instruments/{ticker}/candles:
+    parameters:
+      - $ref: '#/components/parameters/TickerPath'
+    get:
+      tags: [Instruments]
+      summary: Get intraday MOEX candles
+      operationId: getInstrumentCandles
+      parameters:
+        - name: interval
+          in: query
+          schema:
+            type: integer
+            enum: [10]
+            default: 10
+        - name: lookback_days
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 14
+            default: 14
+      responses:
+        '200':
+          description: Intraday OHLCV candles and refresh guidance.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstrumentCandlesResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
   /v1/instruments/snapshots:
     get:
       tags: [Instruments]
@@ -1217,7 +1254,7 @@ components:
           nullable: true
         candles:
           type: array
-          maxItems: 30
+          maxItems: 66
           items:
             $ref: '#/components/schemas/DailyCandle'
         source:
@@ -1635,7 +1672,7 @@ components:
     NewsPageMeta:
       type: object
       additionalProperties: false
-      required: [limit, total, has_more, sources]
+      required: [limit, total, has_more, last_ingested_at, poll_interval_seconds, sources]
       properties:
         limit:
           type: integer
@@ -1647,6 +1684,13 @@ components:
         next_cursor:
           type: string
           nullable: true
+        last_ingested_at:
+          type: string
+          format: date-time
+          nullable: true
+        poll_interval_seconds:
+          type: integer
+          minimum: 1
         sources:
           type: array
           items:
@@ -1711,6 +1755,43 @@ components:
       properties:
         data:
           $ref: '#/components/schemas/InstrumentSnapshot'
+
+    InstrumentCandles:
+      type: object
+      additionalProperties: false
+      required: [ticker, interval_minutes, candles, observed_at, source]
+      properties:
+        ticker:
+          type: string
+        interval_minutes:
+          type: integer
+          enum: [10]
+        candles:
+          type: array
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/DailyCandle'
+        observed_at:
+          type: string
+          format: date-time
+        source:
+          $ref: '#/components/schemas/MarketDataSource'
+
+    InstrumentCandlesResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: '#/components/schemas/InstrumentCandles'
+        meta:
+          type: object
+          additionalProperties: false
+          required: [refresh_after_seconds]
+          properties:
+            refresh_after_seconds:
+              type: integer
+              minimum: 1
 
     InstrumentSnapshotError:
       type: object

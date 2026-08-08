@@ -93,6 +93,32 @@ def test_snapshot_keeps_three_month_chart_window() -> None:
     assert result["candles"][-1]["close"] == 173.0
 
 
+def test_intraday_candles_keep_moscow_time_and_interval() -> None:
+    captured: dict[str, object] = {}
+
+    def intraday_request(url: str, params: dict[str, object]) -> dict[str, Any]:
+        captured.update(params)
+        return {
+            "candles": {
+                "columns": ["begin", "open", "close", "high", "low", "value", "volume"],
+                "data": [
+                    ["2026-08-07 10:00:00", 100, 101, 102, 99, 10_000_000, 100_000],
+                    ["2026-08-07 10:10:00", 101, 100.5, 101.5, 100, 8_000_000, 80_000],
+                ],
+            }
+        }
+
+    client = MoexMarketDataClient(requester=intraday_request)
+
+    result = asyncio.run(client.candles("sber", interval=10, lookback_days=14))
+
+    assert captured["interval"] == 10
+    assert result["ticker"] == "SBER"
+    assert result["interval_minutes"] == 10
+    assert result["candles"][0]["begin"] == "2026-08-07T07:00:00Z"
+    assert result["candles"][-1]["close"] == 100.5
+
+
 def test_directional_scenario_is_a_range_not_a_price_target() -> None:
     result = scenario_range(
         {"daily_volatility_pct": 1.5},
