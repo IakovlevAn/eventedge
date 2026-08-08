@@ -15,6 +15,7 @@ cloud: eventedge
 │   ├── Serverless Container: eventedge-api
 │   ├── API Gateway: eventedge-api
 │   ├── YDB Serverless: eventedge-prod
+│   ├── Timer trigger: eventedge-cbr-press
 │   └── VPC: eventedge-prod (без подсетей и разрешающих правил)
 └── folder: dev
 ```
@@ -45,6 +46,7 @@ cloud: eventedge
 | Service account | `eventedge-gateway` | Вызов только приватного контейнера API |
 | API Gateway | `eventedge-api` | Публичная точка входа и маршрутизация к контейнеру |
 | YDB Serverless | `eventedge-prod` | Новости, idempotency-записи и асинхронные jobs |
+| Timer trigger | `eventedge-cbr-press` | Опрос официального RSS Банка России раз в 15 минут |
 
 ## CI/CD и автоматические merge
 
@@ -65,11 +67,13 @@ GitHub Free не предоставляет branch protection для прива�
 https://d5d8smlpd6q241aquti1.kocrdvxt.apigw.yandexcloud.net
 ```
 
-Gateway и YDB-backed ревизия контейнера развёрнуты. Полная цепочка `CI → OIDC → image → revision → YDB readiness → web smoke test` подтверждена успешным [production deployment](https://github.com/IakovlevAn/eventedge/actions/runs/31265885233) 8 августа 2026 года.
+Gateway и YDB-backed ревизия контейнера развёрнуты. Полная цепочка `CI → OIDC → image → revision → YDB readiness → SHA guard → web smoke test` подтверждена успешным [production deployment](https://github.com/IakovlevAn/eventedge/actions/runs/31266558879) 8 августа 2026 года.
 
 Новостной ingestion пока не опубликован в API Gateway. `POST /v1/internal/news` доступен только через приватный URL контейнера с IAM-аутентификацией. Публичный маршрут появится вместе с отдельным ключом ingestor в Lockbox; до этого случайно открыть служебную загрузку наружу нельзя.
 
 Приватный production smoke test подтвердил запись синтетической новости в `eventedge-prod`, повтор запроса с тем же `Idempotency-Key` без дубля и последующее чтение созданного job.
+
+Первый реальный источник — [официальный RSS пресс-релизов Банка России](https://www.cbr.ru/rss/RssPress). Production poll загрузил 10 публикаций; повторный poll вернул 10 replay и не создал дублей. Trigger `eventedge-cbr-press` активен с расписанием `0,15,30,45 * ? * * *`, использует существующий `eventedge-gateway` и делает до трёх попыток с интервалом 30 секунд.
 
 ## Проверка
 
@@ -83,4 +87,4 @@ Yandex Cloud OIDC exchange succeeded
 
 ## Следующий этап
 
-Следующий этап — подключить первый новостной источник и вынести ключ ingestor в Lockbox. Роли для Object Storage и Message Queue добавляются вместе с использующим их инкрементом, а не заранее.
+Следующий этап — извлекать из сохранённых новостей структурированные семантические признаки и рассчитывать первую версию scoring. Роль для Yandex Foundation Models будет запрошена отдельно и только перед реальным LLM-вызовом; роли для Object Storage и Message Queue добавляются вместе с использующим их инкрементом, а не заранее.
