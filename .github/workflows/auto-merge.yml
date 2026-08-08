@@ -6,6 +6,7 @@ on:
     types: [completed]
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
 
@@ -55,3 +56,4 @@ jobs:
           fi
 
           gh pr merge "$pr_number" --repo "$REPOSITORY" --squash --delete-branch
+          gh workflow run ci.yml --repo "$REPOSITORY" --ref main
