@@ -2,6 +2,19 @@
 
 Репозиторий подключается к Yandex Cloud через GitHub Actions OIDC и Workload Identity Federation.
 
+## Облачное окружение
+
+```text
+cloud: eventedge
+├── folder: prod
+│   ├── service account: eventedge-ci
+│   ├── federation: eventedge-github
+│   └── VPC: eventedge-prod (без подсетей и разрешающих правил)
+└── folder: dev
+```
+
+Старые функции, триггеры, service accounts, подсети и логи из облака удалены. Production VPC пока оставлена без подсетей и правил: необходимые сетевые ресурсы будут создаваться вместе с инфраструктурным кодом.
+
 ## Что это даёт
 
 - GitHub Actions получает короткоживущий IAM-токен только во время job;
@@ -17,6 +30,9 @@
 | Workload Identity Federation | `eventedge-github` | Проверка GitHub OIDC-токенов |
 | Federated credential | subject репозитория | Разрешение только `main` конкретного приватного репозитория |
 | GitHub Actions variable | `YC_SERVICE_ACCOUNT_ID` | Публичный идентификатор service account, не секрет |
+| GitHub Actions variable | `YC_CLOUD_ID` | Идентификатор облака `eventedge`, не секрет |
+| GitHub Actions variable | `YC_FOLDER_ID` | Идентификатор production-каталога, не секрет |
+| GitHub Actions variable | `YC_DEV_FOLDER_ID` | Идентификатор development-каталога, не секрет |
 
 ## Проверка
 
@@ -31,4 +47,3 @@ Yandex Cloud OIDC exchange succeeded
 ## Следующий этап
 
 Сейчас подключение подтверждает безопасную аутентификацию. Перед первым деплоем service account получает только необходимые роли для конкретных ресурсов: Container Registry, Serverless Containers и API Gateway. Роли для YDB, Object Storage, Message Queue и Lockbox добавляются вместе с соответствующим инкрементом, а не заранее.
-
