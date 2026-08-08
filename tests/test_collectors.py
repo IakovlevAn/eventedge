@@ -91,6 +91,37 @@ def test_rss_collection_is_idempotent() -> None:
     }
 
 
+def test_minute_collector_stops_after_known_head_items() -> None:
+    repository = MemoryNewsRepository()
+    config = RssFeedConfig(source_id="interfax", url="https://example.com/feed")
+
+    async def scenario() -> tuple[dict[str, int], datetime, datetime]:
+        await collect_rss_feed(
+            repository,
+            config,
+            fetcher=lambda url, timeout: RSS_FIXTURE,
+        )
+        result = await collect_rss_feed(
+            repository,
+            config,
+            fetcher=lambda url, timeout: RSS_FIXTURE,
+            stop_after_replays=1,
+        )
+        news = await repository.list_news(source_id="interfax", limit=10)
+        return result, news[0].published_at, news[0].received_at
+
+    result, published_at, received_at = asyncio.run(scenario())
+
+    assert result == {
+        "fetched": 2,
+        "matched": 1,
+        "signal_candidates": 1,
+        "accepted": 0,
+        "replayed": 1,
+    }
+    assert received_at > published_at
+
+
 def test_broad_news_is_stored_without_calling_signal_analyzer() -> None:
     class FailAnalyzer:
         async def extract(self, document: object) -> object:
@@ -270,4 +301,40 @@ def test_composite_collector_isolates_a_failed_feed(
         "accepted": 6,
         "replayed": 0,
         "failed": 7,
+    }
+
+
+def test_fast_collector_uses_only_direct_feeds_and_isolates_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = MemoryNewsRepository()
+    called: list[tuple[str, int | None]] = []
+
+    async def fake_collect(
+        repository: object,
+        config: RssFeedConfig,
+        **kwargs: object,
+    ) -> dict[str, int]:
+        called.append((config.source_id, kwargs.get("stop_after_replays")))
+        if config.source_id == "rbc":
+            raise TimeoutError("feed unavailable")
+        return {"fetched": 1, "matched": 1, "accepted": 1, "replayed": 0}
+
+    monkeypatch.setattr(collectors_module, "collect_rss_feed", fake_collect)
+
+    result = asyncio.run(collectors_module.collect_fast_news(repository))
+
+    assert called == [
+        ("interfax", 5),
+        ("tass", 5),
+        ("rbc", 5),
+        ("moex_news", 5),
+    ]
+    assert result == {
+        "fetched": 3,
+        "matched": 3,
+        "signal_candidates": 0,
+        "accepted": 3,
+        "replayed": 0,
+        "failed": 1,
     }
