@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date, timedelta
 from typing import Any
 
-from eventedge.market import MoexMarketDataClient, scenario_range
+from eventedge.market import MAX_DAILY_CANDLES, MoexMarketDataClient, scenario_range
 
 
 def fake_moex_request(url: str, params: dict[str, object]) -> dict[str, Any]:
@@ -54,6 +55,42 @@ def test_snapshot_normalizes_moex_market_data() -> None:
     assert result["annualized_volatility_pct"] is not None
     assert len(result["candles"]) == 4
     assert result["observed_at"] == "2026-08-07T15:49:10Z"
+
+
+def test_snapshot_keeps_three_month_chart_window() -> None:
+    def many_candles_request(url: str, params: dict[str, object]) -> dict[str, Any]:
+        if not url.endswith("/candles.json"):
+            return fake_moex_request(url, params)
+        first_day = date(2026, 5, 1)
+        rows = []
+        for index in range(MAX_DAILY_CANDLES + 8):
+            day = first_day + timedelta(days=index)
+            close = 100 + index
+            rows.append(
+                [
+                    f"{day.isoformat()} 00:00:00",
+                    close - 1,
+                    close,
+                    close + 1,
+                    close - 2,
+                    300_000_000 + index,
+                    3_000_000 + index,
+                ]
+            )
+        return {
+            "candles": {
+                "columns": ["begin", "open", "close", "high", "low", "value", "volume"],
+                "data": rows,
+            }
+        }
+
+    client = MoexMarketDataClient(requester=many_candles_request)
+
+    result = asyncio.run(client.snapshot("SBER"))
+
+    assert len(result["candles"]) == MAX_DAILY_CANDLES
+    assert result["candles"][0]["close"] == 108.0
+    assert result["candles"][-1]["close"] == 173.0
 
 
 def test_directional_scenario_is_a_range_not_a_price_target() -> None:

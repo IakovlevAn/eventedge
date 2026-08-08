@@ -26,6 +26,9 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "");
+const apiUrl = (path) => `${API_BASE}${path}`;
+
 const methodologySignals = [
   {
     ticker: "SBER",
@@ -555,8 +558,13 @@ function EventBubbles({ events = [], onOpen, compact = false }) {
 }
 
 function PriceChart({ series = [], direction = "neutral", events = [], onOpen }) {
+  const [range, setRange] = useState("1m");
+  const [mode, setMode] = useState("candles");
+  const [hoveredIndex, setHoveredIndex] = useState(null);
+  const [selectedEventId, setSelectedEventId] = useState(null);
   if (series.length < 2) return <div className="price-chart__empty">Недостаточно свечей MOEX</div>;
-  const candles = series.map((item, index) => typeof item === "number" ? {
+
+  const allCandles = series.map((item, index) => typeof item === "number" ? {
     begin: new Date(Date.now() - (series.length - index) * 86400000).toISOString(),
     open: item,
     close: item,
@@ -564,13 +572,14 @@ function PriceChart({ series = [], direction = "neutral", events = [], onOpen })
     low: item,
     volume_shares: 0,
   } : item);
-  const width = 760;
-  const height = 286;
-  const plotTop = 18;
-  const plotBottom = 202;
-  const volumeTop = 222;
-  const volumeBottom = 258;
-  const labelRight = 56;
+  const candles = allCandles.slice(-(range === "3m" ? 66 : 22));
+  const width = 860;
+  const height = 318;
+  const plotTop = 16;
+  const plotBottom = 222;
+  const volumeTop = 246;
+  const volumeBottom = 286;
+  const labelRight = 68;
   const plotWidth = width - labelRight;
   const lows = candles.map((candle) => Number(candle.low ?? candle.close));
   const highs = candles.map((candle) => Number(candle.high ?? candle.close));
@@ -586,57 +595,118 @@ function PriceChart({ series = [], direction = "neutral", events = [], onOpen })
   const endTime = new Date(candles[candles.length - 1].begin).getTime();
   const timeSpread = Math.max(endTime - startTime, 1);
   const eventMarkers = events
-    .filter((event) => event.publishedAt)
-    .slice(0, 10)
+    .filter((event) => {
+      const publishedAt = new Date(event.publishedAt).getTime();
+      return event.publishedAt && publishedAt >= startTime && publishedAt <= endTime + 86400000;
+    })
+    .sort((left, right) => Number(Boolean(right.signal)) - Number(Boolean(left.signal)) || new Date(right.publishedAt) - new Date(left.publishedAt))
+    .slice(0, 16)
     .map((event, index) => {
       const timestamp = new Date(event.publishedAt).getTime();
       const ratio = Math.min(1, Math.max(0, (timestamp - startTime) / timeSpread));
       const candleIndex = Math.min(candles.length - 1, Math.max(0, Math.round(ratio * (candles.length - 1))));
-      const impact = Math.min(Math.abs(event.signal?.score || 0), 100);
+      const impact = event.signal ? Math.min(Math.abs(event.signal.score || 0), 100) : Math.min(18 + (event.sourceCount || 1) * 8, 42);
       return {
         event,
         x: xForIndex(candleIndex),
-        y: Math.max(plotTop + 10, yForPrice(candles[candleIndex].close) - 16 - (index % 2) * 8),
-        radius: 6 + impact * 0.055 + Math.min((event.sourceCount || 1) - 1, 3),
+        y: Math.max(plotTop + 12, yForPrice(candles[candleIndex].high) - 18 - (index % 2) * 10),
+        radius: 6 + impact * 0.05 + Math.min((event.sourceCount || 1) - 1, 3),
         direction: event.signal?.direction || "neutral",
       };
     });
-  const tickIndexes = [0, Math.floor((candles.length - 1) / 2), candles.length - 1];
+  const tickIndexes = [...new Set([0, Math.floor((candles.length - 1) * 0.25), Math.floor((candles.length - 1) * 0.5), Math.floor((candles.length - 1) * 0.75), candles.length - 1])];
+  const activeIndex = hoveredIndex ?? candles.length - 1;
+  const activeCandle = candles[activeIndex];
+  const previousClose = candles[Math.max(0, activeIndex - 1)]?.close;
+  const activeChange = previousClose ? ((Number(activeCandle.close) / Number(previousClose)) - 1) * 100 : 0;
+  const periodChange = ((Number(candles[candles.length - 1].close) / Number(candles[0].close)) - 1) * 100;
+  const selectedEvent = eventMarkers.find(({ event }) => event.id === selectedEventId)?.event || eventMarkers[0]?.event;
+  const selectedMarkerId = selectedEvent?.id;
+
+  const handlePointerMove = (event) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width));
+    setHoveredIndex(Math.round(ratio * (candles.length - 1)));
+  };
+  const moveCursor = (step) => {
+    setHoveredIndex((current) => Math.min(candles.length - 1, Math.max(0, (current ?? candles.length - 1) + step)));
+  };
+
   return (
     <div className="price-chart-shell">
-      <svg className={`price-chart price-chart--${direction}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Цена, объём и события по дневным свечам MOEX">
-        {[0, 0.5, 1].map((ratio) => {
-          const y = plotTop + ratio * (plotBottom - plotTop);
-          const price = max - ratio * spread;
-          return <g key={ratio}><line className="chart-grid" x1="0" y1={y} x2={plotWidth} y2={y} /><text className="chart-axis-label" x={plotWidth + 8} y={y + 3}>{new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 }).format(price)}</text></g>;
-        })}
-        <polygon className="chart-area" points={`0,${plotBottom} ${points} ${plotWidth},${plotBottom}`} />
-        <polyline className="chart-price-line" points={points} />
-        {candles.map((candle, index) => {
-          const barWidth = Math.max(2, plotWidth / candles.length - 3);
-          const barHeight = (Number(candle.volume_shares || 0) / maxVolume) * (volumeBottom - volumeTop);
-          return <rect className="chart-volume" key={candle.begin || index} x={xForIndex(index) - barWidth / 2} y={volumeBottom - barHeight} width={barWidth} height={barHeight} rx="1" />;
-        })}
-        <line className="chart-volume-base" x1="0" y1={volumeBottom} x2={plotWidth} y2={volumeBottom} />
-        {tickIndexes.map((index) => <text className="chart-date-label" key={index} x={xForIndex(index)} y="279" textAnchor={index === 0 ? "start" : index === candles.length - 1 ? "end" : "middle"}>{new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short" }).format(new Date(candles[index].begin))}</text>)}
-        {eventMarkers.map(({ event, x, y, radius, direction: eventDirection }) => (
-          <g
-            className={`chart-event chart-event--${eventDirection}`}
-            key={event.id}
-            role="button"
-            tabIndex="0"
-            aria-label={`Открыть событие: ${event.title}`}
-            onClick={() => onOpen?.(event)}
-            onKeyDown={(keyboardEvent) => { if (keyboardEvent.key === "Enter" || keyboardEvent.key === " ") onOpen?.(event); }}
-          >
-            <title>{event.title}</title>
-            <line x1={x} y1={y + radius} x2={x} y2={Math.min(plotBottom, y + radius + 15)} />
-            <circle cx={x} cy={y} r={radius} />
-            {(event.sourceCount || 1) > 1 && <text x={x} y={y + 2.7} textAnchor="middle">{event.sourceCount}</text>}
-          </g>
-        ))}
-      </svg>
-      <div className="chart-legend"><span><i className="legend-price" /> Цена</span><span><i className="legend-volume" /> Объём</span><span><i className="legend-event" /> Событие: цвет — направление, размер — вес</span></div>
+      <div className="chart-toolbar">
+        <div><strong>История цены</strong><span>Дневные свечи · MOEX</span></div>
+        <div className="chart-toolbar__controls">
+          <div className="chart-segment" role="group" aria-label="Вид графика">
+            <button type="button" className={mode === "line" ? "is-active" : ""} aria-pressed={mode === "line"} onClick={() => setMode("line")}>Линия</button>
+            <button type="button" className={mode === "candles" ? "is-active" : ""} aria-pressed={mode === "candles"} onClick={() => setMode("candles")}>Свечи</button>
+          </div>
+          <div className="chart-segment" role="group" aria-label="Период графика">
+            <button type="button" className={range === "1m" ? "is-active" : ""} aria-pressed={range === "1m"} onClick={() => { setRange("1m"); setHoveredIndex(null); }}>1М</button>
+            <button type="button" className={range === "3m" ? "is-active" : ""} aria-pressed={range === "3m"} disabled={allCandles.length < 30} onClick={() => { setRange("3m"); setHoveredIndex(null); }}>3М</button>
+          </div>
+        </div>
+      </div>
+      <div className="chart-readout" aria-live="polite">
+        <div><span>{hoveredIndex === null ? "Последняя сессия" : "Сессия"}</span><strong>{new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long", year: "numeric" }).format(new Date(activeCandle.begin))}</strong></div>
+        <span>О <b>{formatPrice(activeCandle.open)}</b></span>
+        <span>МАКС <b>{formatPrice(activeCandle.high)}</b></span>
+        <span>МИН <b>{formatPrice(activeCandle.low)}</b></span>
+        <span>ЗАКР <b>{formatPrice(activeCandle.close)}</b></span>
+        <span className={activeChange >= 0 ? "market-positive" : "market-negative"}>{formatPct(activeChange)}</span>
+        <span>ОБЪЁМ <b>{formatCompact(activeCandle.volume_shares)}</b></span>
+      </div>
+      <div className="chart-visual" tabIndex="0" onKeyDown={(event) => { if (event.key === "ArrowLeft") moveCursor(-1); if (event.key === "ArrowRight") moveCursor(1); }} aria-label="График цены. Стрелки влево и вправо меняют выбранную торговую сессию.">
+        <svg className={`price-chart price-chart--${direction}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Цена, объём и события по дневным свечам MOEX" onPointerMove={handlePointerMove} onPointerLeave={() => setHoveredIndex(null)}>
+          {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+            const y = plotTop + ratio * (plotBottom - plotTop);
+            const price = max - ratio * spread;
+            return <g key={ratio}><line className="chart-grid" x1="0" y1={y} x2={plotWidth} y2={y} /><text className="chart-axis-label" x={plotWidth + 10} y={y + 4}>{new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 }).format(price)}</text></g>;
+          })}
+          <polygon className="chart-area" points={`0,${plotBottom} ${points} ${plotWidth},${plotBottom}`} />
+          {mode === "line" && <polyline className="chart-price-line" points={points} />}
+          {mode === "candles" && candles.map((candle, index) => {
+            const x = xForIndex(index);
+            const bodyWidth = Math.max(3, Math.min(9, plotWidth / candles.length - 2));
+            const openY = yForPrice(candle.open);
+            const closeY = yForPrice(candle.close);
+            const rising = Number(candle.close) >= Number(candle.open);
+            return <g className={`chart-candle chart-candle--${rising ? "up" : "down"}`} key={`candle-${candle.begin || index}`}><line x1={x} y1={yForPrice(candle.high)} x2={x} y2={yForPrice(candle.low)} /><rect x={x - bodyWidth / 2} y={Math.min(openY, closeY)} width={bodyWidth} height={Math.max(1.5, Math.abs(closeY - openY))} rx="1" /></g>;
+          })}
+          {candles.map((candle, index) => {
+            const barWidth = Math.max(2, plotWidth / candles.length - 2);
+            const barHeight = (Number(candle.volume_shares || 0) / maxVolume) * (volumeBottom - volumeTop);
+            const rising = Number(candle.close) >= Number(candle.open);
+            return <rect className={`chart-volume chart-volume--${rising ? "up" : "down"}`} key={candle.begin || index} x={xForIndex(index) - barWidth / 2} y={volumeBottom - barHeight} width={barWidth} height={barHeight} rx="1" />;
+          })}
+          <line className="chart-volume-base" x1="0" y1={volumeBottom} x2={plotWidth} y2={volumeBottom} />
+          {tickIndexes.map((index) => <text className="chart-date-label" key={index} x={xForIndex(index)} y="310" textAnchor={index === 0 ? "start" : index === candles.length - 1 ? "end" : "middle"}>{new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short" }).format(new Date(candles[index].begin))}</text>)}
+          {hoveredIndex !== null && <g className="chart-crosshair"><line x1={xForIndex(activeIndex)} y1={plotTop} x2={xForIndex(activeIndex)} y2={volumeBottom} /><circle cx={xForIndex(activeIndex)} cy={yForPrice(activeCandle.close)} r="4" /></g>}
+          {eventMarkers.map(({ event, x, y, radius, direction: eventDirection }) => (
+            <g
+              className={`chart-event chart-event--${eventDirection} ${event.id === selectedMarkerId ? "is-selected" : ""}`}
+              key={event.id}
+              role="button"
+              tabIndex="0"
+              aria-label={`Выбрать событие: ${event.title}`}
+              onClick={(clickEvent) => { clickEvent.stopPropagation(); setSelectedEventId(event.id); }}
+              onKeyDown={(keyboardEvent) => { if (keyboardEvent.key === "Enter" || keyboardEvent.key === " ") setSelectedEventId(event.id); }}
+            >
+              <title>{event.title}</title>
+              <line x1={x} y1={y + radius} x2={x} y2={Math.min(plotBottom, y + radius + 15)} />
+              <circle cx={x} cy={y} r={radius} />
+              {(event.sourceCount || 1) > 1 && <text x={x} y={y + 2.7} textAnchor="middle">{event.sourceCount}</text>}
+            </g>
+          ))}
+        </svg>
+      </div>
+      <div className="chart-period-summary"><span>За период <strong className={periodChange >= 0 ? "market-positive" : "market-negative"}>{formatPct(periodChange)}</strong></span><span><strong>{eventMarkers.length}</strong> {eventMarkers.length === 1 ? "событие" : eventMarkers.length > 1 && eventMarkers.length < 5 ? "события" : "событий"}</span><span>Наведи на график или используй ← →</span></div>
+      {selectedEvent && <div className={`chart-event-detail chart-event-detail--${selectedEvent.signal?.direction || "neutral"}`}>
+        <i />
+        <div><span>{new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" }).format(new Date(selectedEvent.publishedAt))} · {selectedEvent.source}{selectedEvent.signal ? ` · ${formatScore(selectedEvent.signal.score)} п.` : " · новостной фон"}</span><strong>{selectedEvent.title}</strong></div>
+        <button type="button" onClick={() => onOpen?.(selectedEvent)}>Читать новость <ArrowUpRight size={12} /></button>
+      </div>}
+      <div className="chart-legend"><span><i className="legend-price" /> Цена</span><span><i className="legend-volume" /> Объём</span><span><i className="legend-event" /> Новости: зелёный — позитив, красный — негатив, серый — фон; размер — вес</span></div>
     </div>
   );
 }
@@ -895,8 +965,9 @@ function SignalsScreen({ signals, marketStatus, marketUpdatedAt, onSelect, onOpe
   );
 }
 
-function CompanyScreen({ signal, marketStatus, marketUpdatedAt, onBack, onMethodology, onOpenNews, onReadNews }) {
+function CompanyScreen({ signal, companyNews, marketStatus, marketUpdatedAt, onBack, onMethodology, onOpenNews, onReadNews }) {
   const factors = signal.factors;
+  const chartEvents = companyNews.length ? companyNews : signal.evidence;
 
   return (
     <main className="screen screen--company">
@@ -923,14 +994,14 @@ function CompanyScreen({ signal, marketStatus, marketUpdatedAt, onBack, onMethod
               <span>{formatScenario(signal.scenario)} · {signal.horizon}</span>
             </div>
           </div>
-          <PriceChart series={signal.series} direction={signal.direction} events={signal.evidence} onOpen={onReadNews} />
+          <PriceChart series={signal.series} direction={signal.direction} events={chartEvents} onOpen={onReadNews} />
           <div className="market-facts">
             <span><small>Объём</small><strong>{formatCompact(signal.market?.volume_shares)} акций</strong></span>
             <span><small>Оборот</small><strong>{formatCompact(signal.market?.value_rub)} ₽</strong></span>
             <span><small>Дневная волатильность</small><strong>{formatPct(signal.market?.daily_volatility_pct, { sign: false })}</strong></span>
             <span><small>Ликвидность</small><strong>{signal.market?.liquidity_status === "sufficient" ? "Достаточная" : signal.market?.liquidity_status === "limited" ? "Ограниченная" : "Нет данных"}</strong></span>
           </div>
-          <footer className="market-source"><span>Источник: <a href={signal.market?.source?.url || "https://iss.moex.com/iss/"} target="_blank" rel="noreferrer">MOEX ISS <ArrowUpRight size={10} /></a> · 30 дневных свечей</span><span className={`market-refresh market-refresh--${marketStatus}`}><i /> {marketUpdatedAt ? `Обновлено ${formatRelative(marketUpdatedAt)}` : marketStatus === "loading" ? "Обновляем…" : "Ожидаем данные"}</span></footer>
+          <footer className="market-source"><span>Источник: <a href={signal.market?.source?.url || "https://iss.moex.com/iss/"} target="_blank" rel="noreferrer">MOEX ISS <ArrowUpRight size={10} /></a> · {signal.series?.length || 0} дневных свечей</span><span className={`market-refresh market-refresh--${marketStatus}`}><i /> {marketUpdatedAt ? `Обновлено ${formatRelative(marketUpdatedAt)}` : marketStatus === "loading" ? "Обновляем…" : "Ожидаем данные"}</span></footer>
         </div>
 
         <div className="analysis-grid">
@@ -1198,7 +1269,7 @@ function ApiScreen() {
   const checkApi = async () => {
     setStatus("checking");
     try {
-      const response = await fetch("/health/live", { headers: { Accept: "application/json" } });
+      const response = await fetch(apiUrl("/health/live"), { headers: { Accept: "application/json" } });
       setStatus(response.ok ? "online" : "offline");
     } catch {
       setStatus("offline");
@@ -1305,8 +1376,8 @@ export default function App() {
       setDataError("");
       try {
         const [signalResponse, newsResponse] = await Promise.all([
-          fetch("/v1/signals?status=active&limit=100", { signal: controller.signal }),
-          fetch("/v1/news?limit=100", { signal: controller.signal }),
+          fetch(apiUrl("/v1/signals?status=active&limit=100"), { signal: controller.signal }),
+          fetch(apiUrl("/v1/news?limit=100"), { signal: controller.signal }),
         ]);
         if (!signalResponse.ok || !newsResponse.ok) throw new Error("API вернул ошибку. Попробуй обновить страницу.");
         const [signalPayload, newsPayload] = await Promise.all([signalResponse.json(), newsResponse.json()]);
@@ -1348,7 +1419,7 @@ export default function App() {
       refreshing = true;
       setMarketStatus("loading");
       try {
-        const response = await fetch(`/v1/instruments/snapshots?tickers=${encodeURIComponent(tickerKey)}`, { signal: controller.signal });
+        const response = await fetch(apiUrl(`/v1/instruments/snapshots?tickers=${encodeURIComponent(tickerKey)}`), { signal: controller.signal });
         if (!response.ok) throw new Error("MOEX snapshot unavailable");
         const payload = await response.json();
         const marketByTicker = new Map(payload.data.map((item) => [item.ticker, item]));
@@ -1381,6 +1452,7 @@ export default function App() {
   };
 
   const selectedSignal = signals.find((signal) => signal.ticker === route.ticker) || signals[0];
+  const selectedCompanyNews = selectedSignal ? allNews.filter((item) => item.tickers?.includes(selectedSignal.ticker) || item.signal?.ticker === selectedSignal.ticker) : [];
   const needsData = ["signals", "signal", "news"].includes(route.view);
 
   return (
@@ -1388,7 +1460,7 @@ export default function App() {
       <AppHeader view={route.view} signals={signals} onNavigate={navigate} onSelect={(ticker) => navigate("signal", ticker)} onOpenNews={(ticker) => navigate("news", ticker)} />
       {needsData && dataStatus !== "ready" && <DataState error={dataStatus === "error" ? dataError : ""} onRetry={() => setReloadKey((value) => value + 1)} />}
       {dataStatus === "ready" && route.view === "signals" && <SignalsScreen signals={signals} marketStatus={marketStatus} marketUpdatedAt={marketUpdatedAt} onSelect={(ticker) => navigate("signal", ticker)} onOpenNews={(ticker) => navigate("news", ticker)} onMethodology={() => navigate("methodology")} onReadNews={setReaderItem} />}
-      {dataStatus === "ready" && route.view === "signal" && (selectedSignal ? <CompanyScreen signal={selectedSignal} marketStatus={marketStatus} marketUpdatedAt={marketUpdatedAt} onBack={() => navigate("signals")} onMethodology={() => navigate("methodology")} onOpenNews={() => navigate("news", selectedSignal.ticker)} onReadNews={setReaderItem} /> : <DataState error="Сигнал ещё не рассчитан." onRetry={() => navigate("signals")} />)}
+      {dataStatus === "ready" && route.view === "signal" && (selectedSignal ? <CompanyScreen signal={selectedSignal} companyNews={selectedCompanyNews} marketStatus={marketStatus} marketUpdatedAt={marketUpdatedAt} onBack={() => navigate("signals")} onMethodology={() => navigate("methodology")} onOpenNews={() => navigate("news", selectedSignal.ticker)} onReadNews={setReaderItem} /> : <DataState error="Сигнал ещё не рассчитан." onRetry={() => navigate("signals")} />)}
       {dataStatus === "ready" && route.view === "news" && <NewsScreen signals={signals} allNews={allNews} newsMeta={newsMeta} initialTicker={route.ticker} onReadNews={setReaderItem} />}
       {route.view === "methodology" && <MethodologyScreen onApi={() => navigate("api")} allNews={allNews} newsMeta={newsMeta} />}
       {route.view === "api" && <ApiScreen />}

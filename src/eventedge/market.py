@@ -15,6 +15,7 @@ import requests
 MOEX_ISS_BASE_URL = "https://iss.moex.com/iss"
 MOSCOW_TIMEZONE = ZoneInfo("Europe/Moscow")
 DEFAULT_TIMEOUT_SECONDS = 10.0
+MAX_DAILY_CANDLES = 66
 
 
 class InstrumentNotFoundError(LookupError):
@@ -141,7 +142,7 @@ class MoexMarketDataClient:
                 "candles.columns": "begin,open,close,high,low,value,volume",
             },
         )
-        candle_rows = _rows(candles_payload, "candles")[-30:]
+        candle_rows = _rows(candles_payload, "candles")[-MAX_DAILY_CANDLES:]
         if not candle_rows:
             raise MarketDataUnavailableError("MOEX ISS returned no daily candles")
 
