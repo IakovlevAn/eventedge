@@ -2,24 +2,26 @@ import {
   ArrowDownRight,
   ArrowLeft,
   ArrowUpRight,
-  Bell,
-  Bookmark,
+  BookOpen,
+  Braces,
   Check,
   ChevronDown,
   CircleGauge,
   Clock3,
+  Copy,
   Database,
-  ExternalLink,
   FileText,
   Filter,
-  LayoutGrid,
+  Info,
   Menu,
   Minus,
   Newspaper,
+  RefreshCw,
   Search,
-  Settings,
+  Server,
   ShieldCheck,
   SlidersHorizontal,
+  Terminal,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -258,29 +260,77 @@ const directionMeta = {
   down: { label: "Вниз", Icon: ArrowDownRight },
 };
 
-const companyColors = {
-  SBER: "#24a16a",
-  LKOH: "#d94d52",
-  YDEX: "#f2b84b",
-  NVTK: "#3779d6",
-  TATN: "#4c947d",
-  ROSN: "#d2b231",
-  GMKN: "#507b9e",
-  MGNT: "#dc4e5f",
+const companyBrands = {
+  SBER: { colors: ["#21a366", "#0c7650"], glyph: "С", domain: "sberbank.ru" },
+  LKOH: { colors: ["#ee2d33", "#9c101d"], glyph: "Л", domain: "lukoil.ru" },
+  YDEX: { colors: ["#ffcc00", "#f04b3f"], glyph: "Я", domain: "yandex.ru" },
+  NVTK: { colors: ["#2863b3", "#173f7d"], glyph: "N", domain: "novatek.ru" },
+  TATN: { colors: ["#008d6b", "#006047"], glyph: "Т", domain: "tatneft.ru" },
+  ROSN: { colors: ["#f2c500", "#111216"], glyph: "Р", domain: "rosneft.ru" },
+  GMKN: { colors: ["#1f7ca8", "#124b72"], glyph: "Н", domain: "nornickel.ru" },
+  MGNT: { colors: ["#ef3340", "#a71930"], glyph: "М", domain: "magnit.com" },
 };
 
+const scoreFactorDefinitions = [
+  { label: "Текстовый эффект", weight: 0.55, description: "Как событие меняет ожидания по компании" },
+  { label: "Существенность", weight: 0.2, description: "Насколько событие способно повлиять на стоимость" },
+  { label: "Новизна", weight: 0.1, description: "Есть ли в публикации действительно новый факт" },
+  { label: "Качество источника", weight: 0.1, description: "Надёжность и близость источника к первичным данным" },
+  { label: "Полнота фактов", weight: 0.05, description: "Достаточно ли чисел, сроков и подтверждений" },
+];
+
+function scoreFactors(score) {
+  let allocated = 0;
+  return scoreFactorDefinitions.map((factor, index) => {
+    const contribution = index === scoreFactorDefinitions.length - 1
+      ? Number((score - allocated).toFixed(1))
+      : Number((score * factor.weight).toFixed(1));
+    allocated = Number((allocated + contribution).toFixed(1));
+    return { ...factor, contribution };
+  });
+}
+
+function formatScore(score) {
+  return `${score > 0 ? "+" : ""}${score.toFixed(1)}`;
+}
+
+const allNews = signals.flatMap((signal) =>
+  signal.evidence.map((item, index) => ({
+    ...item,
+    id: `${signal.ticker}-${index}`,
+    signal,
+    index,
+  })),
+);
+
 function BrandMark() {
-  return <span className="brand-mark">E</span>;
+  return (
+    <span className="brand-mark" aria-hidden="true">
+      <i className="brand-mark__axis" />
+      <i className="brand-mark__up" />
+      <i className="brand-mark__down" />
+      <i className="brand-mark__dot" />
+    </span>
+  );
 }
 
 function CompanyMark({ signal, small = false }) {
+  const [imageFailed, setImageFailed] = useState(false);
+  const brand = companyBrands[signal.ticker];
   return (
     <span
       className={`company-mark ${small ? "company-mark--small" : ""}`}
-      style={{ "--company-color": companyColors[signal.ticker] }}
-      aria-hidden="true"
+      style={{ "--company-color": brand.colors[0], "--company-color-deep": brand.colors[1] }}
     >
-      {signal.ticker.slice(0, 1)}
+      {!imageFailed && (
+        <img
+          src={`https://${brand.domain}/favicon.ico`}
+          alt=""
+          loading="lazy"
+          onError={() => setImageFailed(true)}
+        />
+      )}
+      {imageFailed && <b aria-hidden="true">{brand.glyph}</b>}
     </span>
   );
 }
@@ -382,7 +432,7 @@ function PriceChart({ signal }) {
   return <canvas className="price-chart" ref={ref} aria-label={`Динамика цены ${signal.ticker}`} />;
 }
 
-function AppHeader({ onHome, onSelect }) {
+function AppHeader({ view, onNavigate, onSelect }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -408,19 +458,24 @@ function AppHeader({ onHome, onSelect }) {
     setSearchQuery("");
   };
 
+  const navigate = (nextView) => {
+    onNavigate(nextView);
+    setMobileOpen(false);
+  };
+
   return (
     <>
       <header className="app-header">
-        <button className="brand" type="button" onClick={onHome} aria-label="EventEdge — на главную">
+        <button className="brand" type="button" onClick={() => navigate("signals")} aria-label="EventEdge — на главную">
           <BrandMark />
-          <span>EventEdge</span>
+          <span>EventEdge<small>market intelligence</small></span>
         </button>
 
         <nav className={`primary-nav ${mobileOpen ? "is-open" : ""}`} aria-label="Основная навигация">
-          <button type="button" className="is-active" onClick={onHome}><CircleGauge size={14} /> Сигналы</button>
-          <button type="button"><Newspaper size={14} /> Новости</button>
-          <button type="button"><Database size={14} /> Источники</button>
-          <button type="button"><Settings size={14} /> Настройки</button>
+          <button type="button" className={view === "signals" || view === "signal" ? "is-active" : ""} onClick={() => navigate("signals")}><CircleGauge size={14} /> Сигналы</button>
+          <button type="button" className={view === "news" ? "is-active" : ""} onClick={() => navigate("news")}><Newspaper size={14} /> Новости</button>
+          <button type="button" className={view === "methodology" ? "is-active" : ""} onClick={() => navigate("methodology")}><BookOpen size={14} /> Методика</button>
+          <button type="button" className={view === "api" ? "is-active" : ""} onClick={() => navigate("api")}><Braces size={14} /> API</button>
         </nav>
 
         <div className="header-actions">
@@ -429,14 +484,9 @@ function AppHeader({ onHome, onSelect }) {
             <span>Найти компанию</span>
             <kbd>⌘ K</kbd>
           </button>
-          <button className="icon-button" type="button" aria-label="Уведомления">
-            <Bell size={17} />
-            <span className="notification-dot" />
-          </button>
           <button className="icon-button menu-button" type="button" aria-label="Открыть меню" onClick={() => setMobileOpen((value) => !value)}>
             {mobileOpen ? <X size={18} /> : <Menu size={18} />}
           </button>
-          <span className="profile-dot">AR</span>
         </div>
       </header>
 
@@ -460,7 +510,7 @@ function AppHeader({ onHome, onSelect }) {
                 </button>
               ))}
             </div>
-            <footer><span>↵ открыть</span><span>↑↓ выбрать</span><span>⌘ K поиск</span></footer>
+            <footer><span>Нажми на компанию, чтобы открыть сигнал</span><span>⌘ K — поиск</span></footer>
           </section>
         </div>
       )}
@@ -468,7 +518,7 @@ function AppHeader({ onHome, onSelect }) {
   );
 }
 
-function SignalsScreen({ onSelect }) {
+function SignalsScreen({ onSelect, onMethodology }) {
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
@@ -521,19 +571,17 @@ function SignalsScreen({ onSelect }) {
               <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Тикер или компания" aria-label="Найти сигнал" />
               {query && <button type="button" onClick={() => setQuery("")} aria-label="Очистить поиск"><X size={13} /></button>}
             </label>
-            <button className={`square-button ${sortByConfidence ? "is-active" : ""}`} type="button" aria-label="Сортировать по уверенности" onClick={() => setSortByConfidence((value) => !value)}>
+            <button className={`sort-button ${sortByConfidence ? "is-active" : ""}`} type="button" aria-label="Сортировать по уверенности" onClick={() => setSortByConfidence((value) => !value)}>
               <SlidersHorizontal size={15} />
-            </button>
-            <button className="square-button" type="button" aria-label="Табличный вид">
-              <LayoutGrid size={15} />
+              <span>{sortByConfidence ? "По уверенности" : "Сортировка"}</span>
             </button>
           </div>
         </div>
 
         <div className="market-strip">
-          <span><i /> MOEX открыт</span>
-          <span>IMOEX <strong>2 918,4</strong> <em>+0,62%</em></span>
-          <span>Последний расчёт <strong>14:30 МСК</strong></span>
+          <span><i /> Демонстрационный набор</span>
+          <span>Baseline <strong>0.1.0</strong></span>
+          <span>Шкала сигнала <strong>от −100 до +100</strong></span>
           <span className="market-strip__right">{filteredSignals.length} из {signals.length} бумаг</span>
         </div>
 
@@ -542,7 +590,7 @@ function SignalsScreen({ onSelect }) {
             <span>Компания</span>
             <span>Сектор</span>
             <span>Сигнал</span>
-            <span>Скор</span>
+            <span>Оценка</span>
             <span>Событие</span>
             <span>Уверенность</span>
             <span>Горизонт</span>
@@ -560,7 +608,7 @@ function SignalsScreen({ onSelect }) {
                 </span>
                 <span className="sector-cell">{signal.sector}</span>
                 <Direction direction={signal.direction} />
-                <span className={`score-cell score-cell--${signal.direction}`}>{signal.score > 0 ? "+" : ""}{signal.score.toFixed(1)}</span>
+                <span className={`score-cell score-cell--${signal.direction}`}>{formatScore(signal.score)}<small> п.</small></span>
                 <span className="event-cell">{signal.event}</span>
                 <span className="confidence-cell"><i><b style={{ width: `${signal.confidence}%` }} /></i>{signal.confidence}%</span>
                 <span className="horizon-cell">{signal.horizon}</span>
@@ -581,18 +629,16 @@ function SignalsScreen({ onSelect }) {
         </div>
 
         <footer className="terminal-footer">
-          <span><ShieldCheck size={13} /> Baseline 0.1.0 · данные проверены</span>
-          <button type="button">Как считается сигнал <ExternalLink size={12} /></button>
+          <span><ShieldCheck size={13} /> Пункты — это сила сигнала, а не прогноз доходности</span>
+          <button type="button" onClick={onMethodology}>Как считается сигнал <ArrowUpRight size={12} /></button>
         </footer>
       </section>
     </main>
   );
 }
 
-function CompanyScreen({ signal, onBack }) {
-  const [bookmarked, setBookmarked] = useState(false);
-  const [range, setRange] = useState("1Д");
-  const [selectedEvidence, setSelectedEvidence] = useState(null);
+function CompanyScreen({ signal, onBack, onMethodology, onOpenNews, onReadNews }) {
+  const factors = scoreFactors(signal.score);
 
   return (
     <main className="screen screen--company">
@@ -601,54 +647,45 @@ function CompanyScreen({ signal, onBack }) {
         <CompanyMark signal={signal} />
         <div className="company-identity">
           <strong>{signal.ticker}</strong>
-          <span>{signal.company}</span>
+          <span>{signal.company} · MOEX</span>
         </div>
-        <div className="company-tabs" role="tablist" aria-label="Разделы компании">
-          <button type="button">График</button>
-          <button type="button" className="is-active">Сигнал</button>
-          <button type="button">Новости</button>
-          <button type="button">Показатели</button>
-          <button type="button">История</button>
-        </div>
-        <button className={`bookmark-button ${bookmarked ? "is-active" : ""}`} type="button" onClick={() => setBookmarked((value) => !value)} aria-label={bookmarked ? "Убрать из избранного" : "Добавить в избранное"}>
-          <Bookmark size={17} fill={bookmarked ? "currentColor" : "none"} />
-        </button>
+        <div className="company-header__signal"><Direction direction={signal.direction} /><span>{signal.horizon}</span></div>
       </div>
 
       <section className="company-canvas">
         <div className="chart-card">
           <div className="chart-summary">
             <div>
-              <span>MOEX · {signal.company}</span>
+              <span>Динамика бумаги · демо-график за день</span>
               <strong>{signal.price}</strong>
               <em className={`change-cell--${signal.direction}`}>{signal.change}</em>
             </div>
             <div className="chart-signal">
               <Direction direction={signal.direction} />
-              <span>на горизонте {signal.horizon}</span>
+              <span>ожидание на {signal.horizon}</span>
             </div>
           </div>
           <PriceChart signal={signal} />
-          <div className="range-tabs" role="group" aria-label="Период графика">
-            {["1Д", "1Н", "1М", "3М", "Год", "Всё"].map((item) => (
-              <button key={item} type="button" className={range === item ? "is-active" : ""} onClick={() => setRange(item)}>{item}</button>
-            ))}
-          </div>
         </div>
 
         <div className="analysis-grid">
           <section className="decision-card">
-            <div className="section-kicker"><CircleGauge size={14} /> Решение модели</div>
+            <div className="section-kicker"><CircleGauge size={14} /> Аналитический сигнал</div>
             <div className="decision-headline">
               <div>
                 <h1>{signal.action}</h1>
                 <p>{signal.summary}</p>
               </div>
               <div className="decision-score">
-                <strong className={`score-cell--${signal.direction}`}>{signal.score > 0 ? "+" : ""}{signal.score.toFixed(1)}</strong>
-                <span>итоговый скор</span>
+                <strong className={`score-cell--${signal.direction}`}>{formatScore(signal.score)}</strong>
+                <span>пунктов из 100</span>
               </div>
             </div>
+            <button className="score-explainer" type="button" onClick={onMethodology}>
+              <Info size={14} />
+              <span><strong>Что означают пункты?</strong> Это сила и направление гипотезы, не ожидаемая доходность.</span>
+              <ArrowUpRight size={13} />
+            </button>
             <div className="decision-stats">
               <div><span>Уверенность</span><strong>{signal.confidence}%</strong><small>{signal.confidence >= 70 ? "высокая" : signal.confidence >= 60 ? "средняя" : "ограниченная"}</small></div>
               <div><span>Горизонт</span><strong>{signal.horizon}</strong><small>торговых</small></div>
@@ -662,86 +699,264 @@ function CompanyScreen({ signal, onBack }) {
 
           <section className="factors-card">
             <div className="section-heading">
-              <span><SlidersHorizontal size={14} /> Из чего состоит сигнал</span>
-              <small>вклад факторов</small>
+              <span><SlidersHorizontal size={14} /> Из чего состоит оценка</span>
+              <small>вклад в пунктах</small>
             </div>
             <div className="factor-list">
-              {signal.factors.map((factor) => (
+              {factors.map((factor) => (
                 <div className="factor-row" key={factor.label}>
-                  <div><span>{factor.label}</span><strong className={`factor--${factor.tone}`}>{factor.tone === "positive" ? "+" : "−"}{factor.value}</strong></div>
-                  <i><b className={`factor--${factor.tone}`} style={{ width: `${Math.min(factor.value * 2.2, 100)}%` }} /></i>
+                  <div><span>{factor.label}<small>{Math.round(factor.weight * 100)}%</small></span><strong className={factor.contribution >= 0 ? "factor--positive" : "factor--negative"}>{formatScore(factor.contribution)} п.</strong></div>
+                  <i><b className={factor.contribution >= 0 ? "factor--positive" : "factor--negative"} style={{ width: `${Math.min(Math.abs(factor.contribution) * 3, 100)}%` }} /></i>
                 </div>
               ))}
             </div>
-            <button className="method-link" type="button"><Database size={13} /> Открыть расчёт модели <ExternalLink size={11} /></button>
+            <div className="factor-total"><span>Сумма вкладов</span><strong>{formatScore(signal.score)} п.</strong></div>
+            <button className="method-link" type="button" onClick={onMethodology}><BookOpen size={13} /> Как считается сигнал <ArrowUpRight size={11} /></button>
           </section>
         </div>
 
         <section className="news-card">
           <div className="section-heading">
-            <span><Newspaper size={15} /> Новости и данные, изменившие сигнал</span>
-            <button type="button">Все источники <ExternalLink size={11} /></button>
+            <span><Newspaper size={15} /> Новости, изменившие сигнал</span>
+            <button type="button" onClick={onOpenNews}>Все новости {signal.ticker} <ArrowUpRight size={11} /></button>
           </div>
           <div className="news-list">
             {signal.evidence.map((item, index) => (
-              <article className="news-item" key={`${item.source}-${item.time}`}>
+              <button className="news-item news-item--button" type="button" key={`${item.source}-${item.time}-${index}`} onClick={() => onReadNews({ ...item, signal, index })}>
                 <span className="news-index">0{index + 1}</span>
                 <div className="news-content">
                   <div><span>{item.source}</span><i>{item.tag}</i></div>
                   <h2>{item.title}</h2>
-                  <p>Факт извлечён и сопоставлен с компанией. Вклад проверен на свежесть, релевантность и реакцию рынка.</p>
+                  <p>{signal.summary}</p>
                 </div>
                 <span className="news-time"><Clock3 size={12} /> {item.time}</span>
-                <button type="button" aria-label="Открыть источники" onClick={() => setSelectedEvidence(item)}><ExternalLink size={14} /></button>
-              </article>
+                <span className="news-open"><BookOpen size={14} /></span>
+              </button>
             ))}
           </div>
         </section>
 
         <p className="disclaimer">Сигнал является аналитической гипотезой и не является индивидуальной инвестиционной рекомендацией.</p>
       </section>
-
-      {selectedEvidence && (
-        <div className="sources-overlay">
-          <button className="overlay-dismiss" type="button" aria-label="Закрыть источники" onClick={() => setSelectedEvidence(null)} />
-          <section className="sources-dialog" role="dialog" aria-modal="true" aria-label="Источники новости">
-            <header>
-              <span><CompanyMark signal={signal} small /> {signal.ticker} · MOEX</span>
-              <button type="button" onClick={() => setSelectedEvidence(null)} aria-label="Закрыть"><X size={16} /></button>
-            </header>
-            <div className="sources-query">{selectedEvidence.title}</div>
-            <div className="sources-label">Источники события</div>
-            {[
-              [selectedEvidence.source, selectedEvidence.title, selectedEvidence.time],
-              ["РБК Инвестиции", `Рынок оценивает событие вокруг ${signal.company}`, "10:26"],
-              ["Коммерсантъ", `${signal.company}: ключевые факты и реакция участников рынка`, "10:41"],
-            ].map(([source, title, time], index) => (
-              <button type="button" className={index === 0 ? "is-active" : ""} key={`${source}-${time}`}>
-                <FileText size={14} />
-                <span><strong>{title}</strong><small>{source} · сегодня, {time}</small></span>
-                <ExternalLink size={13} />
-              </button>
-            ))}
-            <footer><ShieldCheck size={13} /> Событие объединено из 3 публикаций без повторного учёта в сигнале</footer>
-          </section>
-        </div>
-      )}
     </main>
   );
 }
 
+function NewsScreen({ initialTicker, onReadNews }) {
+  const [ticker, setTicker] = useState(initialTicker || "all");
+  const [query, setQuery] = useState("");
+
+  useEffect(() => setTicker(initialTicker || "all"), [initialTicker]);
+
+  const items = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase("ru-RU");
+    return allNews.filter((item) => {
+      const matchesTicker = ticker === "all" || item.signal.ticker === ticker;
+      const haystack = `${item.title} ${item.source} ${item.signal.ticker} ${item.signal.company}`.toLocaleLowerCase("ru-RU");
+      return matchesTicker && (!normalized || haystack.includes(normalized));
+    });
+  }, [ticker, query]);
+
+  return (
+    <main className="screen section-screen">
+      <section className="page-hero">
+        <div><span className="eyebrow"><Newspaper size={13} /> Лента событий</span><h1>Новости, которые двигают сигнал</h1><p>Открой публикацию, прочитай краткое содержание и сразу увидь, с какой компанией и сигналом она связана.</p></div>
+        <label className="page-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Компания, тикер или событие" />{query && <button type="button" onClick={() => setQuery("")} aria-label="Очистить поиск"><X size={13} /></button>}</label>
+      </section>
+      <div className="news-filters" aria-label="Фильтр по компании">
+        <button type="button" className={ticker === "all" ? "is-active" : ""} onClick={() => setTicker("all")}>Все <span>{allNews.length}</span></button>
+        {signals.map((signal) => (
+          <button type="button" key={signal.ticker} className={ticker === signal.ticker ? "is-active" : ""} onClick={() => setTicker(signal.ticker)}><CompanyMark signal={signal} small />{signal.ticker}</button>
+        ))}
+      </div>
+      <section className="news-feed">
+        <div className="feed-heading"><span>{items.length} публикаций</span><small>демонстрационные материалы</small></div>
+        {items.map((item) => (
+          <button type="button" className="feed-item" key={item.id} onClick={() => onReadNews(item)}>
+            <CompanyMark signal={item.signal} />
+            <div className="feed-copy"><div><span>{item.source}</span><i>{item.tag}</i><time>{item.time}</time></div><h2>{item.title}</h2><p>{item.signal.summary}</p><footer><strong>{item.signal.ticker}</strong><Direction direction={item.signal.direction} /><span>{formatScore(item.signal.score)} п.</span></footer></div>
+            <BookOpen size={17} />
+          </button>
+        ))}
+        {!items.length && <div className="empty-state"><Search size={22} /><strong>Новостей не найдено</strong><span>Измени запрос или выбери другую компанию.</span></div>}
+      </section>
+    </main>
+  );
+}
+
+function MethodologyScreen({ onApi }) {
+  const sample = signals[0];
+  const sampleFactors = scoreFactors(sample.score);
+
+  return (
+    <main className="screen section-screen methodology-screen">
+      <section className="page-hero methodology-hero">
+        <div><span className="eyebrow"><BookOpen size={13} /> Прозрачная методика</span><h1>Как считается сигнал</h1><p>LLM не предсказывает цену напрямую. Она извлекает из новости факты и смысл, после чего детерминированная формула собирает итоговую оценку.</p></div>
+        <div className="method-score-scale"><span>Вниз</span><i><b /></i><span>Нейтрально</span><i><b /></i><span>Вверх</span><small>−100</small><small>−18</small><small>+18</small><small>+100</small></div>
+      </section>
+
+      <section className="score-definition">
+        <Info size={18} />
+        <div><h2>Что такое пункты оценки</h2><p><strong>{formatScore(sample.score)} п.</strong> — не «акция вырастет на 42,7%». Это нормализованная сила аналитической гипотезы на шкале от −100 до +100. Чем дальше значение от нуля, тем сильнее направленный сигнал.</p></div>
+      </section>
+
+      <div className="method-grid">
+        <section className="method-card">
+          <header><span>01</span><div><h2>LLM разбирает новость</h2><p>Возвращает структурированные признаки, а не готовый торговый совет.</p></div></header>
+          <div className="method-factors">
+            {scoreFactorDefinitions.map((factor) => <div key={factor.label}><span>{factor.label}</span><p>{factor.description}</p><strong>{Math.round(factor.weight * 100)}%</strong></div>)}
+          </div>
+        </section>
+        <section className="method-card formula-card">
+          <header><span>02</span><div><h2>Формула складывает вклад</h2><p>Веса зафиксированы в версии модели и проверяются тестами.</p></div></header>
+          <div className="formula-line"><code>score = Σ (признак × вес)</code><span>ограничение: −100…+100</span></div>
+          <div className="sample-calculation">
+            <div className="sample-company"><CompanyMark signal={sample} /><span><strong>{sample.ticker}</strong><small>пример расчёта</small></span></div>
+            {sampleFactors.map((factor) => <div key={factor.label}><span>{factor.label}</span><strong>{formatScore(factor.contribution)} п.</strong></div>)}
+            <footer><span>Итог</span><strong>{formatScore(sample.score)} п.</strong></footer>
+          </div>
+        </section>
+        <section className="method-card threshold-card">
+          <header><span>03</span><div><h2>Порог превращает оценку в действие</h2><p>Нейтральная зона защищает от решений на слабом информационном шуме.</p></div></header>
+          <div><span className="direction direction--down"><ArrowDownRight size={14} /> Вниз</span><strong>≤ −18</strong><p>Сократить риск или не входить</p></div>
+          <div><span className="direction direction--neutral"><Minus size={14} /> Нейтрально</span><strong>от −18 до +18</strong><p>Ждать нового факта</p></div>
+          <div><span className="direction direction--up"><ArrowUpRight size={14} /> Вверх</span><strong>≥ +18</strong><p>Рассмотреть позицию</p></div>
+        </section>
+      </div>
+
+      <section className="method-reality">
+        <div><ShieldCheck size={17} /><span><strong>Что работает сейчас</strong>Новостной baseline: семантические признаки, фиксированные веса и версионируемый расчёт.</span></div>
+        <div><Database size={17} /><span><strong>Следующие улучшения</strong>Фундаментальные показатели, цена и объём будут добавляться как отдельные проверяемые блоки — без скрытой магии.</span></div>
+        <button type="button" onClick={onApi}>Посмотреть API <ArrowUpRight size={13} /></button>
+      </section>
+    </main>
+  );
+}
+
+const apiEndpoints = [
+  { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Список сигналов", description: "Последние рассчитанные сигналы с фильтрами по тикеру и направлению." },
+  { id: "ticker", method: "GET", path: "/v1/signals?ticker=SBER&limit=1", title: "Сигнал компании", description: "Последний доступный сигнал по выбранному тикеру." },
+  { id: "health", method: "GET", path: "/health/ready", title: "Готовность сервиса", description: "Проверка приложения и соединения с хранилищем." },
+];
+
+function ApiScreen() {
+  const [selectedId, setSelectedId] = useState("signals");
+  const [status, setStatus] = useState("idle");
+  const [copied, setCopied] = useState("");
+  const endpoint = apiEndpoints.find((item) => item.id === selectedId);
+  const baseUrl = typeof window === "undefined" ? "" : window.location.origin;
+
+  const checkApi = async () => {
+    setStatus("checking");
+    try {
+      const response = await fetch("/health/live", { headers: { Accept: "application/json" } });
+      setStatus(response.ok ? "online" : "offline");
+    } catch {
+      setStatus("offline");
+    }
+  };
+
+  const copyText = async (value, id) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(id);
+      window.setTimeout(() => setCopied(""), 1600);
+    } catch {
+      setCopied("");
+    }
+  };
+
+  return (
+    <main className="screen section-screen api-screen">
+      <section className="page-hero api-hero">
+        <div><span className="eyebrow"><Braces size={13} /> EventEdge API</span><h1>Получай сигналы через простой HTTP API</h1><p>Интерфейс для внутренних продуктов, аналитических пайплайнов и автоматизации. Сейчас доступно чтение рассчитанных сигналов и health-check.</p></div>
+        <div className={`api-status api-status--${status}`}><Server size={17} /><span><strong>{status === "checking" ? "Проверяем…" : status === "online" ? "API отвечает" : status === "offline" ? "API недоступен" : "Статус не проверен"}</strong><small>{baseUrl}</small></span><button type="button" onClick={checkApi} disabled={status === "checking"}><RefreshCw size={14} /> Проверить</button></div>
+      </section>
+
+      <section className="api-base-url"><div><span>Base URL</span><code>{baseUrl}</code></div><button type="button" onClick={() => copyText(baseUrl, "base")}><Copy size={14} /> {copied === "base" ? "Скопировано" : "Скопировать"}</button></section>
+
+      <div className="api-layout">
+        <aside className="endpoint-list" aria-label="Методы API">
+          <span>Методы</span>
+          {apiEndpoints.map((item) => <button type="button" key={item.id} className={selectedId === item.id ? "is-active" : ""} onClick={() => setSelectedId(item.id)}><b>{item.method}</b><span>{item.title}<small>{item.path.split("?")[0]}</small></span></button>)}
+        </aside>
+        <section className="endpoint-doc">
+          <header><div><span className="http-method">{endpoint.method}</span><code>{endpoint.path}</code></div><button type="button" onClick={() => copyText(`${baseUrl}${endpoint.path}`, endpoint.id)}><Copy size={14} /> {copied === endpoint.id ? "Скопировано" : "Копировать URL"}</button></header>
+          <h2>{endpoint.title}</h2><p>{endpoint.description}</p>
+          {endpoint.id !== "health" && <div className="parameter-table"><div><strong>Параметр</strong><strong>Тип</strong><strong>Описание</strong></div><div><code>{endpoint.id === "ticker" ? "ticker" : "limit"}</code><span>{endpoint.id === "ticker" ? "string" : "integer"}</span><p>{endpoint.id === "ticker" ? "Тикер MOEX, например SBER" : "Количество записей, максимум 100"}</p></div></div>}
+          <div className="code-panel"><div><span><Terminal size={13} /> cURL</span><button type="button" onClick={() => copyText(`curl -s '${baseUrl}${endpoint.path}'`, "curl")}><Copy size={13} /> {copied === "curl" ? "Готово" : "Копировать"}</button></div><pre><code>{`curl -s '${baseUrl}${endpoint.path}' \\\n  -H 'Accept: application/json'`}</code></pre></div>
+          <div className="response-panel"><span>Пример ответа</span><pre><code>{endpoint.id === "health" ? `{"status":"ready"}` : `{
+  "data": [
+    {
+      "id": "sig_01JZK6K5GDX90Q2X8C0R4D7M9P",
+      "ticker": "SBER",
+      "direction": "up",
+      "score": 42.7,
+      "confidence": 0.76,
+      "horizon": {"value": 3, "unit": "trading_days"},
+      "model_version": "news-baseline-0.1.0"
+    }
+  ],
+  "meta": {"limit": 20, "has_more": false, "next_cursor": null}
+}`}</code></pre></div>
+        </section>
+      </div>
+    </main>
+  );
+}
+
+function NewsReader({ item, onClose }) {
+  if (!item) return null;
+  const { signal } = item;
+  return (
+    <div className="reader-overlay">
+      <button className="overlay-dismiss" type="button" aria-label="Закрыть новость" onClick={onClose} />
+      <article className="reader-dialog" role="dialog" aria-modal="true" aria-label="Просмотр новости">
+        <header><div><CompanyMark signal={signal} /><span><strong>{signal.ticker}</strong><small>{signal.company} · {item.source}</small></span></div><button type="button" onClick={onClose} aria-label="Закрыть"><X size={18} /></button></header>
+        <div className="reader-meta"><span>{item.tag}</span><time><Clock3 size={12} /> сегодня, {item.time}</time></div>
+        <h1>{item.title}</h1>
+        <div className="reader-body"><p>{signal.summary}</p><p>EventEdge связал публикацию с событием «{signal.event}», проверил её новизну, существенность и качество источника. На горизонте {signal.horizon} текущая оценка составляет <strong>{formatScore(signal.score)} пункта</strong>.</p></div>
+        <section className="reader-insight"><CircleGauge size={16} /><div><span>Что это меняет</span><strong>{signal.action}</strong><p>{signal.invalidation}</p></div></section>
+        <footer><FileText size={13} /> Это краткое содержание EventEdge для демонстрационного материала, а не полный текст исходной публикации.</footer>
+      </article>
+    </div>
+  );
+}
+
+function parseRoute() {
+  const value = window.location.hash.replace(/^#\/?/, "") || "signals";
+  const [view, ticker] = value.split("/");
+  return { view: ["signals", "signal", "news", "methodology", "api"].includes(view) ? view : "signals", ticker: ticker || null };
+}
+
 export default function App() {
-  const [selectedTicker, setSelectedTicker] = useState(null);
-  const selectedSignal = signals.find((signal) => signal.ticker === selectedTicker);
+  const [route, setRoute] = useState(parseRoute);
+  const [readerItem, setReaderItem] = useState(null);
+
+  useEffect(() => {
+    const handleHashChange = () => setRoute(parseRoute());
+    window.addEventListener("hashchange", handleHashChange);
+    return () => window.removeEventListener("hashchange", handleHashChange);
+  }, []);
+
+  const navigate = (view, ticker = null) => {
+    const nextHash = `#${view}${ticker ? `/${ticker}` : ""}`;
+    if (window.location.hash === nextHash) setRoute({ view, ticker });
+    else window.location.hash = nextHash;
+    window.scrollTo({ top: 0 });
+  };
+
+  const selectedSignal = signals.find((signal) => signal.ticker === route.ticker) || signals[0];
 
   return (
     <div className="app-shell">
-      <AppHeader onHome={() => setSelectedTicker(null)} onSelect={setSelectedTicker} />
-      {selectedSignal ? (
-        <CompanyScreen signal={selectedSignal} onBack={() => setSelectedTicker(null)} />
-      ) : (
-        <SignalsScreen onSelect={setSelectedTicker} />
-      )}
+      <AppHeader view={route.view} onNavigate={navigate} onSelect={(ticker) => navigate("signal", ticker)} />
+      {route.view === "signals" && <SignalsScreen onSelect={(ticker) => navigate("signal", ticker)} onMethodology={() => navigate("methodology")} />}
+      {route.view === "signal" && <CompanyScreen signal={selectedSignal} onBack={() => navigate("signals")} onMethodology={() => navigate("methodology")} onOpenNews={() => navigate("news", selectedSignal.ticker)} onReadNews={setReaderItem} />}
+      {route.view === "news" && <NewsScreen initialTicker={route.ticker} onReadNews={setReaderItem} />}
+      {route.view === "methodology" && <MethodologyScreen onApi={() => navigate("api")} />}
+      {route.view === "api" && <ApiScreen />}
+      <NewsReader item={readerItem} onClose={() => setReaderItem(null)} />
     </div>
   );
 }
