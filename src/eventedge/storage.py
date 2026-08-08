@@ -5,10 +5,17 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 import ydb
+from ydb.query.base import QueryExecMode
+
+from eventedge.analysis import (
+    NewsAnalysisInput,
+    SemanticFeatures,
+    extract_and_score,
+)
 
 CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
@@ -62,6 +69,62 @@ class IngestResult:
     replayed: bool
 
 
+@dataclass(frozen=True)
+class SignalRecord:
+    id: str
+    news_id: str
+    ticker: str
+    as_of: datetime
+    data_cutoff_at: datetime
+    status: str
+    direction: str
+    action: str
+    horizon_value: int
+    horizon_unit: str
+    score: float
+    strength: float
+    confidence: float
+    summary: str
+    factor_contributions: tuple[dict[str, object], ...]
+    evidence_refs: tuple[str, ...]
+    expires_at: datetime
+    invalidation_conditions: tuple[str, ...]
+    model_version: str
+    config_version: int
+    created_at: datetime
+
+    def as_api_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "ticker": self.ticker,
+            "as_of": to_rfc3339(self.as_of),
+            "data_cutoff_at": to_rfc3339(self.data_cutoff_at),
+            "status": self.status,
+            "direction": self.direction,
+            "action": self.action,
+            "horizon": {"value": self.horizon_value, "unit": self.horizon_unit},
+            "score": self.score,
+            "strength": self.strength,
+            "confidence": self.confidence,
+            "summary": self.summary,
+            "factor_contributions": list(self.factor_contributions),
+            "evidence_refs": list(self.evidence_refs),
+            "expires_at": to_rfc3339(self.expires_at),
+            "invalidation_conditions": list(self.invalidation_conditions),
+            "model_version": self.model_version,
+            "config_version": self.config_version,
+            "created_at": to_rfc3339(self.created_at),
+        }
+
+
+@dataclass(frozen=True)
+class ProcessedNews:
+    news_id: str
+    feature_set_id: str
+    features: SemanticFeatures
+    signals: tuple[SignalRecord, ...]
+
+
 class NewsRepository(Protocol):
     async def start(self) -> None: ...
 
@@ -73,12 +136,26 @@ class NewsRepository(Protocol):
 
     async def get_job(self, job_id: str) -> Job | None: ...
 
+    async def list_signals(
+        self,
+        *,
+        ticker: str | None,
+        directions: frozenset[str] | None,
+        status: str | None,
+        min_confidence: float | None,
+        limit: int,
+    ) -> list[SignalRecord]: ...
+
+    async def get_signal(self, signal_id: str) -> SignalRecord | None: ...
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
 def to_rfc3339(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
@@ -102,10 +179,92 @@ def canonical_payload_hash(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def process_document(document: NewsDocument, *, now: datetime | None = None) -> ProcessedNews:
+    created_at = now or utc_now()
+    news_id = stable_id("news_", f"{document.source_id}\x00{document.external_id}")
+    features, baseline_signals = extract_and_score(
+        NewsAnalysisInput(
+            source_id=document.source_id,
+            title=document.title,
+            content=document.content,
+            language=document.language,
+        )
+    )
+    feature_set_id = stable_id(
+        "feat_",
+        f"{news_id}\x00{document.payload_hash}\x00{features.extractor_version}",
+    )
+    signal_records = tuple(
+        SignalRecord(
+            id=stable_id(
+                "sig_",
+                (
+                    f"{news_id}\x00{document.payload_hash}\x00{signal.ticker}\x00"
+                    f"{signal.model_version}\x00{signal.config_version}"
+                ),
+            ),
+            news_id=news_id,
+            ticker=signal.ticker,
+            as_of=document.received_at,
+            data_cutoff_at=document.received_at,
+            status="active",
+            direction=signal.direction.value,
+            action=signal.action.value,
+            horizon_value=3,
+            horizon_unit="calendar_days",
+            score=signal.score,
+            strength=signal.strength,
+            confidence=signal.confidence,
+            summary=signal.summary,
+            factor_contributions=tuple(
+                contribution.model_dump(mode="json")
+                for contribution in signal.factor_contributions
+            ),
+            evidence_refs=(news_id,),
+            expires_at=document.received_at + timedelta(days=3),
+            invalidation_conditions=(
+                "Появилась новая существенная информация по компании.",
+                "Истёк горизонт сигнала.",
+            ),
+            model_version=signal.model_version,
+            config_version=signal.config_version,
+            created_at=created_at,
+        )
+        for signal in baseline_signals
+    )
+    return ProcessedNews(
+        news_id=news_id,
+        feature_set_id=feature_set_id,
+        features=features,
+        signals=signal_records,
+    )
+
+
+def filter_signals(
+    signals: list[SignalRecord],
+    *,
+    ticker: str | None,
+    directions: frozenset[str] | None,
+    status: str | None,
+    min_confidence: float | None,
+    limit: int,
+) -> list[SignalRecord]:
+    filtered = (
+        signal
+        for signal in signals
+        if (ticker is None or signal.ticker == ticker)
+        and (directions is None or signal.direction in directions)
+        and (status is None or signal.status == status)
+        and (min_confidence is None or signal.confidence >= min_confidence)
+    )
+    return sorted(filtered, key=lambda signal: (signal.as_of, signal.id), reverse=True)[:limit]
+
+
 class MemoryNewsRepository:
     def __init__(self) -> None:
         self._requests: dict[str, tuple[str, str]] = {}
         self._jobs: dict[str, Job] = {}
+        self._signals: dict[str, SignalRecord] = {}
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
@@ -127,19 +286,52 @@ class MemoryNewsRepository:
                 return IngestResult(job=self._jobs[job_id], replayed=True)
 
             now = utc_now()
+            processed = process_document(document, now=now)
+            result_ref = (
+                processed.signals[0].id
+                if processed.signals
+                else processed.feature_set_id
+            )
             job = Job(
                 id=stable_id("job_", idempotency_key),
                 kind="news_ingestion",
-                status="queued",
+                status="succeeded",
                 created_at=now,
                 updated_at=now,
+                progress=1.0,
+                result_ref=result_ref,
+                completed_at=now,
             )
             self._jobs[job.id] = job
+            self._signals.update(
+                {signal.id: signal for signal in processed.signals}
+            )
             self._requests[idempotency_key] = (document.payload_hash, job.id)
             return IngestResult(job=job, replayed=False)
 
     async def get_job(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
+
+    async def list_signals(
+        self,
+        *,
+        ticker: str | None,
+        directions: frozenset[str] | None,
+        status: str | None,
+        min_confidence: float | None,
+        limit: int,
+    ) -> list[SignalRecord]:
+        return filter_signals(
+            list(self._signals.values()),
+            ticker=ticker,
+            directions=directions,
+            status=status,
+            min_confidence=min_confidence,
+            limit=limit,
+        )
+
+    async def get_signal(self, signal_id: str) -> SignalRecord | None:
+        return self._signals.get(signal_id)
 
 
 class YdbNewsRepository:
@@ -169,6 +361,11 @@ class YdbNewsRepository:
             self._pool = ydb.aio.QuerySessionPool(self._driver, size=2)
             for statement in SCHEMA_STATEMENTS:
                 await self._pool.execute_with_retries(statement)
+            for query in VALIDATED_QUERIES:
+                await self._pool.execute_with_retries(
+                    query,
+                    exec_mode=QueryExecMode.VALIDATE,
+                )
         except (Exception, asyncio.CancelledError):
             await self._close()
             raise
@@ -191,7 +388,6 @@ class YdbNewsRepository:
 
     async def ingest(self, idempotency_key: str, document: NewsDocument) -> IngestResult:
         job_id = stable_id("job_", idempotency_key)
-        news_id = stable_id("news_", f"{document.source_id}\x00{document.external_id}")
 
         async def transaction(session: ydb.aio.QuerySession) -> IngestResult:
             tx = session.transaction()
@@ -214,18 +410,27 @@ class YdbNewsRepository:
                 return IngestResult(job=existing_job, replayed=True)
 
             now = utc_now()
+            processed = process_document(document, now=now)
+            result_ref = (
+                processed.signals[0].id
+                if processed.signals
+                else processed.feature_set_id
+            )
             job = Job(
                 id=job_id,
                 kind="news_ingestion",
-                status="queued",
+                status="succeeded",
                 created_at=now,
                 updated_at=now,
+                progress=1.0,
+                result_ref=result_ref,
+                completed_at=now,
             )
             parameters = {
                 "$idempotency_key": idempotency_key,
                 "$payload_hash": document.payload_hash,
                 "$job_id": job.id,
-                "$news_id": news_id,
+                "$news_id": processed.news_id,
                 "$source_id": document.source_id,
                 "$external_id": document.external_id,
                 "$published_at": ydb.TypedValue(
@@ -241,14 +446,38 @@ class YdbNewsRepository:
                     ydb.PrimitiveType.Json,
                 ),
                 "$created_at": ydb.TypedValue(now, ydb.PrimitiveType.Timestamp),
+                "$result_ref": result_ref,
             }
             async with await tx.execute(
                 INSERT_REQUEST_QUERY,
                 parameters,
-                commit_tx=True,
             ) as result_sets:
                 async for _ in result_sets:
                     pass
+            async with await tx.execute(
+                INSERT_FEATURE_SET_QUERY,
+                {
+                    "$feature_set_id": processed.feature_set_id,
+                    "$news_id": processed.news_id,
+                    "$schema_version": processed.features.schema_version,
+                    "$extractor_version": processed.features.extractor_version,
+                    "$features": ydb.TypedValue(
+                        processed.features.model_dump_json(),
+                        ydb.PrimitiveType.Json,
+                    ),
+                    "$created_at": ydb.TypedValue(now, ydb.PrimitiveType.Timestamp),
+                },
+            ) as result_sets:
+                async for _ in result_sets:
+                    pass
+            for signal in processed.signals:
+                async with await tx.execute(
+                    INSERT_SIGNAL_QUERY,
+                    signal_parameters(signal),
+                ) as result_sets:
+                    async for _ in result_sets:
+                        pass
+            await tx.commit()
             return IngestResult(job=job, replayed=False)
 
         return await self._require_pool().retry_operation_async(transaction)
@@ -261,6 +490,37 @@ class YdbNewsRepository:
         if not result_sets or not result_sets[0].rows:
             return None
         return job_from_row(result_sets[0].rows[0])
+
+    async def list_signals(
+        self,
+        *,
+        ticker: str | None,
+        directions: frozenset[str] | None,
+        status: str | None,
+        min_confidence: float | None,
+        limit: int,
+    ) -> list[SignalRecord]:
+        result_sets = await self._require_pool().execute_with_retries(
+            SELECT_SIGNALS_QUERY
+        )
+        rows = result_sets[0].rows if result_sets else []
+        return filter_signals(
+            [signal_from_row(row) for row in rows],
+            ticker=ticker,
+            directions=directions,
+            status=status,
+            min_confidence=min_confidence,
+            limit=limit,
+        )
+
+    async def get_signal(self, signal_id: str) -> SignalRecord | None:
+        result_sets = await self._require_pool().execute_with_retries(
+            SELECT_SIGNAL_QUERY,
+            {"$signal_id": signal_id},
+        )
+        if not result_sets or not result_sets[0].rows:
+            return None
+        return signal_from_row(result_sets[0].rows[0])
 
     def _require_pool(self) -> ydb.aio.QuerySessionPool:
         if self._pool is None:
@@ -281,6 +541,88 @@ def job_from_row(row: object) -> Job:
     )
 
 
+def signal_parameters(signal: SignalRecord) -> dict[str, object]:
+    return {
+        "$signal_id": signal.id,
+        "$news_id": signal.news_id,
+        "$ticker": signal.ticker,
+        "$as_of": ydb.TypedValue(signal.as_of, ydb.PrimitiveType.Timestamp),
+        "$data_cutoff_at": ydb.TypedValue(
+            signal.data_cutoff_at, ydb.PrimitiveType.Timestamp
+        ),
+        "$status": signal.status,
+        "$direction": signal.direction,
+        "$action": signal.action,
+        "$horizon_value": ydb.TypedValue(
+            signal.horizon_value, ydb.PrimitiveType.Uint32
+        ),
+        "$horizon_unit": signal.horizon_unit,
+        "$score": signal.score,
+        "$strength": signal.strength,
+        "$confidence": signal.confidence,
+        "$summary": signal.summary,
+        "$factor_contributions": ydb.TypedValue(
+            json.dumps(signal.factor_contributions, ensure_ascii=False),
+            ydb.PrimitiveType.Json,
+        ),
+        "$evidence_refs": ydb.TypedValue(
+            json.dumps(signal.evidence_refs, ensure_ascii=False),
+            ydb.PrimitiveType.Json,
+        ),
+        "$expires_at": ydb.TypedValue(signal.expires_at, ydb.PrimitiveType.Timestamp),
+        "$invalidation_conditions": ydb.TypedValue(
+            json.dumps(signal.invalidation_conditions, ensure_ascii=False),
+            ydb.PrimitiveType.Json,
+        ),
+        "$model_version": signal.model_version,
+        "$config_version": ydb.TypedValue(
+            signal.config_version, ydb.PrimitiveType.Uint32
+        ),
+        "$created_at": ydb.TypedValue(signal.created_at, ydb.PrimitiveType.Timestamp),
+    }
+
+
+def json_list(value: object) -> list[object]:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    if isinstance(value, str):
+        decoded = json.loads(value)
+    else:
+        decoded = value
+    if not isinstance(decoded, (list, tuple)):
+        raise ValueError("stored JSON value must be a list")
+    return list(decoded)
+
+
+def signal_from_row(row: object) -> SignalRecord:
+    contributions = json_list(row.factor_contributions)
+    return SignalRecord(
+        id=row.signal_id,
+        news_id=row.news_id,
+        ticker=row.ticker,
+        as_of=row.as_of,
+        data_cutoff_at=row.data_cutoff_at,
+        status=row.status,
+        direction=row.direction,
+        action=row.action,
+        horizon_value=row.horizon_value,
+        horizon_unit=row.horizon_unit,
+        score=row.score,
+        strength=row.strength,
+        confidence=row.confidence,
+        summary=row.summary,
+        factor_contributions=tuple(dict(item) for item in contributions),
+        evidence_refs=tuple(str(item) for item in json_list(row.evidence_refs)),
+        expires_at=row.expires_at,
+        invalidation_conditions=tuple(
+            str(item) for item in json_list(row.invalidation_conditions)
+        ),
+        model_version=row.model_version,
+        config_version=row.config_version,
+        created_at=row.created_at,
+    )
+
+
 SCHEMA_STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS `news_items` (
@@ -296,6 +638,43 @@ SCHEMA_STATEMENTS = (
         `source_metadata` Json NOT NULL,
         `created_at` Timestamp NOT NULL,
         PRIMARY KEY (`news_id`)
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS `feature_sets` (
+        `feature_set_id` Utf8 NOT NULL,
+        `news_id` Utf8 NOT NULL,
+        `schema_version` Utf8 NOT NULL,
+        `extractor_version` Utf8 NOT NULL,
+        `features` Json NOT NULL,
+        `created_at` Timestamp NOT NULL,
+        PRIMARY KEY (`feature_set_id`)
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS `signals` (
+        `signal_id` Utf8 NOT NULL,
+        `news_id` Utf8 NOT NULL,
+        `ticker` Utf8 NOT NULL,
+        `as_of` Timestamp NOT NULL,
+        `data_cutoff_at` Timestamp NOT NULL,
+        `status` Utf8 NOT NULL,
+        `direction` Utf8 NOT NULL,
+        `action` Utf8 NOT NULL,
+        `horizon_value` Uint32 NOT NULL,
+        `horizon_unit` Utf8 NOT NULL,
+        `score` Double NOT NULL,
+        `strength` Double NOT NULL,
+        `confidence` Double NOT NULL,
+        `summary` Utf8 NOT NULL,
+        `factor_contributions` Json NOT NULL,
+        `evidence_refs` Json NOT NULL,
+        `expires_at` Timestamp NOT NULL,
+        `invalidation_conditions` Json NOT NULL,
+        `model_version` Utf8 NOT NULL,
+        `config_version` Uint32 NOT NULL,
+        `created_at` Timestamp NOT NULL,
+        PRIMARY KEY (`signal_id`)
     );
     """,
     """
@@ -356,6 +735,7 @@ DECLARE $content AS Utf8;
 DECLARE $language AS Utf8;
 DECLARE $source_metadata AS Json;
 DECLARE $created_at AS Timestamp;
+DECLARE $result_ref AS Utf8;
 
 UPSERT INTO `news_items` (
     news_id, source_id, external_id, published_at, received_at, title, url,
@@ -368,13 +748,65 @@ UPSERT INTO `news_items` (
 INSERT INTO `jobs` (
     job_id, kind, status, progress, result_ref, created_at, updated_at, completed_at
 ) VALUES (
-    $job_id, "news_ingestion", "queued", NULL, NULL, $created_at, $created_at, NULL
+    $job_id, "news_ingestion", "succeeded", 1.0, $result_ref,
+    $created_at, $created_at, $created_at
 );
 
 INSERT INTO `ingestion_requests` (
     idempotency_key, payload_hash, job_id, news_id, created_at
 ) VALUES (
     $idempotency_key, $payload_hash, $job_id, $news_id, $created_at
+);
+"""
+
+INSERT_FEATURE_SET_QUERY = """
+DECLARE $feature_set_id AS Utf8;
+DECLARE $news_id AS Utf8;
+DECLARE $schema_version AS Utf8;
+DECLARE $extractor_version AS Utf8;
+DECLARE $features AS Json;
+DECLARE $created_at AS Timestamp;
+
+INSERT INTO `feature_sets` (
+    feature_set_id, news_id, schema_version, extractor_version, features, created_at
+) VALUES (
+    $feature_set_id, $news_id, $schema_version, $extractor_version, $features, $created_at
+);
+"""
+
+INSERT_SIGNAL_QUERY = """
+DECLARE $signal_id AS Utf8;
+DECLARE $news_id AS Utf8;
+DECLARE $ticker AS Utf8;
+DECLARE $as_of AS Timestamp;
+DECLARE $data_cutoff_at AS Timestamp;
+DECLARE $status AS Utf8;
+DECLARE $direction AS Utf8;
+DECLARE $action AS Utf8;
+DECLARE $horizon_value AS Uint32;
+DECLARE $horizon_unit AS Utf8;
+DECLARE $score AS Double;
+DECLARE $strength AS Double;
+DECLARE $confidence AS Double;
+DECLARE $summary AS Utf8;
+DECLARE $factor_contributions AS Json;
+DECLARE $evidence_refs AS Json;
+DECLARE $expires_at AS Timestamp;
+DECLARE $invalidation_conditions AS Json;
+DECLARE $model_version AS Utf8;
+DECLARE $config_version AS Uint32;
+DECLARE $created_at AS Timestamp;
+
+INSERT INTO `signals` (
+    signal_id, news_id, ticker, as_of, data_cutoff_at, status, direction, action,
+    horizon_value, horizon_unit, score, strength, confidence, summary,
+    factor_contributions, evidence_refs, expires_at, invalidation_conditions,
+    model_version, config_version, created_at
+) VALUES (
+    $signal_id, $news_id, $ticker, $as_of, $data_cutoff_at, $status, $direction,
+    $action, $horizon_value, $horizon_unit, $score, $strength, $confidence, $summary,
+    $factor_contributions, $evidence_refs, $expires_at, $invalidation_conditions,
+    $model_version, $config_version, $created_at
 );
 """
 
@@ -393,3 +825,52 @@ SELECT
 FROM `jobs`
 WHERE job_id = $job_id;
 """
+
+SIGNAL_SELECT_COLUMNS = """
+    signal_id,
+    news_id,
+    ticker,
+    as_of,
+    data_cutoff_at,
+    status,
+    direction,
+    action,
+    horizon_value,
+    horizon_unit,
+    score,
+    strength,
+    confidence,
+    summary,
+    factor_contributions,
+    evidence_refs,
+    expires_at,
+    invalidation_conditions,
+    model_version,
+    config_version,
+    created_at
+"""
+
+SELECT_SIGNALS_QUERY = f"""
+SELECT {SIGNAL_SELECT_COLUMNS}
+FROM `signals`
+ORDER BY as_of DESC, signal_id DESC
+LIMIT 1000;
+"""
+
+SELECT_SIGNAL_QUERY = f"""
+DECLARE $signal_id AS Utf8;
+
+SELECT {SIGNAL_SELECT_COLUMNS}
+FROM `signals`
+WHERE signal_id = $signal_id;
+"""
+
+VALIDATED_QUERIES = (
+    SELECT_REQUEST_QUERY,
+    INSERT_REQUEST_QUERY,
+    INSERT_FEATURE_SET_QUERY,
+    INSERT_SIGNAL_QUERY,
+    SELECT_JOB_QUERY,
+    SELECT_SIGNALS_QUERY,
+    SELECT_SIGNAL_QUERY,
+)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import uuid
@@ -332,16 +331,46 @@ async def list_signals(
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
 ) -> Response:
-    cache_key = "|".join(
-        [ticker or "", direction or "", status or "", str(min_confidence), cursor or "", str(limit)]
+    requested_directions = (
+        frozenset(part.strip() for part in direction.split(",") if part.strip())
+        if direction
+        else None
     )
-    etag = f'"{hashlib.sha256(cache_key.encode()).hexdigest()[:24]}"'
+    allowed_directions = {"up", "neutral", "down"}
+    if requested_directions and not requested_directions <= allowed_directions:
+        return problem_response(
+            request,
+            status=400,
+            code="INVALID_PARAMETER",
+            title="Invalid signal direction",
+            detail="direction must contain only up, neutral or down.",
+        )
+
+    repository: NewsRepository = request.app.state.news_repository
+    signals = await repository.list_signals(
+        ticker=ticker,
+        directions=requested_directions,
+        status=status,
+        min_confidence=min_confidence,
+        limit=limit,
+    )
+    data = [signal.as_api_dict() for signal in signals]
+    cache_payload = {
+        "ticker": ticker,
+        "directions": sorted(requested_directions or ()),
+        "status": status,
+        "min_confidence": min_confidence,
+        "cursor": cursor,
+        "limit": limit,
+        "signals": data,
+    }
+    etag = f'"{canonical_payload_hash(cache_payload)[:24]}"'
     if if_none_match == etag:
         return Response(status_code=304, headers={"ETag": etag})
 
     return JSONResponse(
         content={
-            "data": [],
+            "data": data,
             "meta": {"limit": limit, "has_more": False, "next_cursor": None},
         },
         headers={"ETag": etag},
@@ -349,7 +378,11 @@ async def list_signals(
 
 
 @app.get("/v1/signals/{signal_id}", tags=["Signals"])
-async def get_signal(request: Request, signal_id: str) -> JSONResponse:
+async def get_signal(
+    request: Request,
+    signal_id: str,
+    if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
+) -> Response:
     if not SIGNAL_ID_PATTERN.fullmatch(signal_id):
         return problem_response(
             request,
@@ -358,13 +391,21 @@ async def get_signal(request: Request, signal_id: str) -> JSONResponse:
             title="Invalid signal identifier",
             detail="signal_id does not match the EventEdge identifier format.",
         )
-    return problem_response(
-        request,
-        status=404,
-        code="SIGNAL_NOT_FOUND",
-        title="Signal not found",
-        detail="The signal does not exist or is not visible.",
-    )
+    repository: NewsRepository = request.app.state.news_repository
+    signal = await repository.get_signal(signal_id)
+    if not signal:
+        return problem_response(
+            request,
+            status=404,
+            code="SIGNAL_NOT_FOUND",
+            title="Signal not found",
+            detail="The signal does not exist or is not visible.",
+        )
+    data = signal.as_api_dict()
+    etag = f'"{canonical_payload_hash(data)[:24]}"'
+    if if_none_match == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return JSONResponse(content={"data": data}, headers={"ETag": etag})
 
 
 STATIC_DIR = Path(__file__).with_name("static")
