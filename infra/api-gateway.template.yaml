@@ -1,0 +1,89 @@
+openapi: 3.0.0
+info:
+  title: EventEdge API Gateway
+  version: 0.1.0
+  description: Bootstrap gateway for the EventEdge production API.
+paths:
+  /health/live:
+    get:
+      operationId: getLiveness
+      responses:
+        '200':
+          description: Process is alive.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /health/ready:
+    get:
+      operationId: getReadiness
+      responses:
+        '200':
+          description: Required dependencies are available.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /v1/signals:
+    get:
+      operationId: listSignals
+      parameters:
+        - name: ticker
+          in: query
+          schema:
+            type: string
+        - name: direction
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: min_confidence
+          in: query
+          schema:
+            type: number
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: If-None-Match
+          in: header
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Signal list.
+        '304':
+          description: Cached representation is current.
+        '400':
+          description: Invalid request.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /v1/signals/{signal_id}:
+    get:
+      operationId: getSignal
+      parameters:
+        - name: signal_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Signal revision.
+        '400':
+          description: Invalid identifier.
+        '404':
+          description: Signal not found.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__

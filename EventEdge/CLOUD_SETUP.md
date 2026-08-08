@@ -8,7 +8,12 @@
 cloud: eventedge
 ├── folder: prod
 │   ├── service account: eventedge-ci
+│   ├── service account: eventedge-api
+│   ├── service account: eventedge-gateway
 │   ├── federation: eventedge-github
+│   ├── Container Registry: eventedge
+│   ├── Serverless Container: eventedge-api
+│   ├── API Gateway: eventedge-api
 │   └── VPC: eventedge-prod (без подсетей и разрешающих правил)
 └── folder: dev
 ```
@@ -33,6 +38,30 @@ cloud: eventedge
 | GitHub Actions variable | `YC_CLOUD_ID` | Идентификатор облака `eventedge`, не секрет |
 | GitHub Actions variable | `YC_FOLDER_ID` | Идентификатор production-каталога, не секрет |
 | GitHub Actions variable | `YC_DEV_FOLDER_ID` | Идентификатор development-каталога, не секрет |
+| Container Registry | `eventedge` | Неизменяемые Docker-образы API |
+| Service account | `eventedge-api` | Скачивание production-образа и runtime-идентичность API |
+| Serverless Container | `eventedge-api` | Production API с масштабированием до нуля |
+| Service account | `eventedge-gateway` | Вызов только приватного контейнера API |
+| API Gateway | `eventedge-api` | Публичная точка входа и маршрутизация к контейнеру |
+
+## CI/CD и автоматические merge
+
+- `CI` запускает lint, тесты, проверку OpenAPI, сборку Python-пакета и Docker-образа.
+- Первый bootstrap PR мержится вручную после зелёного CI.
+- После bootstrap trusted workflow автоматически делает squash merge зелёных PR из веток `agent/*` в `main`.
+- Workflow сверяет SHA проверенной ревизии, репозиторий ветки и target `main`; draft и PR с label `do-not-merge` не мержатся.
+- После зелёного CI на `main` выполняется OIDC-аутентификация, публикация образа и деплой новой ревизии.
+- Production-ревизия ограничена 256 MB памяти, одной инстанцией на зону, 50 запросами на зону и `min-instances=0`.
+
+GitHub Free не предоставляет branch protection для приватного репозитория. Поэтому запрет прямого push в `main` нельзя обеспечить на стороне GitHub без GitHub Pro; автоматический pipeline сам прямой push не использует.
+
+## Production endpoint
+
+```text
+https://d5d8smlpd6q241aquti1.kocrdvxt.apigw.yandexcloud.net
+```
+
+Gateway создан; рабочая ревизия контейнера публикуется первым успешным deployment workflow.
 
 ## Проверка
 
@@ -46,4 +75,4 @@ Yandex Cloud OIDC exchange succeeded
 
 ## Следующий этап
 
-Сейчас подключение подтверждает безопасную аутентификацию. Перед первым деплоем service account получает только необходимые роли для конкретных ресурсов: Container Registry, Serverless Containers и API Gateway. Роли для YDB, Object Storage, Message Queue и Lockbox добавляются вместе с соответствующим инкрементом, а не заранее.
+После production bootstrap подключаются YDB Serverless и первый новостной источник. Роли для YDB, Object Storage, Message Queue и Lockbox добавляются вместе с соответствующим инкрементом, а не заранее.

@@ -23,3 +23,8 @@ coverage/
 __pycache__/
 *.pyc
 node_modules/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.uv-cache/
+*.egg-info/
