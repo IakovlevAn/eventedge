@@ -364,7 +364,7 @@ class YdbNewsRepository:
             for query in VALIDATED_QUERIES:
                 await self._pool.execute_with_retries(
                     query,
-                    exec_mode=QueryExecMode.VALIDATE,
+                    exec_mode=QueryExecMode.EXPLAIN,
                 )
         except (Exception, asyncio.CancelledError):
             await self._close()
