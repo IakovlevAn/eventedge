@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from eventedge.main import app
@@ -16,13 +17,17 @@ NEWS_PAYLOAD = {
 }
 
 
-def test_liveness_is_public_and_traceable() -> None:
+def test_liveness_is_public_traceable_and_revisioned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_REVISION", "a" * 40)
     response = client.get("/health/live", headers={"X-Request-Id": "test-request-123"})
 
     assert response.status_code == 200
     assert response.headers["X-Request-Id"] == "test-request-123"
     assert response.json()["status"] == "ok"
     assert response.json()["checked_at"].endswith("Z")
+    assert response.json()["revision"] == "a" * 40
 
 
 def test_invalid_request_id_is_replaced() -> None:

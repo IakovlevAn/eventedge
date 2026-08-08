@@ -94,6 +94,13 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
+def health_payload() -> dict[str, str]:
+    payload = {"status": "ok", "checked_at": utc_now()}
+    if revision := os.environ.get("APP_REVISION"):
+        payload["revision"] = revision
+    return payload
+
+
 def request_id_from(request: Request) -> str:
     return getattr(request.state, "request_id", f"req_{uuid.uuid4().hex}")
 
@@ -178,7 +185,7 @@ async def http_error_handler(request: Request, exc: StarletteHTTPException) -> J
 
 @app.get("/health/live", tags=["Health"])
 async def liveness() -> dict[str, str]:
-    return {"status": "ok", "checked_at": utc_now()}
+    return health_payload()
 
 
 @app.get("/health/ready", tags=["Health"])
@@ -196,7 +203,7 @@ async def readiness(request: Request) -> Response:
             title="Required dependency is unavailable",
             detail="The structured data store is not ready.",
         )
-    return JSONResponse({"status": "ok", "checked_at": utc_now()})
+    return JSONResponse(health_payload())
 
 
 @app.post("/v1/internal/news", tags=["Internal ingestion"], status_code=202)

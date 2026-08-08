@@ -65,9 +65,11 @@ GitHub Free не предоставляет branch protection для прива�
 https://d5d8smlpd6q241aquti1.kocrdvxt.apigw.yandexcloud.net
 ```
 
-Gateway и рабочая ревизия контейнера развёрнуты. Полная цепочка `CI → OIDC → image → revision → smoke test` подтверждена успешным [production deployment](https://github.com/IakovlevAn/eventedge/actions/runs/31261742339) 8 августа 2026 года.
+Gateway и YDB-backed ревизия контейнера развёрнуты. Полная цепочка `CI → OIDC → image → revision → YDB readiness → web smoke test` подтверждена успешным [production deployment](https://github.com/IakovlevAn/eventedge/actions/runs/31265885233) 8 августа 2026 года.
 
 Новостной ingestion пока не опубликован в API Gateway. `POST /v1/internal/news` доступен только через приватный URL контейнера с IAM-аутентификацией. Публичный маршрут появится вместе с отдельным ключом ingestor в Lockbox; до этого случайно открыть служебную загрузку наружу нельзя.
+
+Приватный production smoke test подтвердил запись синтетической новости в `eventedge-prod`, повтор запроса с тем же `Idempotency-Key` без дубля и последующее чтение созданного job.
 
 ## Проверка
 

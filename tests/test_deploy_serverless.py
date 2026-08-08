@@ -27,6 +27,7 @@ def test_deployment_payload_has_budget_caps() -> None:
     assert payload["runtime"] == {"http": {}}
     assert payload["imageSpec"]["environment"] == {
         "APP_ENV": "prod",
+        "APP_REVISION": "abc123",
         "YDB_ENDPOINT": "grpcs://ydb.example:2135",
         "YDB_DATABASE": "/region/cloud/database",
     }
