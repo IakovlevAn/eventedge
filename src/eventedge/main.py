@@ -17,7 +17,11 @@ from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from eventedge import __version__
-from eventedge.collectors import collect_cbr_press, collect_moex_news
+from eventedge.collectors import (
+    collect_cbr_press,
+    collect_moex_news,
+    is_moex_equity_title,
+)
 from eventedge.llm import analyzer_from_environment
 from eventedge.storage import (
     IdempotencyConflictError,
@@ -337,11 +341,16 @@ async def list_news(
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> JSONResponse:
     repository: NewsRepository = request.app.state.news_repository
-    news = await repository.list_news(source_id=source_id, limit=limit)
+    news = await repository.list_news(source_id=source_id, limit=1000)
+    news = [
+        item
+        for item in news
+        if item.source_id != "moex_news" or is_moex_equity_title(item.title)
+    ][:limit]
     signals = await repository.list_signals(
         ticker=None,
         directions=None,
-        status=None,
+        status="active",
         min_confidence=None,
         limit=1000,
     )
@@ -402,7 +411,7 @@ async def list_signals(
     signals = await repository.list_signals(
         ticker=ticker,
         directions=requested_directions,
-        status=status,
+        status=status or "active",
         min_confidence=min_confidence,
         limit=limit,
     )

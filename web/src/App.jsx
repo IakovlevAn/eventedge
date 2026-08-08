@@ -967,7 +967,7 @@ export default function App() {
       setDataError("");
       try {
         const [signalResponse, newsResponse] = await Promise.all([
-          fetch("/v1/signals?limit=100", { signal: controller.signal }),
+          fetch("/v1/signals?status=active&limit=100", { signal: controller.signal }),
           fetch("/v1/news?limit=100", { signal: controller.signal }),
         ]);
         if (!signalResponse.ok || !newsResponse.ok) throw new Error("API вернул ошибку. Попробуй обновить страницу.");
