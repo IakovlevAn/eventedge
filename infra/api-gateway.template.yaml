@@ -154,6 +154,24 @@ paths:
         type: serverless_containers
         container_id: __API_CONTAINER_ID__
         service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /v1/instruments/snapshots:
+    get:
+      operationId: listInstrumentSnapshots
+      parameters:
+        - name: tickers
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Batch of current MOEX instrument snapshots.
+        '400':
+          description: Invalid tickers.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
   /v1/instruments/{ticker}/snapshot:
     get:
       operationId: getInstrumentSnapshot

@@ -163,7 +163,13 @@ class NewsRepository(Protocol):
 
     async def ready(self) -> bool: ...
 
-    async def ingest(self, idempotency_key: str, document: NewsDocument) -> IngestResult: ...
+    async def ingest(
+        self,
+        idempotency_key: str,
+        document: NewsDocument,
+        *,
+        generate_signals: bool = True,
+    ) -> IngestResult: ...
 
     async def get_job(self, job_id: str) -> Job | None: ...
 
@@ -295,6 +301,27 @@ def process_document(
     )
 
 
+async def extract_features(
+    analyzer: NewsAnalyzer,
+    document: NewsDocument,
+    *,
+    generate_signals: bool,
+) -> SemanticFeatures:
+    analysis_input = NewsAnalysisInput(
+        source_id=document.source_id,
+        title=document.title,
+        content=document.content,
+        language=document.language,
+    )
+    if generate_signals:
+        return await analyzer.extract(analysis_input)
+
+    # Broad news coverage should not spend LLM budget or create a trading
+    # signal. A deterministic extraction still leaves an auditable feature set.
+    features = await RuleBasedNewsAnalyzer().extract(analysis_input)
+    return features.model_copy(update={"instruments": []})
+
+
 def filter_signals(
     signals: list[SignalRecord],
     *,
@@ -340,7 +367,13 @@ class MemoryNewsRepository:
     async def ready(self) -> bool:
         return True
 
-    async def ingest(self, idempotency_key: str, document: NewsDocument) -> IngestResult:
+    async def ingest(
+        self,
+        idempotency_key: str,
+        document: NewsDocument,
+        *,
+        generate_signals: bool = True,
+    ) -> IngestResult:
         async with self._lock:
             existing = self._requests.get(idempotency_key)
             if existing:
@@ -350,13 +383,10 @@ class MemoryNewsRepository:
                 return IngestResult(job=self._jobs[job_id], replayed=True)
 
             now = utc_now()
-            features = await self._analyzer.extract(
-                NewsAnalysisInput(
-                    source_id=document.source_id,
-                    title=document.title,
-                    content=document.content,
-                    language=document.language,
-                )
+            features = await extract_features(
+                self._analyzer,
+                document,
+                generate_signals=generate_signals,
             )
             processed = process_document(document, features, now=now)
             result_ref = (
@@ -490,7 +520,13 @@ class YdbNewsRepository:
         result_sets = await pool.execute_with_retries("SELECT 1 AS ready;")
         return bool(result_sets and result_sets[0].rows[0].ready == 1)
 
-    async def ingest(self, idempotency_key: str, document: NewsDocument) -> IngestResult:
+    async def ingest(
+        self,
+        idempotency_key: str,
+        document: NewsDocument,
+        *,
+        generate_signals: bool = True,
+    ) -> IngestResult:
         job_id = stable_id("job_", idempotency_key)
 
         existing = await self._get_ingest_request(idempotency_key)
@@ -501,13 +537,10 @@ class YdbNewsRepository:
             return IngestResult(job=existing_job, replayed=True)
 
         now = utc_now()
-        features = await self._analyzer.extract(
-            NewsAnalysisInput(
-                source_id=document.source_id,
-                title=document.title,
-                content=document.content,
-                language=document.language,
-            )
+        features = await extract_features(
+            self._analyzer,
+            document,
+            generate_signals=generate_signals,
         )
         processed = process_document(document, features, now=now)
         result_ref = (

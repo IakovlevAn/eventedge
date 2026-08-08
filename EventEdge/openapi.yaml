@@ -280,6 +280,35 @@ paths:
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
+  /v1/instruments/snapshots:
+    get:
+      tags: [Instruments]
+      summary: Get current state for several instruments
+      operationId: listInstrumentSnapshots
+      parameters:
+        - name: tickers
+          in: query
+          required: true
+          description: One to twenty unique comma-separated MOEX tickers.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 260
+            example: SBER,LKOH,YDEX
+      responses:
+        '200':
+          description: Available snapshots and per-instrument errors.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstrumentSnapshotListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
   /v1/internal/news:
     post:
       tags: [Internal ingestion]
@@ -1586,6 +1615,43 @@ components:
           type: string
           nullable: true
 
+    NewsSourceStat:
+      type: object
+      additionalProperties: false
+      required: [source_id, count, signal_count, last_published_at]
+      properties:
+        source_id:
+          type: string
+        count:
+          type: integer
+          minimum: 0
+        signal_count:
+          type: integer
+          minimum: 0
+        last_published_at:
+          type: string
+          format: date-time
+
+    NewsPageMeta:
+      type: object
+      additionalProperties: false
+      required: [limit, total, has_more, sources]
+      properties:
+        limit:
+          type: integer
+        total:
+          type: integer
+          minimum: 0
+        has_more:
+          type: boolean
+        next_cursor:
+          type: string
+          nullable: true
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/NewsSourceStat'
+
     SignalResponse:
       type: object
       additionalProperties: false
@@ -1616,7 +1682,7 @@ components:
           items:
             $ref: '#/components/schemas/News'
         meta:
-          $ref: '#/components/schemas/PageMeta'
+          $ref: '#/components/schemas/NewsPageMeta'
 
     EventResponse:
       type: object
@@ -1645,6 +1711,50 @@ components:
       properties:
         data:
           $ref: '#/components/schemas/InstrumentSnapshot'
+
+    InstrumentSnapshotError:
+      type: object
+      additionalProperties: false
+      required: [ticker, code]
+      properties:
+        ticker:
+          type: string
+        code:
+          type: string
+          enum: [INSTRUMENT_NOT_FOUND, MARKET_DATA_UNAVAILABLE]
+
+    InstrumentSnapshotListMeta:
+      type: object
+      additionalProperties: false
+      required: [requested, returned, refresh_after_seconds]
+      properties:
+        requested:
+          type: integer
+          minimum: 1
+          maximum: 20
+        returned:
+          type: integer
+          minimum: 0
+          maximum: 20
+        refresh_after_seconds:
+          type: integer
+          minimum: 1
+
+    InstrumentSnapshotListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, errors, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/InstrumentSnapshot'
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/InstrumentSnapshotError'
+        meta:
+          $ref: '#/components/schemas/InstrumentSnapshotListMeta'
 
     JobResponse:
       type: object

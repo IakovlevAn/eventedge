@@ -12,6 +12,7 @@ from eventedge.collectors import (
     collect_rss_feed,
     google_news_search_url,
     is_cbr_market_news,
+    is_company_news_candidate,
     is_google_market_signal_candidate,
     is_market_signal_candidate,
     is_moex_equity_title,
@@ -73,8 +74,54 @@ def test_rss_collection_is_idempotent() -> None:
 
     first, second = asyncio.run(scenario())
 
-    assert first == {"fetched": 2, "matched": 2, "accepted": 2, "replayed": 0}
-    assert second == {"fetched": 2, "matched": 2, "accepted": 0, "replayed": 2}
+    assert first == {
+        "fetched": 2,
+        "matched": 2,
+        "signal_candidates": 2,
+        "accepted": 2,
+        "replayed": 0,
+    }
+    assert second == {
+        "fetched": 2,
+        "matched": 2,
+        "signal_candidates": 2,
+        "accepted": 0,
+        "replayed": 2,
+    }
+
+
+def test_broad_news_is_stored_without_calling_signal_analyzer() -> None:
+    class FailAnalyzer:
+        async def extract(self, document: object) -> object:
+            raise AssertionError("Broad news must not call the configured LLM analyzer")
+
+    repository = MemoryNewsRepository(analyzer=FailAnalyzer())  # type: ignore[arg-type]
+    config = RssFeedConfig(source_id="interfax", url="https://example.com/feed")
+
+    async def scenario() -> tuple[dict[str, int], int, int]:
+        result = await collect_rss_feed(
+            repository,
+            config,
+            fetcher=lambda url, timeout: RSS_FIXTURE,
+            item_filter=lambda item: True,
+            signal_filter=lambda item: False,
+        )
+        news = await repository.list_news(source_id="interfax", limit=10)
+        signals = await repository.list_signals(
+            ticker=None,
+            directions=None,
+            status=None,
+            min_confidence=None,
+            limit=10,
+        )
+        return result, len(news), len(signals)
+
+    result, news_count, signal_count = asyncio.run(scenario())
+
+    assert result["accepted"] == 2
+    assert result["signal_candidates"] == 0
+    assert news_count == 2
+    assert signal_count == 0
 
 
 def test_moex_equity_filter_rejects_mechanical_listing_notice() -> None:
@@ -113,6 +160,8 @@ def test_market_candidate_requires_company_event_and_rejects_opinion() -> None:
 
     assert is_market_signal_candidate(material) is True
     assert is_market_signal_candidate(opinion) is False
+    assert is_company_news_candidate(material) is True
+    assert is_company_news_candidate(opinion) is False
 
 
 def test_market_candidate_rejects_promo_and_debt_noise() -> None:
@@ -152,11 +201,11 @@ def test_cbr_filter_keeps_market_policy_and_rejects_commemorative_news() -> None
     assert is_cbr_market_news(coin) is False
 
 
-def test_google_news_search_url_is_a_seven_day_russian_feed() -> None:
+def test_google_news_search_url_is_a_thirty_day_russian_feed() -> None:
     url = google_news_search_url("Сбербанк OR ВТБ")
 
     assert url.startswith("https://news.google.com/rss/search?")
-    assert "when%3A7d" in url
+    assert "when%3A30d" in url
     assert "ceid=RU%3Aru" in url
 
 
@@ -203,6 +252,7 @@ def test_composite_collector_isolates_a_failed_feed(
     assert result == {
         "fetched": 5,
         "matched": 5,
+        "signal_candidates": 0,
         "accepted": 5,
         "replayed": 0,
         "failed": 3,

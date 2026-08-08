@@ -254,6 +254,63 @@ def test_instrument_snapshot_exposes_market_data_and_etag() -> None:
     assert cached.status_code == 304
 
 
+def test_batch_instrument_snapshots_return_partial_results() -> None:
+    original = app.state.market_data_client
+
+    class FakeMarketDataClient:
+        async def snapshot(self, ticker: str) -> dict[str, object]:
+            if ticker == "MISS":
+                from eventedge.market import InstrumentNotFoundError
+
+                raise InstrumentNotFoundError(ticker)
+            return {
+                "ticker": ticker,
+                "name": ticker,
+                "last_price": "100.0",
+                "currency": "RUB",
+                "observed_at": "2026-08-08T16:00:08Z",
+                "daily_change_pct": 0.2,
+                "volume_shares": 10,
+                "value_rub": 1000.0,
+                "lot_size": 1,
+                "liquidity_status": "limited",
+                "daily_volatility_pct": 1.0,
+                "annualized_volatility_pct": 15.87,
+                "candles": [],
+                "source": {"name": "MOEX ISS", "url": "https://iss.moex.com/iss/"},
+            }
+
+    app.state.market_data_client = FakeMarketDataClient()
+    try:
+        response = client.get(
+            "/v1/instruments/snapshots",
+            params={"tickers": "SBER,LKOH,MISS,SBER"},
+        )
+    finally:
+        app.state.market_data_client = original
+
+    assert response.status_code == 200
+    assert [item["ticker"] for item in response.json()["data"]] == ["SBER", "LKOH"]
+    assert response.json()["errors"] == [
+        {"ticker": "MISS", "code": "INSTRUMENT_NOT_FOUND"}
+    ]
+    assert response.json()["meta"] == {
+        "requested": 3,
+        "returned": 2,
+        "refresh_after_seconds": 60,
+    }
+
+
+def test_batch_instrument_snapshots_validate_tickers() -> None:
+    response = client.get(
+        "/v1/instruments/snapshots",
+        params={"tickers": "SBER,INVALID-TICKER"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "INVALID_PARAMETER"
+
+
 def test_instrument_snapshot_does_not_revive_hidden_exchange_noise() -> None:
     noisy_news = {
         **NEWS_PAYLOAD,
