@@ -453,6 +453,32 @@ def is_google_company_news_candidate(item: RssItem) -> bool:
     return any(publisher in normalized_title for publisher in GOOGLE_TRUSTED_PUBLISHERS)
 
 
+MARKET_BACKGROUND_MARKERS = (
+    "ключевая ставка",
+    "банк россии",
+    "курс рубл",
+    "российский рынок",
+    "рынок акций",
+    "мосбирж",
+    "индекс imoex",
+    "цены на нефть",
+    "нефть brent",
+    "санкции против россии",
+)
+
+
+def is_google_market_background_candidate(item: RssItem) -> bool:
+    normalized = " ".join((item.title, item.content)).casefold()
+    if any(marker in normalized for marker in MARKET_NOISE_TITLE_MARKERS):
+        return False
+    trusted_publisher = any(
+        publisher in item.title.casefold() for publisher in GOOGLE_TRUSTED_PUBLISHERS
+    )
+    return trusted_publisher and any(
+        marker in normalized for marker in MARKET_BACKGROUND_MARKERS
+    )
+
+
 def google_news_search_url(query: str) -> str:
     return "https://news.google.com/rss/search?" + urllib.parse.urlencode(
         {"q": f"({query}) when:30d", "hl": "ru", "gl": "RU", "ceid": "RU:ru"}
@@ -467,15 +493,38 @@ MARKET_NEWS_FEEDS = (
     ),
     RssFeedConfig(
         source_id="google_news",
-        url=google_news_search_url(
-            "Лукойл OR Газпром OR Роснефть OR Новатэк OR Татнефть"
-        ),
+        url=google_news_search_url("Газпром OR Новатэк"),
         max_items=100,
     ),
     RssFeedConfig(
         source_id="google_news",
+        url=google_news_search_url("Лукойл OR Роснефть"),
+        max_items=100,
+    ),
+    RssFeedConfig(
+        source_id="google_news",
+        url=google_news_search_url("Татнефть OR Газпром нефть"),
+        max_items=100,
+    ),
+    RssFeedConfig(
+        source_id="google_news",
+        url=google_news_search_url("Яндекс OR Магнит"),
+        max_items=100,
+    ),
+    RssFeedConfig(
+        source_id="google_news",
+        url=google_news_search_url("Норникель OR Полюс"),
+        max_items=100,
+    ),
+    RssFeedConfig(
+        source_id="google_news",
+        url=google_news_search_url("Северсталь OR АЛРОСА OR Московская биржа"),
+        max_items=100,
+    ),
+    RssFeedConfig(
+        source_id="market_background",
         url=google_news_search_url(
-            "Яндекс OR Норникель OR Магнит OR Полюс OR Северсталь OR АЛРОСА"
+            '"российский рынок" OR "ключевая ставка" OR рубль OR Brent OR санкции'
         ),
         max_items=100,
     ),
@@ -523,11 +572,15 @@ async def collect_market_news(repository: NewsRepository) -> dict[str, int]:
                 item_filter=(
                     is_google_company_news_candidate
                     if config.source_id == "google_news"
+                    else is_google_market_background_candidate
+                    if config.source_id == "market_background"
                     else is_company_news_candidate
                 ),
                 signal_filter=(
                     is_google_market_signal_candidate
                     if config.source_id == "google_news"
+                    else (lambda item: False)
+                    if config.source_id == "market_background"
                     else is_market_signal_candidate
                 ),
             )

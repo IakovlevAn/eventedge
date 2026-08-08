@@ -16,6 +16,7 @@ MOEX_ISS_BASE_URL = "https://iss.moex.com/iss"
 MOSCOW_TIMEZONE = ZoneInfo("Europe/Moscow")
 DEFAULT_TIMEOUT_SECONDS = 10.0
 MAX_DAILY_CANDLES = 66
+MAX_INTRADAY_CANDLES = 500
 
 
 class InstrumentNotFoundError(LookupError):
@@ -58,10 +59,12 @@ def _rows(payload: dict[str, Any], table_name: str) -> list[dict[str, Any]]:
 
 
 def _utc_timestamp(day: str, clock: str | None = None) -> str:
-    date_part = day.split(" ", 1)[0]
-    local = datetime.fromisoformat(f"{date_part}T{clock or '00:00:00'}").replace(
-        tzinfo=MOSCOW_TIMEZONE
-    )
+    if clock:
+        date_part = day.split(" ", 1)[0]
+        value = f"{date_part}T{clock}"
+    else:
+        value = day.replace(" ", "T")
+    local = datetime.fromisoformat(value).replace(tzinfo=MOSCOW_TIMEZONE)
     return local.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
@@ -90,7 +93,7 @@ class MoexMarketDataClient:
         self,
         *,
         requester: Callable[[str, dict[str, object]], dict[str, Any]] | None = None,
-        cache_ttl_seconds: float = 60.0,
+        cache_ttl_seconds: float = 30.0,
     ) -> None:
         self._requester = requester or _request_json
         self._cache_ttl_seconds = cache_ttl_seconds
@@ -104,6 +107,80 @@ class MoexMarketDataClient:
         result = await asyncio.to_thread(self._load_snapshot, normalized)
         self._cache[normalized] = (time.monotonic(), result)
         return result
+
+    async def candles(
+        self,
+        ticker: str,
+        *,
+        interval: int = 10,
+        lookback_days: int = 14,
+    ) -> dict[str, object]:
+        normalized = ticker.upper()
+        cache_key = f"candles:{normalized}:{interval}:{lookback_days}"
+        cached = self._cache.get(cache_key)
+        if cached and time.monotonic() - cached[0] < self._cache_ttl_seconds:
+            return cached[1]
+        result = await asyncio.to_thread(
+            self._load_candles,
+            normalized,
+            interval,
+            lookback_days,
+        )
+        self._cache[cache_key] = (time.monotonic(), result)
+        return result
+
+    def _load_candles(
+        self,
+        ticker: str,
+        interval: int,
+        lookback_days: int,
+    ) -> dict[str, object]:
+        encoded_ticker = quote(ticker, safe="")
+        from_date = (datetime.now(UTC) - timedelta(days=lookback_days)).date().isoformat()
+        candles_url = (
+            f"{MOEX_ISS_BASE_URL}/engines/stock/markets/shares/boards/TQBR/"
+            f"securities/{encoded_ticker}/candles.json"
+        )
+        rows: list[dict[str, Any]] = []
+        page_size = 500
+        for start in range(0, 1500, page_size):
+            payload = self._requester(
+                candles_url,
+                {
+                    "from": from_date,
+                    "interval": interval,
+                    "start": start,
+                    "iss.meta": "off",
+                    "candles.columns": "begin,open,close,high,low,value,volume",
+                },
+            )
+            page = _rows(payload, "candles")
+            rows.extend(page)
+            if len(page) < page_size:
+                break
+        rows = rows[-MAX_INTRADAY_CANDLES:]
+        candles = [
+            {
+                "begin": _utc_timestamp(str(row["begin"])),
+                "open": float(row["open"]),
+                "close": float(row["close"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "value_rub": round(float(row["value"]), 2),
+                "volume_shares": int(float(row["volume"])),
+            }
+            for row in rows
+            if all(row.get(field) is not None for field in ("open", "close", "high", "low"))
+        ]
+        if not candles:
+            raise MarketDataUnavailableError("MOEX ISS returned no intraday candles")
+        return {
+            "ticker": ticker,
+            "interval_minutes": interval,
+            "candles": candles,
+            "observed_at": candles[-1]["begin"],
+            "source": {"name": "MOEX ISS", "url": "https://iss.moex.com/iss/"},
+        }
 
     def _load_snapshot(self, ticker: str) -> dict[str, object]:
         encoded_ticker = quote(ticker, safe="")

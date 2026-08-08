@@ -198,6 +198,37 @@ paths:
         type: serverless_containers
         container_id: __API_CONTAINER_ID__
         service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /v1/instruments/{ticker}/candles:
+    get:
+      operationId: getInstrumentCandles
+      parameters:
+        - name: ticker
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: interval
+          in: query
+          schema:
+            type: integer
+            enum: [10]
+        - name: lookback_days
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 14
+      responses:
+        '200':
+          description: Intraday MOEX OHLCV candles.
+        '400':
+          description: Invalid ticker or candle parameters.
+        '503':
+          description: Market-data source is unavailable.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
   /v1/signals/{signal_id}:
     get:
       operationId: getSignal

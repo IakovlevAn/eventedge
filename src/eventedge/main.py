@@ -430,6 +430,15 @@ async def list_news(
                 "total": len(visible_news),
                 "has_more": len(visible_news) > limit,
                 "next_cursor": None,
+                "last_ingested_at": (
+                    max(item.created_at for item in visible_news)
+                    .astimezone(UTC)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                    if visible_news
+                    else None
+                ),
+                "poll_interval_seconds": 900,
                 "sources": sorted(
                     source_stats.values(),
                     key=lambda item: (-int(item["count"]), str(item["source_id"])),
@@ -633,9 +642,64 @@ async def list_instrument_snapshots(
             "meta": {
                 "requested": len(normalized),
                 "returned": len(data),
-                "refresh_after_seconds": 60,
+                "refresh_after_seconds": 30,
             },
         }
+    )
+
+
+@app.get("/v1/instruments/{ticker}/candles", tags=["Instruments"])
+async def get_instrument_candles(
+    request: Request,
+    ticker: str,
+    interval: Annotated[int, Query(ge=10, le=10)] = 10,
+    lookback_days: Annotated[int, Query(ge=1, le=14)] = 14,
+) -> Response:
+    normalized_ticker = ticker.upper()
+    if not re.fullmatch(r"[A-Z0-9]{1,12}", normalized_ticker):
+        return problem_response(
+            request,
+            status=400,
+            code="INVALID_PARAMETER",
+            title="Invalid instrument ticker",
+            detail="ticker must contain only uppercase Latin letters and digits.",
+        )
+
+    market_data_client: MoexMarketDataClient = request.app.state.market_data_client
+    try:
+        chart = await market_data_client.candles(
+            normalized_ticker,
+            interval=interval,
+            lookback_days=lookback_days,
+        )
+    except InstrumentNotFoundError:
+        return problem_response(
+            request,
+            status=404,
+            code="INSTRUMENT_NOT_FOUND",
+            title="Instrument not found",
+            detail="The instrument is not available on the MOEX TQBR board.",
+        )
+    except MarketDataUnavailableError:
+        return problem_response(
+            request,
+            status=503,
+            code="MARKET_DATA_UNAVAILABLE",
+            title="Market data is unavailable",
+            detail="The MOEX ISS source did not return usable intraday candles.",
+        )
+
+    data = {
+        "ticker": chart["ticker"],
+        "interval_minutes": chart["interval_minutes"],
+        "candles": chart["candles"],
+        "observed_at": chart["observed_at"],
+        "source": chart["source"],
+    }
+    etag = f'"{canonical_payload_hash(data)[:24]}"'
+    return JSONResponse(
+        content={"data": data, "meta": {"refresh_after_seconds": 60}},
+        headers={"ETag": etag},
     )
 
 

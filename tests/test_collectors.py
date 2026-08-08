@@ -13,6 +13,7 @@ from eventedge.collectors import (
     google_news_search_url,
     is_cbr_market_news,
     is_company_news_candidate,
+    is_google_market_background_candidate,
     is_google_market_signal_candidate,
     is_market_signal_candidate,
     is_moex_equity_title,
@@ -231,6 +232,19 @@ def test_google_candidate_requires_trusted_publisher() -> None:
     assert is_google_market_signal_candidate(unknown) is False
 
 
+def test_market_background_keeps_trusted_macro_context_without_signal_hype() -> None:
+    context = RssItem(
+        external_id="google-background-1",
+        published_at=datetime(2026, 8, 8, tzinfo=UTC),
+        title="Банк России обсудил ключевую ставку - РБК",
+        url="https://news.google.com/background",
+        content="Решение влияет на российский рынок акций и курс рубля.",
+        categories=(),
+    )
+
+    assert is_google_market_background_candidate(context) is True
+
+
 def test_composite_collector_isolates_a_failed_feed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -250,10 +264,10 @@ def test_composite_collector_isolates_a_failed_feed(
     result = asyncio.run(collectors_module.collect_market_news(repository))
 
     assert result == {
-        "fetched": 5,
-        "matched": 5,
+        "fetched": 6,
+        "matched": 6,
         "signal_candidates": 0,
-        "accepted": 5,
+        "accepted": 6,
         "replayed": 0,
-        "failed": 3,
+        "failed": 7,
     }
