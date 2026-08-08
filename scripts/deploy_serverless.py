@@ -31,6 +31,7 @@ def build_payload(environment: Mapping[str, str]) -> dict[str, object]:
             "imageUrl": environment["IMAGE_URL"],
             "environment": {
                 "APP_ENV": "prod",
+                "APP_REVISION": environment["DEPLOY_SHA"],
                 "YDB_ENDPOINT": environment["YDB_ENDPOINT"],
                 "YDB_DATABASE": environment["YDB_DATABASE"],
             },

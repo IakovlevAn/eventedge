@@ -100,8 +100,9 @@ jobs:
             if curl --fail --silent --show-error \
               --max-time 25 \
               "${EVENTEDGE_API_URL}/health/ready" \
-              | jq -e '.status == "ok"' >/dev/null; then
-              echo "Production API is ready"
+              | jq -e --arg revision "$DEPLOY_SHA" \
+                '.status == "ok" and .revision == $revision' >/dev/null; then
+              echo "Production API is ready on revision ${DEPLOY_SHA}"
               exit 0
             fi
             echo "Waiting for production revision (${attempt}/12)"

@@ -1486,6 +1486,10 @@ components:
         checked_at:
           type: string
           format: date-time
+        revision:
+          type: string
+          description: Exact deployed Git commit when the application runs in production.
+          pattern: '^[0-9a-f]{40}$'
 
     Problem:
       type: object
