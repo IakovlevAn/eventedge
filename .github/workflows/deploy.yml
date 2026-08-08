@@ -1,26 +1,28 @@
 name: Deploy production
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  workflow_dispatch:
+    inputs:
+      deploy_sha:
+        description: Exact tested main commit to deploy
+        required: true
+        type: string
 
 permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: production
+  cancel-in-progress: false
+
 jobs:
   deploy:
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      (github.event.workflow_run.event == 'push' ||
-      github.event.workflow_run.event == 'workflow_dispatch') &&
-      github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
-      IMAGE_URL: cr.yandex/${{ vars.YC_REGISTRY_ID }}/eventedge-api:${{ github.event.workflow_run.head_sha }}
+      DEPLOY_SHA: ${{ inputs.deploy_sha }}
+      IMAGE_URL: cr.yandex/${{ vars.YC_REGISTRY_ID }}/eventedge-api:${{ inputs.deploy_sha }}
       YC_CONTAINER_ID: ${{ vars.YC_CONTAINER_ID }}
       YC_FOLDER_ID: ${{ vars.YC_FOLDER_ID }}
       YC_RUNTIME_SERVICE_ACCOUNT_ID: ${{ vars.YC_RUNTIME_SERVICE_ACCOUNT_ID }}
@@ -29,7 +31,7 @@ jobs:
       - name: Check out the tested main revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ inputs.deploy_sha }}
 
       - name: Request GitHub OIDC token
         id: github-oidc
