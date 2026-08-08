@@ -6,12 +6,15 @@ from pydantic import ValidationError
 from eventedge.analysis import (
     BaselineScoringConfig,
     EventType,
+    InstrumentMention,
     NewsAnalysisInput,
     RuleBasedNewsExtractor,
     SemanticFeatures,
     SignalAction,
     SignalDirection,
+    TemporalStatus,
     extract_and_score,
+    score_features,
 )
 
 
@@ -37,7 +40,7 @@ def test_positive_company_results_create_algorithmic_up_signal() -> None:
     assert signals[0].action is SignalAction.CONSIDER_BUY
     assert signals[0].score == 50.5
     assert signals[0].confidence == pytest.approx(0.9063)
-    assert signals[0].model_version == "news-baseline-0.1.0"
+    assert signals[0].model_version == "news-baseline-0.1.1"
     assert signals[0].extractor_version == "rules-0.1.0"
 
 
@@ -92,6 +95,38 @@ def test_macro_news_without_direct_company_does_not_publish_stock_signal() -> No
     assert features.event_type is EventType.MACRO
     assert features.instruments == []
     assert signals == []
+
+
+def test_other_event_cannot_become_directional_from_llm_tone_alone() -> None:
+    features = SemanticFeatures(
+        extractor_version="yandexgpt-lite-0.1.0",
+        event_type=EventType.OTHER,
+        instruments=[InstrumentMention(ticker="SBER", relevance=0.9, matched_alias="сбер")],
+        facts=[],
+        polarity=1,
+        materiality=0.95,
+        novelty=1,
+        temporal_status=TemporalStatus.CURRENT,
+        rationale="Служебное сообщение без классифицированного драйвера.",
+    )
+
+    signal = score_features(features, source_id="moex_news")[0]
+
+    assert signal.direction is SignalDirection.NEUTRAL
+    assert signal.action is SignalAction.NO_ACTION
+    assert signal.score == 0
+
+
+def test_exchange_boilerplate_is_not_a_moex_company_mention() -> None:
+    features = RuleBasedNewsExtractor().extract(
+        NewsAnalysisInput(
+            source_id="moex_news",
+            title="Московская биржа обновила список ценных бумаг",
+            content="Техническое уведомление торговой площадки.",
+        )
+    )
+
+    assert features.instruments == []
 
 
 def test_feature_contract_cannot_accept_llm_direction_or_action() -> None:

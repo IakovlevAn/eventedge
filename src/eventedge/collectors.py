@@ -212,8 +212,29 @@ MOEX_NEWS_FEED = RssFeedConfig(
     timeout_seconds=20,
 )
 
+MOEX_NON_EQUITY_TITLE_MARKERS = (
+    "облигац",
+    "операциям репо",
+    "риск-параметр",
+    "индексными фьючерсами",
+    "индикативн",
+    "тестового полигона",
+    "нагрузочное тестирование",
+    "о начале торгов ценными бумагами",
+    "об оставлении ценных бумаг в списке",
+    "о внесении изменений в список ценных бумаг",
+    "об исключении ценных бумаг из списка",
+    "о дополнительных условиях проведения торгов ценными бумагами",
+    "об изменении уровня листинга ценных бумаг",
+    "изменены значения верхней границы ценового коридора",
+    "изменены значения нижней границы ценового коридора",
+)
+
 
 def is_watched_company_news(item: RssItem) -> bool:
+    title = item.title.casefold()
+    if any(marker in title for marker in MOEX_NON_EQUITY_TITLE_MARKERS):
+        return False
     features = RuleBasedNewsExtractor().extract(
         NewsAnalysisInput(
             source_id="moex_news",

@@ -110,14 +110,14 @@ class BaselineSignal(BaseModel):
     factor_contributions: Annotated[list[FactorContribution], Field(min_length=5, max_length=5)]
     feature_schema_version: Literal["news-features-0.1"]
     extractor_version: str
-    model_version: Literal["news-baseline-0.1.0"]
+    model_version: Literal["news-baseline-0.1.1"]
     config_version: int
 
 
 class BaselineScoringConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    model_version: Literal["news-baseline-0.1.0"] = "news-baseline-0.1.0"
+    model_version: Literal["news-baseline-0.1.1"] = "news-baseline-0.1.1"
     config_version: Annotated[int, Field(ge=1)] = 1
     positive_threshold: Annotated[float, Field(ge=0, le=100)] = 18
     negative_threshold: Annotated[float, Field(ge=-100, le=0)] = -18
@@ -158,7 +158,9 @@ DEFAULT_MOEX_ALIASES: dict[str, tuple[str, ...]] = {
     "PLZL": ("полюс", "polyus", "plzl"),
     "CHMF": ("северсталь", "severstal", "chmf"),
     "ALRS": ("алроса", "alrosa", "alrs"),
-    "MOEX": ("московская биржа", "мосбиржа", "moex"),
+    # The exchange name appears in almost every MOEX notice. Only the ticker itself
+    # is specific enough to associate a source document with the listed company.
+    "MOEX": ("moex",),
 }
 
 EVENT_RULES: tuple[tuple[EventType, tuple[str, ...], float], ...] = (
@@ -388,14 +390,20 @@ def score_features(
     if not features.instruments:
         return []
 
-    sign = 1.0 if features.polarity > 0 else -1.0 if features.polarity < 0 else 0.0
+    is_directional = (
+        features.event_type is not EventType.OTHER
+        and features.materiality >= 0.5
+        and abs(features.polarity) >= 0.15
+    )
+    effective_polarity = features.polarity if is_directional else 0.0
+    sign = 1.0 if effective_polarity > 0 else -1.0 if effective_polarity < 0 else 0.0
     source_quality = SOURCE_QUALITY.get(source_id, 0.65)
     fact_coverage = min(len(features.facts) / 3, 1.0)
     signals: list[BaselineSignal] = []
 
     for instrument in features.instruments:
         raw_contributions = {
-            "semantic_effect": scoring.semantic_weight * features.polarity,
+            "semantic_effect": scoring.semantic_weight * effective_polarity,
             "event_materiality": scoring.materiality_weight * sign * features.materiality,
             "event_novelty": scoring.novelty_weight * sign * features.novelty,
             "source_quality": scoring.source_quality_weight * sign * source_quality,

@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
-from eventedge.collectors import RssFeedConfig, collect_rss_feed, parse_rss
+from eventedge.collectors import (
+    RssFeedConfig,
+    RssItem,
+    collect_rss_feed,
+    is_watched_company_news,
+    parse_rss,
+)
 from eventedge.storage import MemoryNewsRepository
 
 RSS_FIXTURE = """<?xml version="1.0" encoding="utf-8"?>
@@ -60,3 +67,16 @@ def test_rss_collection_is_idempotent() -> None:
 
     assert first == {"fetched": 2, "matched": 2, "accepted": 2, "replayed": 0}
     assert second == {"fetched": 2, "matched": 2, "accepted": 0, "replayed": 2}
+
+
+def test_moex_equity_filter_rejects_mechanical_listing_notice() -> None:
+    item = RssItem(
+        external_id="moex-1",
+        published_at=datetime(2026, 8, 8, tzinfo=UTC),
+        title="О регистрации выпуска биржевых облигаций",
+        url="https://www.moex.com/n1",
+        content="Эмитент: Сбербанк. Торги проходят на Московской бирже.",
+        categories=(),
+    )
+
+    assert is_watched_company_news(item) is False
