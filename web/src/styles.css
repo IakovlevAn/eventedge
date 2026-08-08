@@ -4294,3 +4294,255 @@ kbd {
   .chart-legend { gap: 9px; }
   .market-source { align-items: flex-start; flex-direction: column; }
 }
+
+/* P0.2 — an inspectable market chart instead of a decorative sparkline. */
+.price-chart-shell {
+  padding: 16px;
+  border-color: #2b303a;
+  background:
+    radial-gradient(circle at 7% 0%, rgba(105, 201, 155, 0.055), transparent 31%),
+    #0b0d11;
+}
+
+.chart-toolbar,
+.chart-toolbar > div,
+.chart-toolbar__controls,
+.chart-readout,
+.chart-period-summary,
+.chart-event-detail {
+  display: flex;
+  align-items: center;
+}
+
+.chart-toolbar {
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+}
+
+.chart-toolbar > div:first-child {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.chart-toolbar strong {
+  color: #e6e8ec;
+  font-size: 12px;
+  font-weight: 630;
+}
+
+.chart-toolbar span {
+  color: #737b87;
+  font-size: 9px;
+}
+
+.chart-toolbar__controls { gap: 8px; }
+
+.chart-segment {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid #2a2f38;
+  border-radius: 8px;
+  background: #11141a;
+}
+
+.chart-segment button {
+  min-width: 38px;
+  padding: 5px 8px;
+  color: #777f8b;
+  font: inherit;
+  font-size: 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.chart-segment button:hover:not(:disabled) { color: #d5d8de; }
+.chart-segment button.is-active { color: #eff1f4; background: #292e37; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.24); }
+.chart-segment button:disabled { opacity: 0.35; cursor: not-allowed; }
+
+.chart-readout {
+  min-height: 39px;
+  gap: 18px;
+  padding: 9px 11px;
+  border: 1px solid #252a33;
+  border-radius: 8px;
+  background: rgba(20, 23, 29, 0.82);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-readout > div {
+  display: flex;
+  min-width: 162px;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chart-readout > div span,
+.chart-readout > span {
+  color: #747c88;
+  font-size: 8px;
+  letter-spacing: 0.02em;
+}
+
+.chart-readout > div strong,
+.chart-readout b {
+  color: #d7dbe1;
+  font-size: 9px;
+  font-weight: 610;
+}
+
+.chart-readout > span { white-space: nowrap; }
+.chart-readout > span.market-positive { color: var(--green); font-weight: 700; }
+.chart-readout > span.market-negative { color: var(--red); font-weight: 700; }
+
+.chart-visual {
+  margin-top: 8px;
+  border-radius: 8px;
+  outline: none;
+}
+
+.chart-visual:focus-visible { box-shadow: 0 0 0 2px rgba(117, 174, 252, 0.52); }
+.price-chart-shell .price-chart { height: 318px; }
+
+.price-chart .chart-grid {
+  stroke: rgba(255, 255, 255, 0.095);
+  stroke-dasharray: 1 5;
+}
+
+.price-chart .chart-axis-label,
+.price-chart .chart-date-label {
+  fill: #858d99;
+  font-size: 9px;
+}
+
+.price-chart .chart-area { fill: rgba(155, 149, 198, 0.025); }
+.price-chart--up .chart-area { fill: rgba(105, 201, 155, 0.025); }
+.price-chart--down .chart-area { fill: rgba(222, 116, 133, 0.025); }
+
+.price-chart .chart-candle line {
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
+}
+
+.price-chart .chart-candle--up line { stroke: #74d3a6; }
+.price-chart .chart-candle--down line { stroke: #e37f8f; }
+.chart-candle--up rect { fill: #69c99b; }
+.chart-candle--down rect { fill: #de7485; }
+
+.price-chart .chart-volume { opacity: 0.56; }
+.price-chart .chart-volume--up { fill: rgba(105, 201, 155, 0.48); }
+.price-chart .chart-volume--down { fill: rgba(222, 116, 133, 0.45); }
+
+.price-chart .chart-crosshair line {
+  stroke: rgba(215, 220, 229, 0.46);
+  stroke-dasharray: 3 4;
+  pointer-events: none;
+}
+
+.price-chart .chart-crosshair circle {
+  fill: #f2f4f7;
+  stroke: #0b0d11;
+  stroke-width: 2;
+  pointer-events: none;
+}
+
+.chart-event circle { stroke-width: 1.5; }
+.chart-event.is-selected circle { stroke: #fff; stroke-width: 2.6; filter: brightness(1.12) drop-shadow(0 0 9px rgba(255, 255, 255, 0.26)); }
+
+.chart-period-summary {
+  justify-content: flex-start;
+  gap: 18px;
+  padding: 8px 1px 10px;
+  color: #747c88;
+  font-size: 9px;
+  border-bottom: 1px solid #242932;
+}
+
+.chart-period-summary span:last-child { margin-left: auto; color: #626a76; }
+.chart-period-summary strong { color: #d8dce2; font-weight: 650; }
+.chart-period-summary strong.market-positive { color: var(--green); }
+.chart-period-summary strong.market-negative { color: var(--red); }
+
+.chart-event-detail {
+  gap: 11px;
+  min-height: 54px;
+  margin-top: 10px;
+  padding: 10px 11px;
+  border: 1px solid #2a3039;
+  border-radius: 9px;
+  background: #12151a;
+}
+
+.chart-event-detail > i {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #aaa4d2;
+  box-shadow: 0 0 0 4px rgba(170, 164, 210, 0.08);
+}
+
+.chart-event-detail--up > i { background: #69c99b; box-shadow: 0 0 0 4px rgba(105, 201, 155, 0.08); }
+.chart-event-detail--down > i { background: #de7485; box-shadow: 0 0 0 4px rgba(222, 116, 133, 0.08); }
+
+.chart-event-detail > div {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chart-event-detail span { color: #777f8b; font-size: 8px; }
+.chart-event-detail strong { overflow: hidden; color: #d9dce2; font-size: 10px; font-weight: 580; text-overflow: ellipsis; white-space: nowrap; }
+
+.chart-event-detail button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  padding: 7px 9px;
+  color: #d7dbe1;
+  font: inherit;
+  font-size: 9px;
+  border: 1px solid #343a45;
+  border-radius: 7px;
+  background: #1a1e25;
+  cursor: pointer;
+}
+
+.chart-event-detail button:hover { border-color: #59616f; background: #20252d; }
+
+.chart-legend {
+  gap: 16px;
+  padding-top: 10px;
+  color: #747c88;
+  font-size: 8px;
+  border-top: 0;
+}
+
+@media (max-width: 900px) {
+  .chart-readout { flex-wrap: wrap; gap: 8px 14px; }
+  .chart-readout > div { width: 100%; }
+}
+
+@media (max-width: 720px) {
+  .price-chart-shell { padding: 12px; }
+  .chart-toolbar { align-items: flex-start; flex-direction: column; }
+  .chart-toolbar__controls { width: 100%; justify-content: space-between; }
+  .chart-readout { padding: 9px; }
+  .chart-readout > span { min-width: calc(33.333% - 10px); }
+  .price-chart-shell .price-chart { width: 720px; height: 292px; }
+  .chart-visual { overflow-x: auto; overscroll-behavior-x: contain; }
+  .chart-period-summary { flex-wrap: wrap; }
+  .chart-period-summary span:last-child { width: 100%; margin-left: 0; }
+  .chart-event-detail { align-items: flex-start; flex-wrap: wrap; }
+  .chart-event-detail > div { width: calc(100% - 24px); flex: auto; }
+  .chart-event-detail strong { white-space: normal; }
+  .chart-event-detail button { margin-left: 21px; }
+  .chart-legend { line-height: 1.5; }
+}
