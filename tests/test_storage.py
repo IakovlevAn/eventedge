@@ -54,10 +54,16 @@ def test_runtime_metadata_credentials_can_be_constructed() -> None:
     assert credentials is not None
 
 
-def test_ydb_pool_is_created_inside_running_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ydb_runtime_is_created_inside_running_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events: list[str] = []
 
     class FakeDriver:
+        def __init__(self, config: ydb.DriverConfig) -> None:
+            asyncio.get_running_loop()
+            events.append("driver.init")
+
         async def wait(self, *, timeout: int, fail_fast: bool) -> None:
             asyncio.get_running_loop()
             events.append(f"driver.wait:{timeout}:{fail_fast}")
@@ -77,7 +83,7 @@ def test_ydb_pool_is_created_inside_running_event_loop(monkeypatch: pytest.Monke
         async def stop(self) -> None:
             events.append("pool.stop")
 
-    monkeypatch.setattr(ydb.aio, "Driver", lambda config: FakeDriver())
+    monkeypatch.setattr(ydb.aio, "Driver", FakeDriver)
     monkeypatch.setattr(ydb.aio, "QuerySessionPool", FakePool)
 
     repository = YdbNewsRepository(
@@ -94,7 +100,8 @@ def test_ydb_pool_is_created_inside_running_event_loop(monkeypatch: pytest.Monke
     asyncio.run(scenario())
 
     assert events == [
-        "driver.wait:10:True",
+        "driver.init",
+        "driver.wait:15:True",
         "pool.init:2",
         *("schema" for _ in SCHEMA_STATEMENTS),
         "pool.stop",

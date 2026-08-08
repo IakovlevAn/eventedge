@@ -19,6 +19,7 @@ def test_deployment_payload_has_budget_caps() -> None:
         "coreFraction": "100",
     }
     assert payload["provisionPolicy"] == {"minInstances": "0"}
+    assert payload["executionTimeout"] == "30s"
     assert payload["scalingPolicy"] == {
         "zoneInstancesLimit": "1",
         "zoneRequestsLimit": "50",
