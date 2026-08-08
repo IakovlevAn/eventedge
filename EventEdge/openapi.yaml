@@ -1,0 +1,1526 @@
+openapi: 3.0.3
+info:
+  title: EventEdge API
+  version: 0.1.0
+  description: |
+    API-first contract for the EventEdge MVP.
+
+    All timestamps are UTC RFC 3339. Published signals are immutable: a recalculation
+    creates a new revision and marks the previous revision as superseded.
+  contact:
+    name: EventEdge team
+servers:
+  - url: https://api.eventedge.example/v1
+    description: Production placeholder
+
+tags:
+  - name: Signals
+  - name: Events
+  - name: Instruments
+  - name: Jobs
+  - name: Feedback
+  - name: Internal ingestion
+  - name: Admin
+  - name: Health
+
+security:
+  - bearerAuth: []
+
+paths:
+  /signals:
+    get:
+      tags: [Signals]
+      summary: List signal revisions
+      operationId: listSignals
+      parameters:
+        - $ref: '#/components/parameters/TickerQuery'
+        - name: direction
+          in: query
+          description: Filter by one or more directions.
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/SignalDirection'
+          style: form
+          explode: false
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/SignalStatus'
+        - name: min_confidence
+          in: query
+          schema:
+            type: number
+            format: double
+            minimum: 0
+            maximum: 1
+        - name: active_at
+          in: query
+          description: Return signals active at this instant. Defaults to now.
+          schema:
+            type: string
+            format: date-time
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        '200':
+          description: A page ordered by `as_of DESC, id DESC`.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignalListResponse'
+        '304':
+          description: The cached representation is still current.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
+  /signals/{signal_id}:
+    parameters:
+      - $ref: '#/components/parameters/SignalId'
+    get:
+      tags: [Signals]
+      summary: Get one immutable signal revision
+      operationId: getSignal
+      parameters:
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        '200':
+          description: Signal revision.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignalResponse'
+        '304':
+          description: The cached representation is still current.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
+  /signals/{signal_id}/feedback:
+    parameters:
+      - $ref: '#/components/parameters/SignalId'
+    post:
+      tags: [Feedback]
+      summary: Record an analyst decision about a signal
+      operationId: createSignalFeedback
+      x-required-role: analyst
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FeedbackCreate'
+      responses:
+        '201':
+          description: Feedback was recorded.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedbackResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
+  /events:
+    get:
+      tags: [Events]
+      summary: List normalized news events
+      operationId: listEvents
+      parameters:
+        - $ref: '#/components/parameters/TickerQuery'
+        - name: published_from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: published_to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: min_materiality
+          in: query
+          schema:
+            type: number
+            format: double
+            minimum: 0
+            maximum: 1
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: A page ordered by `event_time DESC, id DESC`.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
+  /events/{event_id}:
+    parameters:
+      - $ref: '#/components/parameters/EventId'
+    get:
+      tags: [Events]
+      summary: Get a normalized event and its evidence
+      operationId: getEvent
+      responses:
+        '200':
+          description: Normalized event.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
+  /instruments/{ticker}/snapshot:
+    parameters:
+      - $ref: '#/components/parameters/TickerPath'
+    get:
+      tags: [Instruments]
+      summary: Get the current instrument state
+      operationId: getInstrumentSnapshot
+      parameters:
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        '200':
+          description: Point-in-time instrument snapshot.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstrumentSnapshotResponse'
+        '304':
+          description: The cached representation is still current.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
+  /internal/news:
+    post:
+      tags: [Internal ingestion]
+      summary: Submit one source document for asynchronous processing
+      operationId: ingestNews
+      x-required-role: ingestor
+      security:
+        - serviceApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewsIngestRequest'
+      responses:
+        '202':
+          description: The document was accepted or previously accepted with the same idempotency key.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+            Location:
+              description: URL of the asynchronous job.
+              schema:
+                type: string
+                format: uri-reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
+  /jobs/{job_id}:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+    get:
+      tags: [Jobs]
+      summary: Get asynchronous operation status
+      operationId: getJob
+      responses:
+        '200':
+          description: Current job state.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+            Retry-After:
+              description: Suggested polling delay in seconds while the job is not terminal.
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
+  /admin/sources:
+    get:
+      tags: [Admin]
+      summary: List configured news sources
+      operationId: listSources
+      x-required-role: admin
+      parameters:
+        - name: enabled
+          in: query
+          schema:
+            type: boolean
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Configured sources without secret values.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+    post:
+      tags: [Admin]
+      summary: Create a news source configuration
+      description: Credentials must already exist in Lockbox; the API accepts only the secret identifier.
+      operationId: createSource
+      x-required-role: admin
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceCreate'
+      responses:
+        '201':
+          description: Source configuration was created. Validate it before enabling production polling.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+            Location:
+              description: URL of the created source.
+              schema:
+                type: string
+                format: uri-reference
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
+  /admin/sources/{source_id}:
+    parameters:
+      - $ref: '#/components/parameters/SourceId'
+    get:
+      tags: [Admin]
+      summary: Get source configuration without secret values
+      operationId: getSource
+      x-required-role: admin
+      responses:
+        '200':
+          description: Source configuration.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+    patch:
+      tags: [Admin]
+      summary: Update mutable source settings
+      operationId: updateSource
+      x-required-role: admin
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: '#/components/schemas/SourcePatch'
+      responses:
+        '200':
+          description: Updated source configuration.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
+  /admin/sources/{source_id}/validate:
+    parameters:
+      - $ref: '#/components/parameters/SourceId'
+    post:
+      tags: [Admin]
+      summary: Validate source connectivity without enabling it
+      operationId: validateSource
+      x-required-role: admin
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Validation job was accepted.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+            Location:
+              description: URL of the asynchronous validation job.
+              schema:
+                type: string
+                format: uri-reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
+  /admin/scoring-config:
+    get:
+      tags: [Admin]
+      summary: Get the active scoring configuration
+      operationId: getScoringConfig
+      x-required-role: admin
+      responses:
+        '200':
+          description: Active immutable configuration version.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScoringConfigResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+    put:
+      tags: [Admin]
+      summary: Create and activate a new scoring configuration version
+      operationId: replaceScoringConfig
+      x-required-role: admin
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScoringConfigDraft'
+      responses:
+        '201':
+          description: New immutable configuration version is active.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScoringConfigResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
+  /health/live:
+    get:
+      tags: [Health]
+      summary: Process liveness probe
+      operationId: getLiveness
+      security: []
+      responses:
+        '200':
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
+  /health/ready:
+    get:
+      tags: [Health]
+      summary: Dependency readiness probe
+      operationId: getReadiness
+      security: []
+      responses:
+        '200':
+          description: Required dependencies are available.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          description: One or more required dependencies are unavailable.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    serviceApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  x-yc-apigateway-integrations:
+    api:
+      type: serverless_containers
+      container_id: ${API_CONTAINER_ID}
+      service_account_id: ${GATEWAY_SERVICE_ACCOUNT_ID}
+
+  headers:
+    XRequestId:
+      description: End-to-end request identifier.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+    ETag:
+      description: Version of the returned representation.
+      schema:
+        type: string
+
+  parameters:
+    SignalId:
+      name: signal_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^sig_[0-9A-HJKMNP-TV-Z]{26}$'
+    EventId:
+      name: event_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^evt_[0-9A-HJKMNP-TV-Z]{26}$'
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^job_[0-9A-HJKMNP-TV-Z]{26}$'
+    SourceId:
+      name: source_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[a-z][a-z0-9_-]{2,63}$'
+    TickerPath:
+      name: ticker
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[A-Z0-9]{1,12}$'
+        example: SBER
+    TickerQuery:
+      name: ticker
+      in: query
+      schema:
+        type: string
+        pattern: '^[A-Z0-9]{1,12}$'
+        example: SBER
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor returned in `meta.next_cursor`.
+      schema:
+        type: string
+        maxLength: 1024
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Stable client-generated key retained for at least 24 hours.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      schema:
+        type: string
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: Prevents lost updates of mutable administrative state.
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: Request syntax or parameters are invalid.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unauthorized:
+      description: Authentication is missing or invalid.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Forbidden:
+      description: The principal does not have the required role.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: Resource does not exist or is not visible to the principal.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Conflict:
+      description: The command conflicts with existing resource state or idempotency data.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    PreconditionFailed:
+      description: "If-Match does not match the active representation."
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    PayloadTooLarge:
+      description: Request body exceeds the configured ingestion limit.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unprocessable:
+      description: Syntax is valid but the configuration fails business validation.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    RateLimited:
+      description: Request rate or monthly processing allowance was exceeded.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+        Retry-After:
+          description: Suggested retry delay in seconds.
+          schema:
+            type: integer
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+    SignalDirection:
+      type: string
+      enum: [up, neutral, down]
+
+    SignalAction:
+      type: string
+      enum: [consider_buy, no_action, review_position]
+
+    SignalStatus:
+      type: string
+      enum: [active, expired, superseded, invalidated]
+
+    Horizon:
+      type: object
+      additionalProperties: false
+      required: [value, unit]
+      properties:
+        value:
+          type: integer
+          minimum: 1
+          maximum: 90
+        unit:
+          type: string
+          enum: [hours, calendar_days, trading_days]
+
+    FactorContribution:
+      type: object
+      additionalProperties: false
+      required: [code, label, contribution]
+      properties:
+        code:
+          type: string
+          pattern: '^[a-z][a-z0-9_]{1,63}$'
+        label:
+          type: string
+          maxLength: 120
+        contribution:
+          type: number
+          format: double
+          minimum: -1
+          maximum: 1
+
+    Signal:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - ticker
+        - as_of
+        - data_cutoff_at
+        - status
+        - direction
+        - action
+        - horizon
+        - score
+        - strength
+        - confidence
+        - summary
+        - factor_contributions
+        - evidence_refs
+        - expires_at
+        - invalidation_conditions
+        - model_version
+        - config_version
+        - created_at
+      properties:
+        id:
+          type: string
+          example: sig_01JZK6K5GDX90Q2X8C0R4D7M9P
+        previous_revision_id:
+          type: string
+          nullable: true
+        ticker:
+          type: string
+          example: SBER
+        as_of:
+          type: string
+          format: date-time
+        data_cutoff_at:
+          type: string
+          format: date-time
+        status:
+          $ref: '#/components/schemas/SignalStatus'
+        direction:
+          $ref: '#/components/schemas/SignalDirection'
+        action:
+          $ref: '#/components/schemas/SignalAction'
+        horizon:
+          $ref: '#/components/schemas/Horizon'
+        score:
+          type: number
+          format: double
+          minimum: -100
+          maximum: 100
+        strength:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        confidence:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 800
+        factor_contributions:
+          type: array
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/FactorContribution'
+        evidence_refs:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+        expires_at:
+          type: string
+          format: date-time
+        invalidation_conditions:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            maxLength: 300
+        model_version:
+          type: string
+          example: baseline-0.1.0
+        config_version:
+          type: integer
+          minimum: 1
+        created_at:
+          type: string
+          format: date-time
+
+    Evidence:
+      type: object
+      additionalProperties: false
+      required: [news_id, source_id, published_at, title, url]
+      properties:
+        news_id:
+          type: string
+        source_id:
+          type: string
+        published_at:
+          type: string
+          format: date-time
+        title:
+          type: string
+          maxLength: 500
+        url:
+          type: string
+          format: uri
+        content_hash:
+          type: string
+          description: Hash used to prove which source representation was analyzed.
+
+    Event:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - event_time
+        - detected_at
+        - event_type
+        - title
+        - summary
+        - tickers
+        - novelty
+        - materiality
+        - evidence
+        - extractor_version
+      properties:
+        id:
+          type: string
+          example: evt_01JZK5Y4V2JABR9N4F0S7Q2XWC
+        event_time:
+          type: string
+          format: date-time
+        detected_at:
+          type: string
+          format: date-time
+        event_type:
+          type: string
+          maxLength: 80
+        title:
+          type: string
+          maxLength: 500
+        summary:
+          type: string
+          maxLength: 1500
+        tickers:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+        novelty:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        materiality:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        evidence:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/Evidence'
+        extractor_version:
+          type: string
+        quality_status:
+          type: string
+          enum: [complete, partial, conflicting]
+          default: complete
+
+    MarketSnapshot:
+      type: object
+      additionalProperties: false
+      required: [last_price, currency, observed_at]
+      properties:
+        last_price:
+          type: string
+          pattern: '^-?[0-9]+(\.[0-9]+)?$'
+        currency:
+          type: string
+          enum: [RUB]
+        observed_at:
+          type: string
+          format: date-time
+        daily_change_pct:
+          type: number
+          format: double
+          nullable: true
+        liquidity_status:
+          type: string
+          enum: [sufficient, limited, unavailable]
+
+    InstrumentSnapshot:
+      type: object
+      additionalProperties: false
+      required: [ticker, name, as_of, market, active_signal, recent_events]
+      properties:
+        ticker:
+          type: string
+        name:
+          type: string
+        as_of:
+          type: string
+          format: date-time
+        market:
+          $ref: '#/components/schemas/MarketSnapshot'
+        active_signal:
+          allOf:
+            - $ref: '#/components/schemas/Signal'
+          nullable: true
+        recent_events:
+          type: array
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/Event'
+
+    JobStatus:
+      type: string
+      enum: [queued, running, succeeded, failed, cancelled]
+
+    Job:
+      type: object
+      additionalProperties: false
+      required: [id, kind, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          example: job_01JZK7AHMXYCG6A5T9D1B8R3QP
+        kind:
+          type: string
+          enum: [news_ingestion, extraction, signal_recalculation, backfill, source_validation]
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        progress:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          nullable: true
+        result_ref:
+          type: string
+          nullable: true
+        error:
+          allOf:
+            - $ref: '#/components/schemas/Problem'
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    NewsIngestRequest:
+      type: object
+      additionalProperties: false
+      required: [source_id, external_id, published_at, title, url, content]
+      properties:
+        source_id:
+          type: string
+          pattern: '^[a-z][a-z0-9_-]{2,63}$'
+        external_id:
+          type: string
+          minLength: 1
+          maxLength: 500
+        published_at:
+          type: string
+          format: date-time
+        received_at:
+          type: string
+          format: date-time
+        title:
+          type: string
+          minLength: 1
+          maxLength: 500
+        url:
+          type: string
+          format: uri
+        content:
+          type: string
+          minLength: 1
+          maxLength: 200000
+        language:
+          type: string
+          default: ru
+          enum: [ru, en]
+        source_metadata:
+          type: object
+          additionalProperties: true
+          maxProperties: 50
+
+    FeedbackDecision:
+      type: string
+      enum: [accepted, rejected, watchlisted, no_action]
+
+    FeedbackCreate:
+      type: object
+      additionalProperties: false
+      required: [decision]
+      properties:
+        decision:
+          $ref: '#/components/schemas/FeedbackDecision'
+        reason_code:
+          type: string
+          enum:
+            - agrees_with_signal
+            - insufficient_evidence
+            - stale_information
+            - risk_constraint
+            - liquidity_constraint
+            - conflicting_analysis
+            - other
+        comment:
+          type: string
+          maxLength: 2000
+
+    Feedback:
+      type: object
+      additionalProperties: false
+      required: [id, signal_id, decision, actor_id, created_at]
+      properties:
+        id:
+          type: string
+        signal_id:
+          type: string
+        decision:
+          $ref: '#/components/schemas/FeedbackDecision'
+        reason_code:
+          type: string
+          nullable: true
+        comment:
+          type: string
+          nullable: true
+        actor_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    Source:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - type
+        - enabled
+        - polling_interval_seconds
+        - priority
+        - credential_status
+        - version
+        - updated_at
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+          maxLength: 200
+        type:
+          type: string
+          enum: [rss, rest_api, object_storage, manual]
+        enabled:
+          type: boolean
+        polling_interval_seconds:
+          type: integer
+          minimum: 60
+          maximum: 86400
+        priority:
+          type: string
+          enum: [fast, standard, low]
+        endpoint_host:
+          type: string
+          maxLength: 253
+          nullable: true
+          readOnly: true
+        credential_status:
+          type: string
+          enum: [not_required, configured, missing, invalid]
+          readOnly: true
+        last_success_at:
+          type: string
+          format: date-time
+          nullable: true
+          readOnly: true
+        last_error_code:
+          type: string
+          nullable: true
+          readOnly: true
+        version:
+          type: integer
+          minimum: 1
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    SourceCreate:
+      type: object
+      additionalProperties: false
+      required: [id, name, type, enabled, polling_interval_seconds, priority]
+      properties:
+        id:
+          type: string
+          pattern: '^[a-z][a-z0-9_-]{2,63}$'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        type:
+          type: string
+          enum: [rss, rest_api, object_storage, manual]
+        endpoint_url:
+          type: string
+          format: uri
+          maxLength: 2000
+          writeOnly: true
+        credential_secret_id:
+          type: string
+          minLength: 1
+          maxLength: 100
+          writeOnly: true
+          description: Existing Lockbox secret identifier. Secret values are never accepted or returned.
+        enabled:
+          type: boolean
+        polling_interval_seconds:
+          type: integer
+          minimum: 60
+          maximum: 86400
+        priority:
+          type: string
+          enum: [fast, standard, low]
+
+    SourcePatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        enabled:
+          type: boolean
+        polling_interval_seconds:
+          type: integer
+          minimum: 60
+          maximum: 86400
+        priority:
+          type: string
+          enum: [fast, standard, low]
+
+    ScoringConfigDraft:
+      type: object
+      additionalProperties: false
+      required: [model_version, up_threshold, down_threshold, minimum_data_quality, factor_weights, change_reason]
+      properties:
+        model_version:
+          type: string
+          maxLength: 100
+        up_threshold:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        down_threshold:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        minimum_data_quality:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        factor_weights:
+          type: object
+          minProperties: 1
+          additionalProperties:
+            type: number
+            format: double
+            minimum: -10
+            maximum: 10
+        change_reason:
+          type: string
+          minLength: 10
+          maxLength: 1000
+
+    ScoringConfig:
+      allOf:
+        - $ref: '#/components/schemas/ScoringConfigDraft'
+        - type: object
+          required: [version, status, created_at, created_by]
+          properties:
+            version:
+              type: integer
+              minimum: 1
+              readOnly: true
+            status:
+              type: string
+              enum: [active, superseded]
+              readOnly: true
+            created_at:
+              type: string
+              format: date-time
+              readOnly: true
+            created_by:
+              type: string
+              readOnly: true
+
+    PageMeta:
+      type: object
+      additionalProperties: false
+      required: [limit, has_more]
+      properties:
+        limit:
+          type: integer
+        has_more:
+          type: boolean
+        next_cursor:
+          type: string
+          nullable: true
+
+    SignalResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/Signal'
+
+    SignalListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Signal'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+
+    EventResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/Event'
+
+    EventListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Event'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+
+    InstrumentSnapshotResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/InstrumentSnapshot'
+
+    JobResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/Job'
+
+    FeedbackResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/Feedback'
+
+    SourceResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/Source'
+
+    SourceListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Source'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+
+    ScoringConfigResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/ScoringConfig'
+
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status, checked_at]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        checked_at:
+          type: string
+          format: date-time
+
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, code, request_id]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          example: https://api.eventedge.example/problems/invalid-parameter
+        title:
+          type: string
+          example: Invalid request parameter
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        code:
+          type: string
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: INVALID_PARAMETER
+        detail:
+          type: string
+          maxLength: 2000
+        instance:
+          type: string
+          format: uri-reference
+        request_id:
+          type: string
+        errors:
+          type: array
+          maxItems: 50
+          items:
+            type: object
+            additionalProperties: false
+            required: [location, message]
+            properties:
+              location:
+                type: string
+                example: query.min_confidence
+              message:
+                type: string

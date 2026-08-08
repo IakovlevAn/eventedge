@@ -1,0 +1,25 @@
+.DS_Store
+.idea/
+.vscode/
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*service-account*.json
+yc-sa-key.json
+
+# Infrastructure state
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# Build and test output
+dist/
+build/
+coverage/
+__pycache__/
+*.pyc
+node_modules/

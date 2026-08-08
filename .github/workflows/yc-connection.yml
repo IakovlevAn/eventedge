@@ -1,0 +1,52 @@
+name: Yandex Cloud connection
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  verify-oidc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Request GitHub OIDC token
+        id: github-oidc
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const audience = `https://github.com/${context.repo.owner}`;
+            const token = await core.getIDToken(audience);
+            core.setSecret(token);
+            core.setOutput('token', token);
+
+      - name: Exchange OIDC token for Yandex Cloud IAM token
+        env:
+          GITHUB_OIDC_TOKEN: ${{ steps.github-oidc.outputs.token }}
+          YC_SERVICE_ACCOUNT_ID: ${{ vars.YC_SERVICE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${YC_SERVICE_ACCOUNT_ID}" ]]; then
+            echo "Repository variable YC_SERVICE_ACCOUNT_ID is not configured" >&2
+            exit 1
+          fi
+
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+            --data-urlencode 'requested_token_type=urn:ietf:params:oauth:token-type:access_token' \
+            --data-urlencode "audience=${YC_SERVICE_ACCOUNT_ID}" \
+            --data-urlencode "subject_token=${GITHUB_OIDC_TOKEN}" \
+            --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:id_token' \
+            'https://auth.yandex.cloud/oauth/token')"
+
+          iam_token="$(jq -er '.access_token' <<<"${response}")"
+          expires_in="$(jq -er '.expires_in' <<<"${response}")"
+          echo "::add-mask::${iam_token}"
+          echo "Yandex Cloud OIDC exchange succeeded; token lifetime: ${expires_in}s"
+
