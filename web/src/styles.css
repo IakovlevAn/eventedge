@@ -3654,14 +3654,12 @@ kbd {
   position: relative;
   align-items: center;
   color: #f2f3f5;
-  font-family: Inter, "Arial Black", "SF Pro Display", ui-sans-serif, sans-serif;
-  font-size: 17px;
-  font-weight: 900;
-  font-stretch: condensed;
-  letter-spacing: -0.085em;
-  line-height: 0.82;
-  transform: scaleX(0.94);
-  transform-origin: left center;
+  font-family: "Helvetica Neue", Inter, "SF Pro Display", ui-sans-serif, sans-serif;
+  font-size: 18px;
+  font-weight: 850;
+  font-stretch: normal;
+  letter-spacing: -0.025em;
+  line-height: 1;
 }
 
 .brand > span.brand-wordmark {
@@ -3678,21 +3676,21 @@ kbd {
 
 .brand-wordmark strong {
   position: relative;
-  margin-left: -0.015em;
+  margin-left: -0.01em;
   isolation: isolate;
 }
 
 .brand-wordmark strong::after {
   position: absolute;
   top: 50%;
-  left: -0.035em;
+  left: 0;
   z-index: 1;
-  width: 0.46em;
-  height: 0.46em;
-  border-radius: 50%;
+  width: 0.22em;
+  height: 0.28em;
+  border-radius: 0 999px 999px 0;
   background: #090a0d;
   content: "";
-  transform: translate(-42%, -50%);
+  transform: translate(-0.02em, -50%);
 }
 
 .brand:hover .brand-wordmark {
@@ -3706,7 +3704,7 @@ kbd {
 @media (max-width: 620px) {
   .brand .brand-wordmark {
     display: inline-flex;
-    font-size: 14px;
+    font-size: 15px;
   }
 }
 
