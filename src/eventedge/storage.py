@@ -192,9 +192,14 @@ def utc_now() -> datetime:
 
 
 def to_rfc3339(value: datetime) -> str:
+    return ensure_utc(value).isoformat().replace("+00:00", "Z")
+
+
+def ensure_utc(value: datetime) -> datetime:
+    """YDB Timestamp values are naive UTC; normalize them at the storage edge."""
     if value.tzinfo is None:
-        value = value.replace(tzinfo=UTC)
-    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def stable_id(prefix: str, material: str) -> str:
@@ -680,9 +685,9 @@ def job_from_row(row: object) -> Job:
         status=row.status,
         progress=row.progress,
         result_ref=row.result_ref,
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-        completed_at=row.completed_at,
+        created_at=ensure_utc(row.created_at),
+        updated_at=ensure_utc(row.updated_at),
+        completed_at=ensure_utc(row.completed_at) if row.completed_at else None,
     )
 
 
@@ -753,14 +758,14 @@ def news_from_row(row: object) -> NewsRecord:
         id=row.news_id,
         source_id=row.source_id,
         external_id=row.external_id,
-        published_at=row.published_at,
-        received_at=row.received_at,
+        published_at=ensure_utc(row.published_at),
+        received_at=ensure_utc(row.received_at),
         title=row.title,
         url=row.url,
         content=row.content,
         language=row.language,
         source_metadata=json_object(row.source_metadata),
-        created_at=row.created_at,
+        created_at=ensure_utc(row.created_at),
     )
 
 
@@ -770,8 +775,8 @@ def signal_from_row(row: object) -> SignalRecord:
         id=row.signal_id,
         news_id=row.news_id,
         ticker=row.ticker,
-        as_of=row.as_of,
-        data_cutoff_at=row.data_cutoff_at,
+        as_of=ensure_utc(row.as_of),
+        data_cutoff_at=ensure_utc(row.data_cutoff_at),
         status=row.status,
         direction=row.direction,
         action=row.action,
@@ -783,13 +788,13 @@ def signal_from_row(row: object) -> SignalRecord:
         summary=row.summary,
         factor_contributions=tuple(dict(item) for item in contributions),
         evidence_refs=tuple(str(item) for item in json_list(row.evidence_refs)),
-        expires_at=row.expires_at,
+        expires_at=ensure_utc(row.expires_at),
         invalidation_conditions=tuple(
             str(item) for item in json_list(row.invalidation_conditions)
         ),
         model_version=row.model_version,
         config_version=row.config_version,
-        created_at=row.created_at,
+        created_at=ensure_utc(row.created_at),
     )
 
 
