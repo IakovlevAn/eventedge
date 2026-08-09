@@ -79,7 +79,7 @@ NEWS_COLLECTION_INTERVAL_SECONDS = next(
 NEWS_CLIENT_REFRESH_INTERVAL_SECONDS = 30
 NEWS_DELIVERY_TARGET_SECONDS = 120
 EVALUATION_CACHE_TTL_SECONDS = 60
-MAX_TELEGRAM_CHANNELS = 12
+MAX_TELEGRAM_CHANNELS = 18
 
 
 class NewsIngestRequest(BaseModel):
@@ -132,6 +132,7 @@ class TelegramSourceCreate(BaseModel):
 
     channel: Annotated[str, Field(pattern=r"^@?[A-Za-z0-9_]{3,48}$")]
     display_name: Annotated[str | None, Field(min_length=2, max_length=80)] = None
+    description: Annotated[str | None, Field(min_length=8, max_length=280)] = None
 
     @field_validator("channel")
     @classmethod
@@ -675,6 +676,7 @@ async def create_telegram_source(
         source_id=f"telegram_{normalized_channel}",
         channel=payload.channel,
         display_name=payload.display_name or f"@{payload.channel}",
+        description=payload.description or "Пользовательский Telegram-канал",
         enabled=True,
         created_at=datetime.now(UTC),
     )

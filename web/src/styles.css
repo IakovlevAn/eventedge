@@ -505,7 +505,7 @@
 
 .source-method .section-heading > button { display: inline-flex; align-items: center; gap: 6px; padding: 8px 10px; color: #c5c9cf; font-size: 8px; border: 1px solid #353a44; border-radius: 7px; background: #171a20; cursor: pointer; }
 .source-method .section-heading > button:hover { color: #fff; border-color: #555c68; }
-.telegram-source-form { display: grid; grid-template-columns: minmax(190px, 1.4fr) repeat(3, minmax(145px, 1fr)) auto; align-items: end; gap: 9px; margin: 13px 0; padding: 14px; border: 1px solid #35303d; border-radius: 9px; background: rgba(134, 117, 161, .055); }
+.telegram-source-form { display: grid; grid-template-columns: minmax(175px, 1.25fr) minmax(135px, .85fr) minmax(135px, .95fr) minmax(220px, 1.6fr) minmax(145px, 1fr) auto; align-items: end; gap: 9px; margin: 13px 0; padding: 14px; border: 1px solid #35303d; border-radius: 9px; background: rgba(134, 117, 161, .055); }
 .telegram-source-form > div { display: flex; flex-direction: column; gap: 5px; align-self: center; }
 .telegram-source-form > div strong { color: #dcd9e2; font-size: 9px; }
 .telegram-source-form > div span { color: #716b78; font-size: 7px; line-height: 1.45; }
