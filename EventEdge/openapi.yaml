@@ -17,6 +17,7 @@ tags:
   - name: Signals
   - name: Evals
   - name: News
+  - name: Sources
   - name: Events
   - name: Instruments
   - name: Jobs
@@ -119,7 +120,19 @@ paths:
           schema:
             type: string
             pattern: '^[a-z][a-z0-9_-]{2,63}$'
-        - $ref: '#/components/parameters/Limit'
+        - name: scope
+          in: query
+          description: Independent event scope; no propagation between levels is implied.
+          schema:
+            type: string
+            enum: [market, sector, company]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 20
       responses:
         '200':
           description: News ordered by `published_at DESC, id DESC`.
@@ -129,6 +142,63 @@ paths:
                 $ref: '#/components/schemas/NewsListResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
+  /v1/sources:
+    get:
+      tags: [Sources]
+      summary: List the live source registry and collection status
+      operationId: listLiveSources
+      security: []
+      responses:
+        '200':
+          description: Static and UI-managed sources with recent collection statistics.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
+  /v1/sources/telegram:
+    post:
+      tags: [Sources]
+      summary: Add a validated public Telegram channel to the fast lane
+      operationId: createTelegramSource
+      security:
+        - adminApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [channel]
+              properties:
+                channel:
+                  type: string
+                  pattern: '^@?[A-Za-z0-9_]{3,48}$'
+                display_name:
+                  type: string
+                  minLength: 2
+                  maxLength: 80
+      responses:
+        '201':
+          description: Telegram source persisted in YDB.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
@@ -794,6 +864,10 @@ components:
       type: apiKey
       in: header
       name: X-API-Key
+    adminApiKey:
+      type: apiKey
+      in: header
+      name: X-EventEdge-Admin-Key
 
   x-yc-apigateway-integrations:
     api:

@@ -20,6 +20,7 @@ from eventedge.configs.sources import (
 from eventedge.configs.sources import (
     google_news_search_url as configured_google_news_search_url,
 )
+from eventedge.events import is_broad_market_event_text
 from eventedge.storage import (
     NewsDocument,
     NewsRepository,
@@ -59,6 +60,7 @@ class RssItem:
     url: str
     content: str
     categories: tuple[str, ...]
+
 
 class _HtmlTextExtractor(HTMLParser):
     def __init__(self) -> None:
@@ -112,10 +114,7 @@ def parse_rss(feed: bytes, *, max_items: int) -> list[RssItem]:
             None,
         )
         description = (
-            full_text
-            or element.findtext(RSS_CONTENT_TAG)
-            or element.findtext("description")
-            or ""
+            full_text or element.findtext(RSS_CONTENT_TAG) or element.findtext("description") or ""
         )
         if not all((title, url, external_id, published)):
             continue
@@ -229,9 +228,7 @@ class _TelegramChannelParser(HTMLParser):
 
     def _finish_message(self) -> None:
         content = "\n".join(
-            line.strip()
-            for line in "".join(self._text_parts).splitlines()
-            if line.strip()
+            line.strip() for line in "".join(self._text_parts).splitlines() if line.strip()
         )
         if self._external_id and self._published_at and self._url and content:
             title = content.splitlines()[0][:500]
@@ -359,10 +356,7 @@ async def collect_news_items(
         if result.replayed:
             replayed += 1
             consecutive_replays += 1
-            if (
-                stop_after_replays is not None
-                and consecutive_replays >= stop_after_replays
-            ):
+            if stop_after_replays is not None and consecutive_replays >= stop_after_replays:
                 break
         else:
             accepted += 1
@@ -613,6 +607,17 @@ def is_company_news_candidate(item: RssItem) -> bool:
     )
 
 
+def is_market_event_candidate(item: RssItem) -> bool:
+    """Keep company, sector and country-level events without spending LLM budget."""
+    normalized_title = item.title.casefold()
+    if any(marker in normalized_title for marker in MARKET_NOISE_TITLE_MARKERS):
+        return False
+    return is_company_news_candidate(item) or is_broad_market_event_text(
+        item.title,
+        item.content,
+    )
+
+
 GOOGLE_TRUSTED_PUBLISHERS = (
     "бкс экспресс",
     "интерфакс",
@@ -667,9 +672,7 @@ def is_google_market_background_candidate(item: RssItem) -> bool:
     trusted_publisher = any(
         publisher in item.title.casefold() for publisher in GOOGLE_TRUSTED_PUBLISHERS
     )
-    return trusted_publisher and any(
-        marker in normalized for marker in MARKET_BACKGROUND_MARKERS
-    )
+    return trusted_publisher and any(marker in normalized for marker in MARKET_BACKGROUND_MARKERS)
 
 
 MARKET_NEWS_FEEDS = SOURCE_CONFIG.market_news_feeds
@@ -685,7 +688,7 @@ def collection_filters(
         return is_google_company_news_candidate, is_google_market_signal_candidate
     if config.source_id == "market_background":
         return is_google_market_background_candidate, lambda item: False
-    return is_company_news_candidate, is_market_signal_candidate
+    return is_market_event_candidate, is_market_signal_candidate
 
 
 def empty_collection_totals() -> dict[str, int]:
@@ -742,6 +745,19 @@ async def collect_feed_group(
 
 async def collect_fast_news(repository: NewsRepository) -> dict[str, int]:
     """Refresh direct priority feeds every minute without discovery latency."""
+    managed_sources = await repository.list_telegram_sources()
+    dynamic_channels = tuple(
+        TelegramChannelConfig(
+            source_id=source.source_id,
+            name=source.source_id,
+            channel=source.channel,
+            max_items=20,
+            timeout_seconds=10,
+        )
+        for source in managed_sources
+        if source.enabled
+    )
+    telegram_channels = (*TELEGRAM_CHANNELS, *dynamic_channels)
     results = await asyncio.gather(
         collect_feed_group(
             repository,
@@ -752,11 +768,11 @@ async def collect_fast_news(repository: NewsRepository) -> dict[str, int]:
             collect_telegram_channel(
                 repository,
                 config,
-                item_filter=is_company_news_candidate,
+                item_filter=is_market_event_candidate,
                 signal_filter=is_market_signal_candidate,
                 stop_after_replays=5,
             )
-            for config in TELEGRAM_CHANNELS
+            for config in telegram_channels
         ),
         return_exceptions=True,
     )
@@ -811,7 +827,7 @@ async def collect_market_news(repository: NewsRepository) -> dict[str, int]:
             collect_telegram_channel(
                 repository,
                 config,
-                item_filter=is_company_news_candidate,
+                item_filter=is_market_event_candidate,
                 signal_filter=is_market_signal_candidate,
             )
             for config in TELEGRAM_CHANNELS

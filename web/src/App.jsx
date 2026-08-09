@@ -15,10 +15,13 @@ import {
   Download,
   FileText,
   Filter,
+  Globe2,
   Info,
+  Layers3,
   Menu,
   Minus,
   Newspaper,
+  Plus,
   RefreshCw,
   Search,
   Server,
@@ -309,6 +312,12 @@ const sourceLabels = {
   rbc: "РБК",
   google_news: "Новостная подборка",
   market_background: "Рыночный фон",
+  telegram_ak47pfl: "AK47 PFL",
+  telegram_markettwits: "MarketTwits",
+  telegram_centralbank_russia: "Банк России · Telegram",
+  telegram_moscowexchangeofficial: "MOEX · Telegram",
+  telegram_bcs_express: "БКС Экспресс",
+  telegram_russianmacro: "MMI",
 };
 
 const methodologySources = [
@@ -319,8 +328,20 @@ const methodologySources = [
   { id: "rbc", name: "РБК", kind: "Медиа", quality: 78, freshness: "цель ≤ 2 мин", role: "Рыночный контекст и дополнительное подтверждение", url: "https://www.rbc.ru/quote/" },
   { id: "google_news", name: "Google News", kind: "Discovery", quality: 74, freshness: "до 5 мин", role: "Поиск публикаций; не считается первичным источником", url: "https://news.google.com/" },
   { id: "market_background", name: "Рыночный фон", kind: "Контекст", quality: 74, freshness: "до 5 мин", role: "Ставка, рубль, нефть, санкции и общий фон рынка", url: "https://news.google.com/" },
+  { id: "telegram_ak47pfl", name: "AK47 PFL", kind: "Telegram", quality: 68, freshness: "цель ≤ 2 мин", role: "Оперативные рыночные сообщения", url: "https://t.me/s/AK47pfl" },
+  { id: "telegram_markettwits", name: "MarketTwits", kind: "Telegram", quality: 68, freshness: "цель ≤ 2 мин", role: "Корпоративный и рыночный поток", url: "https://t.me/s/markettwits" },
+  { id: "telegram_centralbank_russia", name: "Банк России · Telegram", kind: "Telegram", quality: 95, freshness: "цель ≤ 2 мин", role: "Решения и комментарии регулятора", url: "https://t.me/s/centralbank_russia" },
+  { id: "telegram_moscowexchangeofficial", name: "MOEX · Telegram", kind: "Telegram", quality: 95, freshness: "цель ≤ 2 мин", role: "Новости торгов и инфраструктуры", url: "https://t.me/s/MoscowExchangeOfficial" },
+  { id: "telegram_bcs_express", name: "БКС Экспресс", kind: "Telegram", quality: 82, freshness: "цель ≤ 2 мин", role: "Корпоративные события и рынок", url: "https://t.me/s/bcs_express" },
+  { id: "telegram_russianmacro", name: "MMI", kind: "Telegram", quality: 78, freshness: "цель ≤ 2 мин", role: "Российский и глобальный макро-фон", url: "https://t.me/s/russianmacro" },
   { id: "moex_iss", name: "MOEX ISS", kind: "Рыночные данные", quality: 100, freshness: "до 60 сек", role: "Цена, объём, свечи, ликвидность и волатильность", url: "https://iss.moex.com/iss/" },
 ];
+
+const eventScopeMeta = {
+  market: { label: "Рынок", Icon: Globe2 },
+  sector: { label: "Отрасль", Icon: Layers3 },
+  company: { label: "Компания", Icon: BarChart3 },
+};
 
 const scoreFactorDefinitions = [
   { label: "Текстовый эффект", weight: 0.55, description: "Как событие меняет ожидания по компании" },
@@ -438,7 +459,7 @@ function assessmentFromApi(item) {
   };
 }
 
-function newsFromApi(item, signalsById) {
+function newsFromApi(item, signalsById, sourceNames = new Map()) {
   const related = item.related_signals?.[0];
   const tickers = [...new Set([
     ...(item.source_metadata?.tickers || []),
@@ -457,7 +478,7 @@ function newsFromApi(item, signalsById) {
   } : null;
   return {
     id: item.id,
-    source: sourceLabels[item.source_id] || item.source_id,
+    source: sourceNames.get(item.source_id) || sourceLabels[item.source_id] || item.source_id,
     sourceId: item.source_id,
     time: formatTime(item.published_at),
     publishedAt: item.published_at,
@@ -468,6 +489,12 @@ function newsFromApi(item, signalsById) {
     url: item.url,
     signal,
     tickers,
+    event: item.event || {
+      scope: tickers.length ? "company" : "market",
+      scope_label: tickers.length ? "Компания" : "Рынок",
+      tickers,
+      sectors: tickers.map((ticker) => companyMeta[ticker]?.[1]).filter(Boolean),
+    },
     companySignal: !signal && tickers[0] ? {
       ticker: tickers[0],
       company: companyMeta[tickers[0]]?.[0] || tickers[0],
@@ -491,9 +518,15 @@ function titleTokens(title) {
 }
 
 function sameNewsEvent(left, right) {
+  if (left.event?.scope !== right.event?.scope) return false;
   const leftTicker = left.signal?.ticker || left.tickers?.[0];
   const rightTicker = right.signal?.ticker || right.tickers?.[0];
   if (leftTicker && rightTicker && leftTicker !== rightTicker) return false;
+  if (!leftTicker && !rightTicker) {
+    const leftSector = left.event?.sectors?.[0];
+    const rightSector = right.event?.sectors?.[0];
+    if (leftSector && rightSector && leftSector !== rightSector) return false;
+  }
   if (left.signal && right.signal && left.signal.direction !== right.signal.direction) return false;
   if (Math.abs(new Date(left.publishedAt) - new Date(right.publishedAt)) > 48 * 60 * 60 * 1000) return false;
   const leftTokens = titleTokens(left.title);
@@ -516,7 +549,12 @@ function groupNewsEvents(items) {
       });
       return;
     }
-    if (!group.signal && item.signal) group.signal = item.signal;
+    const groupWeight = Math.abs(group.signal?.score || 0) + Math.min(group.content?.length || 0, 600) / 120;
+    const itemWeight = Math.abs(item.signal?.score || 0) + Math.min(item.content?.length || 0, 600) / 120;
+    if (itemWeight > groupWeight) {
+      const { sources, corroborations, sourceCount } = group;
+      Object.assign(group, item, { sources, corroborations, sourceCount });
+    } else if (!group.signal && item.signal) group.signal = item.signal;
     group.tickers = [...new Set([...(group.tickers || []), ...(item.tickers || [])])];
     group.corroborations.push(item);
     if (!group.sources.some((source) => source.name === item.source && source.url === item.url)) {
@@ -1211,41 +1249,81 @@ function CompanyScreen({ signal, companyNews, marketStatus, marketUpdatedAt, onB
 function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
   const [ticker, setTicker] = useState(initialTicker || "all");
   const [query, setQuery] = useState("");
+  const [scope, setScope] = useState("all");
+  const [sourceId, setSourceId] = useState("all");
+  const [signalOnly, setSignalOnly] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(18);
 
   useEffect(() => setTicker(initialTicker || "all"), [initialTicker]);
+  useEffect(() => setVisibleCount(18), [ticker, query, scope, sourceId, signalOnly]);
+
+  const sources = useMemo(() => {
+    const result = new Map();
+    allNews.forEach((item) => result.set(item.sourceId, item.source));
+    return [...result.entries()].sort((left, right) => left[1].localeCompare(right[1], "ru"));
+  }, [allNews]);
 
   const items = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("ru-RU");
     return allNews.filter((item) => {
       const matchesTicker = ticker === "all" || item.tickers?.includes(ticker);
-      const haystack = `${item.title} ${item.source} ${(item.tickers || []).join(" ")} ${item.signal?.company || item.companySignal?.company || ""}`.toLocaleLowerCase("ru-RU");
-      return matchesTicker && (!normalized || haystack.includes(normalized));
+      const matchesScope = scope === "all" || item.event?.scope === scope;
+      const matchesSource = sourceId === "all" || item.sources?.some((source) => source.id === sourceId) || item.sourceId === sourceId;
+      const matchesSignal = !signalOnly || Boolean(item.signal);
+      const haystack = `${item.title} ${item.content} ${item.source} ${(item.tickers || []).join(" ")} ${(item.event?.sectors || []).join(" ")} ${item.signal?.company || item.companySignal?.company || ""}`.toLocaleLowerCase("ru-RU");
+      return matchesTicker && matchesScope && matchesSource && matchesSignal && (!normalized || haystack.includes(normalized));
     });
-  }, [ticker, query]);
+  }, [allNews, ticker, query, scope, sourceId, signalOnly]);
+
+  const scopeCounts = useMemo(() => allNews.reduce((result, item) => {
+    const key = item.event?.scope || "market";
+    result[key] = (result[key] || 0) + 1;
+    return result;
+  }, {}), [allNews]);
+  const visibleItems = items.slice(0, visibleCount);
 
   return (
-    <main className="screen section-screen">
-      <section className="page-hero">
-        <div><span className="eyebrow"><Newspaper size={13} /> Лента событий</span><h1>Новости, которые двигают сигнал</h1><p>Открой публикацию, прочитай краткое содержание и сразу увидь, с какой компанией и сигналом она связана.</p></div>
+    <main className="screen section-screen news-screen">
+      <section className="page-hero news-hero">
+        <div><span className="eyebrow"><Newspaper size={13} /> Карта событий</span><h1>Не лента, а структура рынка</h1><p>EventEdge собирает публикации в события и отдельно показывает общий рынок, отрасли и конкретные компании. Сигнал есть только там, где эффект на бумагу уже рассчитан.</p></div>
         <label className="page-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Компания, тикер или событие" />{query && <button type="button" onClick={() => setQuery("")} aria-label="Очистить поиск"><X size={13} /></button>}</label>
       </section>
-      <div className="news-filters" aria-label="Фильтр по компании">
-        <button type="button" className={ticker === "all" ? "is-active" : ""} onClick={() => setTicker("all")}>Все <span>{allNews.length}</span></button>
-        {signals.map((signal) => (
-          <button type="button" key={signal.ticker} className={ticker === signal.ticker ? "is-active" : ""} onClick={() => setTicker(signal.ticker)}><CompanyMark signal={signal} small />{signal.ticker}</button>
-        ))}
-      </div>
+
+      <section className="event-scope-overview">
+        {["market", "sector", "company"].map((key) => {
+          const meta = eventScopeMeta[key];
+          const Icon = meta.Icon;
+          return <button type="button" key={key} className={scope === key ? "is-active" : ""} onClick={() => setScope(scope === key ? "all" : key)}><Icon size={15} /><span><strong>{meta.label}</strong><small>{scopeCounts[key] || 0} событий</small></span></button>;
+        })}
+      </section>
+
+      <section className="news-controlbar">
+        <div className="scope-tabs" aria-label="Масштаб события">
+          <button type="button" className={scope === "all" ? "is-active" : ""} onClick={() => setScope("all")}>Все события</button>
+          {Object.entries(eventScopeMeta).map(([key, meta]) => <button type="button" key={key} className={scope === key ? "is-active" : ""} onClick={() => setScope(key)}>{meta.label}<span>{scopeCounts[key] || 0}</span></button>)}
+        </div>
+        <div className="event-selects">
+          <label><span>Компания</span><select value={ticker} onChange={(event) => setTicker(event.target.value)}><option value="all">Все бумаги</option>{signals.map((signal) => <option value={signal.ticker} key={signal.ticker}>{signal.ticker} · {signal.company}</option>)}</select><ChevronDown size={13} /></label>
+          <label><span>Источник</span><select value={sourceId} onChange={(event) => setSourceId(event.target.value)}><option value="all">Все источники</option>{sources.map(([id, name]) => <option value={id} key={id}>{name}</option>)}</select><ChevronDown size={13} /></label>
+          <button type="button" className={`signal-filter ${signalOnly ? "is-active" : ""}`} onClick={() => setSignalOnly((value) => !value)}><CircleGauge size={14} /> Только с сигналом</button>
+        </div>
+      </section>
+
       <div className="pipeline-status"><span><i /> Быстрый сбор работает</span><strong>Приоритетные источники проверяются каждую минуту</strong><small>{newsMeta.last_ingested_at ? `Последняя новая запись ${formatRelative(newsMeta.last_ingested_at)} · цель доставки до ${Math.round((newsMeta.delivery_target_seconds || 120) / 60)} мин` : "Ожидаем первую публикацию"}</small></div>
       <section className="news-feed">
-        <div className="feed-heading"><span>{ticker === "all" && !query ? newsMeta.total || items.length : items.length} публикаций</span><small>{newsMeta.sources?.length || 0} активных источника · события отделены от фоновых новостей</small></div>
-        {items.map((item) => (
-          <button type="button" className="feed-item" key={item.id} onClick={() => onReadNews(item)}>
+        <div className="feed-heading"><span>{items.length} событий</span><small>{newsMeta.sources?.length || sources.length} источников · повторные публикации объединяются</small></div>
+        {visibleItems.map((item) => {
+          const scopeMeta = eventScopeMeta[item.event?.scope || "market"];
+          const ScopeIcon = scopeMeta.Icon;
+          return (
+          <button type="button" className={`feed-item event-feed-item event-feed-item--${item.event?.scope || "market"}`} key={item.id} onClick={() => onReadNews(item)}>
             {item.signal || item.companySignal ? <CompanyMark signal={item.signal || item.companySignal} /> : <span className="company-mark"><Newspaper size={17} /></span>}
-            <div className="feed-copy"><div><span>{item.source}</span><i>{item.tag}</i>{item.sourceCount > 1 && <i className="source-count">{item.sourceCount} источника</i>}<time>{item.time}</time></div><h2>{item.title}</h2><p>{item.content}</p>{item.signal && <footer><strong>{item.signal.ticker}</strong><Direction direction={item.signal.direction} /><span>{formatScore(item.signal.score)} п.</span></footer>}</div>
+            <div className="feed-copy"><div><span className={`event-scope event-scope--${item.event?.scope || "market"}`}><ScopeIcon size={10} /> {scopeMeta.label}</span><span>{item.source}</span>{item.sourceCount > 1 && <i className="source-count">{item.sourceCount} источника</i>}<time>{item.time}</time></div><h2>{item.title}</h2><p>{item.content}</p><footer>{item.event?.sectors?.map((sector) => <span className="event-sector" key={sector}>{sector}</span>)}{item.signal ? <><strong>{item.signal.ticker}</strong><Direction direction={item.signal.direction} /><span>{formatScore(item.signal.score)} п.</span></> : <span className="context-only">Контекст · без торгового сигнала</span>}</footer></div>
             <BookOpen size={17} />
           </button>
-        ))}
+        );})}
         {!items.length && <div className="empty-state"><Search size={22} /><strong>Новостей не найдено</strong><span>Измени запрос или выбери другую компанию.</span></div>}
+        {visibleCount < items.length && <button type="button" className="show-more-events" onClick={() => setVisibleCount((value) => value + 18)}>Показать ещё {Math.min(18, items.length - visibleCount)} событий <ArrowDownRight size={13} /></button>}
       </section>
     </main>
   );
@@ -1423,6 +1501,13 @@ function EvalsScreen() {
 function MethodologyScreen({ onApi, allNews, newsMeta }) {
   const sample = methodologySignals[0];
   const sampleFactors = scoreFactors(sample.score);
+  const [sourceRegistry, setSourceRegistry] = useState(null);
+  const [showSourceForm, setShowSourceForm] = useState(false);
+  const [channel, setChannel] = useState("");
+  const [channelName, setChannelName] = useState("");
+  const [adminKey, setAdminKey] = useState("");
+  const [sourceFormStatus, setSourceFormStatus] = useState("idle");
+  const [sourceFormMessage, setSourceFormMessage] = useState("");
   const recentBySource = useMemo(() => {
     const result = new Map();
     allNews.forEach((item) => {
@@ -1432,6 +1517,55 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
     });
     return result;
   }, [allNews]);
+
+  const loadSources = async () => {
+    try {
+      const response = await fetch(apiUrl("/v1/sources"));
+      if (!response.ok) throw new Error("Реестр источников временно недоступен.");
+      setSourceRegistry(await response.json());
+    } catch {
+      setSourceRegistry(null);
+    }
+  };
+
+  useEffect(() => { loadSources(); }, []);
+
+  const sources = sourceRegistry?.data?.map((source) => ({
+    id: source.source_id,
+    name: source.name,
+    kind: source.kind,
+    quality: source.quality,
+    freshness: source.freshness,
+    role: source.role || "Публичный Telegram-канал",
+    url: source.url,
+    count: source.count,
+    lastPublishedAt: source.last_published_at,
+    managed: source.managed,
+  })) || methodologySources;
+
+  const addTelegramSource = async (event) => {
+    event.preventDefault();
+    setSourceFormStatus("saving");
+    setSourceFormMessage("");
+    try {
+      const response = await fetch(apiUrl("/v1/sources/telegram"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-EventEdge-Admin-Key": adminKey },
+        body: JSON.stringify({ channel, display_name: channelName || undefined }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || payload.title || "Не удалось добавить канал.");
+      setChannel("");
+      setChannelName("");
+      setAdminKey("");
+      setSourceFormStatus("saved");
+      setSourceFormMessage("Канал добавлен. Первый опрос — в течение минуты.");
+      await loadSources();
+    } catch (error) {
+      setSourceFormStatus("error");
+      setSourceFormMessage(error.message || "Не удалось добавить канал.");
+    }
+  };
 
   return (
     <main className="screen section-screen methodology-screen">
@@ -1487,16 +1621,34 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
         <p><ShieldCheck size={14} /> Это сценарная зона, а не таргет цены и не обещанная доходность. Калибровка на исторических outcomes остаётся следующим этапом.</p>
       </section>
 
+      <section className="event-method">
+        <header><span>06</span><div><h2>Каждая публикация становится событием</h2><p>Это три независимых масштаба контекста, а не обязательная цепочка влияния.</p></div></header>
+        <div className="event-method__grid">
+          <article><Globe2 size={16} /><strong>Рынок</strong><span>Ставка, инфляция, санкции, геополитика и другие страновые факторы.</span></article>
+          <article><Layers3 size={16} /><strong>Отрасль</strong><span>События, затрагивающие сектор: нефть, банки, металлы, ритейл или логистику.</span></article>
+          <article><BarChart3 size={16} /><strong>Компания</strong><span>Факт привязан к конкретной бумаге MOEX и может пройти расчёт сигнала.</span></article>
+        </div>
+        <p><Info size={14} /> Например, удар по складу маркетплейса попадёт в «Ритейл и логистика». Пока EventEdge не разносит такой контекст автоматически на все бумаги сектора — для этого нужна отдельная историческая калибровка.</p>
+      </section>
+
       <section className="source-method">
-        <div className="section-heading"><span><Database size={15} /> Источники и их роль</span><small>прозрачный реестр текущего контура</small></div>
+        <div className="section-heading"><span><Database size={15} /> Источники и их роль</span><button type="button" onClick={() => setShowSourceForm((value) => !value)}><Plus size={13} /> Добавить Telegram</button></div>
+        {showSourceForm && <form className="telegram-source-form" onSubmit={addTelegramSource}>
+          <div><strong>Новый публичный Telegram-канал</strong><span>EventEdge читает публичную web-ленту без бота. Лимит — {sourceRegistry?.meta?.telegram_limit || 12} каналов, опрос раз в минуту.</span></div>
+          <label><span>Канал</span><input required pattern="@?[A-Za-z0-9_]{3,48}" value={channel} onChange={(event) => setChannel(event.target.value)} placeholder="@channel_name" /></label>
+          <label><span>Название</span><input value={channelName} onChange={(event) => setChannelName(event.target.value)} placeholder="Как показывать в EventEdge" /></label>
+          <label><span>Админ-ключ</span><input required type="password" autoComplete="off" value={adminKey} onChange={(event) => setAdminKey(event.target.value)} placeholder="Не сохраняется в браузере" /></label>
+          <button type="submit" disabled={sourceFormStatus === "saving"}>{sourceFormStatus === "saving" ? "Добавляем…" : "Добавить канал"}</button>
+          {sourceFormMessage && <p className={`source-form-message is-${sourceFormStatus}`}>{sourceFormMessage}</p>}
+        </form>}
         <div className="source-method__grid">
-          {methodologySources.map((source) => {
-            const lastSeen = recentBySource.get(source.id);
-            const sourceStat = newsMeta.sources?.find((item) => item.source_id === source.id);
+          {sources.map((source) => {
+            const lastSeen = source.lastPublishedAt || recentBySource.get(source.id);
+            const sourceStat = source.count !== undefined ? { count: source.count } : newsMeta.sources?.find((item) => item.source_id === source.id);
             const hasData = source.id === "moex_iss" || Boolean(lastSeen);
             return (
               <a href={source.url} target="_blank" rel="noreferrer" key={source.id} className="source-card">
-                <header><span>{source.kind}</span><strong>{source.quality}/100</strong></header>
+                <header><span>{source.kind}{source.managed ? " · UI" : ""}</span><strong>{source.quality}/100</strong></header>
                 <h3>{source.name}<ArrowUpRight size={12} /></h3>
                 <p>{source.role}</p>
                 <footer><span className={hasData ? "is-live" : "is-waiting"}><i /> {hasData ? sourceStat ? `${sourceStat.count} публикаций` : "Есть данные" : "Подключён · без событий"}</span><time>{lastSeen ? formatRelative(lastSeen) : source.freshness}</time></footer>
@@ -1504,7 +1656,7 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
             );
           })}
         </div>
-        <p className="source-note">Качество источника — фиксированный вес внутри текущей модели. Discovery-источник помогает найти публикацию, но не заменяет первичное подтверждение.</p>
+        <p className="source-note">Telegram-пост проходит тот же детерминированный фильтр и дедупликацию, что RSS. LLM вызывается только для кандидатов на сигнал; общий фон и отраслевые события сохраняются без LLM-затрат. Качество пользовательского канала по умолчанию — 65/100.</p>
       </section>
 
       <section className="method-reality">
@@ -1521,7 +1673,10 @@ const apiEndpoints = [
   { id: "evals", method: "GET", path: "/v1/evals", title: "Анализ качества сигналов", description: "Outcomes, горизонты, бумаги, confidence buckets, корреляции и cumulative quality.", parameter: null },
   { id: "evals_export", method: "GET", path: "/v1/evals/export?format=csv&dataset=timeseries", title: "Выгрузка Evals", description: "CSV/JSON: одна строка на сигнал или event-time ряд свечей до +3 дней.", parameter: { name: "dataset", type: "string", description: "outcomes или timeseries; format — csv или json" } },
   { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Семантические news‑сигналы", description: "Новостный слой: событие, направление и вес из semantic‑модели. Финальная оценка hybrid-market-0.1.0, включающая рыночные факторы, возвращается через /v1/assessments.", parameter: { name: "limit", type: "integer", description: "Количество записей, максимум 100" } },
-  { id: "news", method: "GET", path: "/v1/news?limit=20", title: "Лента новостей", description: "Исходные публикации и сигналы, которые с ними связаны.", parameter: { name: "limit", type: "integer", description: "Количество публикаций, максимум 100" } },
+  { id: "news", method: "GET", path: "/v1/news?limit=20", title: "Лента новостей", description: "Исходные публикации, event-проекция и связанные сигналы.", parameter: { name: "limit", type: "integer", description: "Количество публикаций, максимум 500" } },
+  { id: "events", method: "GET", path: "/v1/events?limit=20", title: "Рыночные события", description: "Публикации как события уровня рынок, отрасль или компания.", parameter: { name: "scope", type: "string", description: "market, sector или company" } },
+  { id: "sources", method: "GET", path: "/v1/sources", title: "Реестр источников", description: "Подключённые RSS и Telegram-источники, свежесть и статистика сбора.", parameter: null },
+  { id: "source_create", method: "POST", path: "/v1/sources/telegram", title: "Добавить Telegram", description: "Защищённое добавление публичного канала в минутный контур.", parameter: { name: "X-EventEdge-Admin-Key", type: "header", description: "Админ-ключ runtime; в UI не сохраняется" } },
   { id: "ticker", method: "GET", path: "/v1/signals?ticker=SBER&limit=1", title: "Сигнал компании", description: "Последний новостной сигнал по выбранному тикеру.", parameter: { name: "ticker", type: "string", description: "Тикер MOEX, например SBER" } },
   { id: "snapshot", method: "GET", path: "/v1/instruments/SBER/snapshot", title: "Рыночный snapshot", description: "Цена, объём, волатильность, дневные свечи MOEX и сценарный диапазон.", parameter: null },
   { id: "candles", method: "GET", path: "/v1/instruments/SBER/candles?interval=10&lookback_days=14", title: "Внутридневные свечи", description: "10-минутные OHLCV-свечи MOEX. Кэш и интерфейс обновляются раз в минуту.", parameter: { name: "lookback_days", type: "integer", description: "Окно истории от 1 до 14 дней" } },
@@ -1584,6 +1739,19 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,2026-08-08T08:00:00Z,60,0.42` : en
   ],
   "errors": [],
   "meta": {"requested":2,"returned":2,"refresh_after_seconds":30}
+}` : endpoint.id === "sources" ? `{
+  "data": [
+    {"source_id":"telegram_bcs_express","name":"БКС Экспресс","kind":"Telegram","count":12,"freshness":"цель ≤ 2 мин"}
+  ],
+  "meta": {"telegram_active":6,"telegram_limit":12,"poll_interval_seconds":60}
+}` : endpoint.id === "source_create" ? `{
+  "data": {"source_id":"telegram_example","channel":"example","enabled":true,"managed":true}
+}` : endpoint.id === "events" ? `{
+  "data": [{
+    "id":"event_…","scope":"sector","scope_label":"Отрасль","sectors":["Ритейл и логистика"],
+    "title":"Событие затронуло склад маркетплейса","related_signals":[]
+  }],
+  "meta":{"limit":20,"scope":null}
 }` : endpoint.id === "news" ? `{
   "data": [{
     "id": "news_…",
@@ -1643,6 +1811,13 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,2026-08-08T08:00:00Z,60,0.42` : en
       setCopied("");
     }
   };
+  const curlExample = endpoint.id === "source_create"
+    ? `curl -s -X POST '${baseUrl}${endpoint.path}' \\
+  -H 'Content-Type: application/json' \\
+  -H 'X-EventEdge-Admin-Key: <ADMIN_KEY>' \\
+  -d '{"channel":"example_channel","display_name":"Example"}'`
+    : `curl -s '${baseUrl}${endpoint.path}' \\
+  -H 'Accept: application/json'`;
 
   return (
     <main className="screen section-screen api-screen">
@@ -1662,7 +1837,7 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,2026-08-08T08:00:00Z,60,0.42` : en
           <header><div><span className="http-method">{endpoint.method}</span><code>{endpoint.path}</code></div><button type="button" onClick={() => copyText(`${baseUrl}${endpoint.path}`, endpoint.id)}><Copy size={14} /> {copied === endpoint.id ? "Скопировано" : "Копировать URL"}</button></header>
           <h2>{endpoint.title}</h2><p>{endpoint.description}</p>
           {endpoint.parameter && <div className="parameter-table"><div><strong>Параметр</strong><strong>Тип</strong><strong>Описание</strong></div><div><code>{endpoint.parameter.name}</code><span>{endpoint.parameter.type}</span><p>{endpoint.parameter.description}</p></div></div>}
-          <div className="code-panel"><div><span><Terminal size={13} /> cURL</span><button type="button" onClick={() => copyText(`curl -s '${baseUrl}${endpoint.path}'`, "curl")}><Copy size={13} /> {copied === "curl" ? "Готово" : "Копировать"}</button></div><pre><code>{`curl -s '${baseUrl}${endpoint.path}' \\\n  -H 'Accept: application/json'`}</code></pre></div>
+          <div className="code-panel"><div><span><Terminal size={13} /> cURL</span><button type="button" onClick={() => copyText(curlExample, "curl")}><Copy size={13} /> {copied === "curl" ? "Готово" : "Копировать"}</button></div><pre><code>{curlExample}</code></pre></div>
           <div className="response-panel"><span>Пример ответа</span><pre><code>{responseExample}</code></pre></div>
         </section>
       </div>
@@ -1674,14 +1849,15 @@ function NewsReader({ item, onClose }) {
   if (!item) return null;
   const { signal } = item;
   const companySignal = signal || item.companySignal;
+  const scopeMeta = eventScopeMeta[item.event?.scope || "market"];
   return (
     <div className="reader-overlay">
       <button className="overlay-dismiss" type="button" aria-label="Закрыть новость" onClick={onClose} />
       <article className="reader-dialog" role="dialog" aria-modal="true" aria-label="Просмотр новости">
         <header><div>{companySignal ? <CompanyMark signal={companySignal} /> : <span className="company-mark"><Newspaper size={17} /></span>}<span><strong>{companySignal?.ticker || "Новость"}</strong><small>{companySignal ? `${companySignal.company} · ` : ""}{item.source}</small></span></div><button type="button" onClick={onClose} aria-label="Закрыть"><X size={18} /></button></header>
-        <div className="reader-meta"><span>{item.tag}</span><time><Clock3 size={12} /> {new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" }).format(new Date(item.publishedAt))}</time></div>
+        <div className="reader-meta"><span>{scopeMeta.label}{item.event?.sectors?.length ? ` · ${item.event.sectors.join(", ")}` : ""}</span><time><Clock3 size={12} /> {new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" }).format(new Date(item.publishedAt))}</time></div>
         <h1>{item.title}</h1>
-        <div className="reader-body"><p>{item.content}</p>{signal && <p>EventEdge связал публикацию с {signal.ticker} и алгоритмически рассчитал на горизонте {signal.horizon} оценку <strong>{formatScore(signal.score)} пункта</strong>.</p>}</div>
+        <div className="reader-body"><p>{item.content}</p>{signal ? <p>EventEdge связал публикацию с {signal.ticker} и алгоритмически рассчитал на горизонте {signal.horizon} оценку <strong>{formatScore(signal.score)} пункта</strong>.</p> : <p>Событие сохранено как <strong>{scopeMeta.label.toLocaleLowerCase("ru-RU")}</strong>-контекст. Торговый сигнал по конкретной бумаге из него пока не рассчитан.</p>}</div>
         {item.sources?.length > 1 && <section className="reader-sources"><span>Подтверждающие публикации</span>{item.sources.map((source) => <a href={source.url} target="_blank" rel="noreferrer" key={`${source.name}-${source.url}`}>{source.name}<ArrowUpRight size={11} /></a>)}</section>}
         {signal && <section className="reader-insight"><CircleGauge size={16} /><div><span>Что это меняет</span><strong>{signal.action}</strong><p>{signal.summary}</p></div></section>}
         <footer><FileText size={13} /> Показан текст из RSS источника. <a href={item.url} target="_blank" rel="noreferrer">Открыть оригинал <ArrowUpRight size={11} /></a></footer>
@@ -1738,15 +1914,17 @@ export default function App() {
       if (!loaded) setDataStatus("loading");
       setDataError("");
       try {
-        const [signalResponse, newsResponse] = await Promise.all([
+        const [signalResponse, newsResponse, sourceResponse] = await Promise.all([
           fetch(apiUrl("/v1/signals?status=active&limit=100"), { signal: controller.signal }),
-          fetch(apiUrl("/v1/news?limit=100"), { signal: controller.signal }),
+          fetch(apiUrl("/v1/news?limit=300"), { signal: controller.signal }),
+          fetch(apiUrl("/v1/sources"), { signal: controller.signal }),
         ]);
-        if (!signalResponse.ok || !newsResponse.ok) throw new Error("API вернул ошибку. Попробуй обновить страницу.");
-        const [signalPayload, newsPayload] = await Promise.all([signalResponse.json(), newsResponse.json()]);
+        if (!signalResponse.ok || !newsResponse.ok || !sourceResponse.ok) throw new Error("API вернул ошибку. Попробуй обновить страницу.");
+        const [signalPayload, newsPayload, sourcePayload] = await Promise.all([signalResponse.json(), newsResponse.json(), sourceResponse.json()]);
         const allSignals = signalPayload.data.map(signalFromApi);
         const signalsById = new Map(allSignals.map((item) => [item.id, item]));
-        const nextNews = groupNewsEvents(newsPayload.data.map((item) => newsFromApi(item, signalsById)));
+        const sourceNames = new Map(sourcePayload.data.map((source) => [source.source_id, source.name]));
+        const nextNews = groupNewsEvents(newsPayload.data.map((item) => newsFromApi(item, signalsById, sourceNames)));
         const evidenceByTicker = new Map();
         nextNews.forEach((item) => {
           if (item.signal) item.signal.evidence.push(item);

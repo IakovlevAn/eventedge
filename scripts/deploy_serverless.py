@@ -17,6 +17,17 @@ SECRET_PATTERN = re.compile(r"(?:y[01]_|t[01]_|AQAD-)[A-Za-z0-9_-]+")
 
 
 def build_payload(environment: Mapping[str, str]) -> dict[str, object]:
+    runtime_environment = {
+        "APP_ENV": "prod",
+        "APP_REVISION": environment["DEPLOY_SHA"],
+        "YDB_ENDPOINT": environment["YDB_ENDPOINT"],
+        "YDB_DATABASE": environment["YDB_DATABASE"],
+        "YANDEX_GPT_ENABLED": "true",
+        "YANDEX_GPT_FOLDER_ID": environment["YC_FOLDER_ID"],
+        "YANDEX_GPT_MODEL": "yandexgpt-lite",
+    }
+    if admin_key := environment.get("EVENTEDGE_ADMIN_KEY"):
+        runtime_environment["EVENTEDGE_ADMIN_KEY"] = admin_key
     return {
         "containerId": environment["YC_CONTAINER_ID"],
         "description": f"GitHub {environment['DEPLOY_SHA']}",
@@ -29,15 +40,7 @@ def build_payload(environment: Mapping[str, str]) -> dict[str, object]:
         "serviceAccountId": environment["YC_RUNTIME_SERVICE_ACCOUNT_ID"],
         "imageSpec": {
             "imageUrl": environment["IMAGE_URL"],
-            "environment": {
-                "APP_ENV": "prod",
-                "APP_REVISION": environment["DEPLOY_SHA"],
-                "YDB_ENDPOINT": environment["YDB_ENDPOINT"],
-                "YDB_DATABASE": environment["YDB_DATABASE"],
-                "YANDEX_GPT_ENABLED": "true",
-                "YANDEX_GPT_FOLDER_ID": environment["YC_FOLDER_ID"],
-                "YANDEX_GPT_MODEL": "yandexgpt-lite",
-            },
+            "environment": runtime_environment,
         },
         "concurrency": "2",
         "provisionPolicy": {"minInstances": "0"},

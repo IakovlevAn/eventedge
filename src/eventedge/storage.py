@@ -158,6 +158,29 @@ class ProcessedNews:
     signals: tuple[SignalRecord, ...]
 
 
+@dataclass(frozen=True)
+class TelegramSourceRecord:
+    source_id: str
+    channel: str
+    display_name: str
+    enabled: bool
+    created_at: datetime
+
+    def as_api_dict(self) -> dict[str, object]:
+        return {
+            "source_id": self.source_id,
+            "channel": self.channel,
+            "name": self.display_name,
+            "kind": "Telegram",
+            "url": f"https://t.me/s/{self.channel}",
+            "enabled": self.enabled,
+            "managed": True,
+            "quality": 65,
+            "freshness": "цель ≤ 2 мин",
+            "created_at": to_rfc3339(self.created_at),
+        }
+
+
 class NewsRepository(Protocol):
     async def start(self) -> None: ...
 
@@ -193,6 +216,13 @@ class NewsRepository(Protocol):
     ) -> list[SignalRecord]: ...
 
     async def get_signal(self, signal_id: str) -> SignalRecord | None: ...
+
+    async def list_telegram_sources(self) -> list[TelegramSourceRecord]: ...
+
+    async def upsert_telegram_source(
+        self,
+        source: TelegramSourceRecord,
+    ) -> TelegramSourceRecord: ...
 
 
 def utc_now() -> datetime:
@@ -280,8 +310,7 @@ def process_document(
             confidence=signal.confidence,
             summary=signal.summary,
             factor_contributions=tuple(
-                contribution.model_dump(mode="json")
-                for contribution in signal.factor_contributions
+                contribution.model_dump(mode="json") for contribution in signal.factor_contributions
             ),
             evidence_refs=(news_id,),
             expires_at=expires_at,
@@ -378,6 +407,7 @@ class MemoryNewsRepository:
         self._jobs: dict[str, Job] = {}
         self._news: dict[str, NewsRecord] = {}
         self._signals: dict[str, SignalRecord] = {}
+        self._telegram_sources: dict[str, TelegramSourceRecord] = {}
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
@@ -411,11 +441,7 @@ class MemoryNewsRepository:
                 generate_signals=generate_signals,
             )
             processed = process_document(document, features, now=now)
-            result_ref = (
-                processed.signals[0].id
-                if processed.signals
-                else processed.feature_set_id
-            )
+            result_ref = processed.signals[0].id if processed.signals else processed.feature_set_id
             job = Job(
                 id=stable_id("job_", idempotency_key),
                 kind="news_ingestion",
@@ -440,9 +466,7 @@ class MemoryNewsRepository:
                 source_metadata=document.source_metadata,
                 created_at=now,
             )
-            self._signals.update(
-                {signal.id: signal for signal in processed.signals}
-            )
+            self._signals.update({signal.id: signal for signal in processed.signals})
             self._requests[idempotency_key] = (document.payload_hash, job.id)
             return IngestResult(job=job, replayed=False)
 
@@ -456,9 +480,7 @@ class MemoryNewsRepository:
         limit: int,
     ) -> list[NewsRecord]:
         records = (
-            item
-            for item in self._news.values()
-            if source_id is None or item.source_id == source_id
+            item for item in self._news.values() if source_id is None or item.source_id == source_id
         )
         return sorted(
             records,
@@ -486,6 +508,19 @@ class MemoryNewsRepository:
 
     async def get_signal(self, signal_id: str) -> SignalRecord | None:
         return self._signals.get(signal_id)
+
+    async def list_telegram_sources(self) -> list[TelegramSourceRecord]:
+        return sorted(
+            self._telegram_sources.values(),
+            key=lambda source: (source.created_at, source.source_id),
+        )
+
+    async def upsert_telegram_source(
+        self,
+        source: TelegramSourceRecord,
+    ) -> TelegramSourceRecord:
+        self._telegram_sources[source.source_id] = source
+        return source
 
 
 class YdbNewsRepository:
@@ -563,11 +598,7 @@ class YdbNewsRepository:
             generate_signals=generate_signals,
         )
         processed = process_document(document, features, now=now)
-        result_ref = (
-            processed.signals[0].id
-            if processed.signals
-            else processed.feature_set_id
-        )
+        result_ref = processed.signals[0].id if processed.signals else processed.feature_set_id
         job = Job(
             id=job_id,
             kind="news_ingestion",
@@ -606,9 +637,7 @@ class YdbNewsRepository:
                 "$news_id": processed.news_id,
                 "$source_id": document.source_id,
                 "$external_id": document.external_id,
-                "$published_at": ydb.TypedValue(
-                    document.published_at, ydb.PrimitiveType.Timestamp
-                ),
+                "$published_at": ydb.TypedValue(document.published_at, ydb.PrimitiveType.Timestamp),
                 "$received_at": ydb.TypedValue(document.received_at, ydb.PrimitiveType.Timestamp),
                 "$title": document.title,
                 "$url": document.url,
@@ -683,14 +712,10 @@ class YdbNewsRepository:
         source_id: str | None,
         limit: int,
     ) -> list[NewsRecord]:
-        result_sets = await self._require_pool().execute_with_retries(
-            SELECT_NEWS_QUERY
-        )
+        result_sets = await self._require_pool().execute_with_retries(SELECT_NEWS_QUERY)
         rows = result_sets[0].rows if result_sets else []
         records = (
-            news_from_row(row)
-            for row in rows
-            if source_id is None or row.source_id == source_id
+            news_from_row(row) for row in rows if source_id is None or row.source_id == source_id
         )
         return list(records)[:limit]
 
@@ -703,9 +728,7 @@ class YdbNewsRepository:
         min_confidence: float | None,
         limit: int,
     ) -> list[SignalRecord]:
-        result_sets = await self._require_pool().execute_with_retries(
-            SELECT_SIGNALS_QUERY
-        )
+        result_sets = await self._require_pool().execute_with_retries(SELECT_SIGNALS_QUERY)
         rows = result_sets[0].rows if result_sets else []
         return filter_signals(
             [signal_from_row(row) for row in rows],
@@ -724,6 +747,30 @@ class YdbNewsRepository:
         if not result_sets or not result_sets[0].rows:
             return None
         return signal_from_row(result_sets[0].rows[0])
+
+    async def list_telegram_sources(self) -> list[TelegramSourceRecord]:
+        result_sets = await self._require_pool().execute_with_retries(SELECT_TELEGRAM_SOURCES_QUERY)
+        rows = result_sets[0].rows if result_sets else []
+        return [telegram_source_from_row(row) for row in rows]
+
+    async def upsert_telegram_source(
+        self,
+        source: TelegramSourceRecord,
+    ) -> TelegramSourceRecord:
+        await self._require_pool().execute_with_retries(
+            UPSERT_TELEGRAM_SOURCE_QUERY,
+            {
+                "$source_id": source.source_id,
+                "$channel": source.channel,
+                "$display_name": source.display_name,
+                "$enabled": source.enabled,
+                "$created_at": ydb.TypedValue(
+                    source.created_at,
+                    ydb.PrimitiveType.Timestamp,
+                ),
+            },
+        )
+        return source
 
     def _require_pool(self) -> ydb.aio.QuerySessionPool:
         if self._pool is None:
@@ -750,15 +797,11 @@ def signal_parameters(signal: SignalRecord) -> dict[str, object]:
         "$news_id": signal.news_id,
         "$ticker": signal.ticker,
         "$as_of": ydb.TypedValue(signal.as_of, ydb.PrimitiveType.Timestamp),
-        "$data_cutoff_at": ydb.TypedValue(
-            signal.data_cutoff_at, ydb.PrimitiveType.Timestamp
-        ),
+        "$data_cutoff_at": ydb.TypedValue(signal.data_cutoff_at, ydb.PrimitiveType.Timestamp),
         "$status": signal.status,
         "$direction": signal.direction,
         "$action": signal.action,
-        "$horizon_value": ydb.TypedValue(
-            signal.horizon_value, ydb.PrimitiveType.Uint32
-        ),
+        "$horizon_value": ydb.TypedValue(signal.horizon_value, ydb.PrimitiveType.Uint32),
         "$horizon_unit": signal.horizon_unit,
         "$score": signal.score,
         "$strength": signal.strength,
@@ -778,9 +821,7 @@ def signal_parameters(signal: SignalRecord) -> dict[str, object]:
             ydb.PrimitiveType.Json,
         ),
         "$model_version": signal.model_version,
-        "$config_version": ydb.TypedValue(
-            signal.config_version, ydb.PrimitiveType.Uint32
-        ),
+        "$config_version": ydb.TypedValue(signal.config_version, ydb.PrimitiveType.Uint32),
         "$created_at": ydb.TypedValue(signal.created_at, ydb.PrimitiveType.Timestamp),
     }
 
@@ -842,11 +883,19 @@ def signal_from_row(row: object) -> SignalRecord:
         factor_contributions=tuple(dict(item) for item in contributions),
         evidence_refs=tuple(str(item) for item in json_list(row.evidence_refs)),
         expires_at=ensure_utc(row.expires_at),
-        invalidation_conditions=tuple(
-            str(item) for item in json_list(row.invalidation_conditions)
-        ),
+        invalidation_conditions=tuple(str(item) for item in json_list(row.invalidation_conditions)),
         model_version=row.model_version,
         config_version=row.config_version,
+        created_at=ensure_utc(row.created_at),
+    )
+
+
+def telegram_source_from_row(row: object) -> TelegramSourceRecord:
+    return TelegramSourceRecord(
+        source_id=row.source_id,
+        channel=row.channel,
+        display_name=row.display_name,
+        enabled=row.enabled,
         created_at=ensure_utc(row.created_at),
     )
 
@@ -928,6 +977,16 @@ SCHEMA_STATEMENTS = (
         PRIMARY KEY (`idempotency_key`)
     );
     """,
+    """
+    CREATE TABLE IF NOT EXISTS `telegram_sources` (
+        `source_id` Utf8 NOT NULL,
+        `channel` Utf8 NOT NULL,
+        `display_name` Utf8 NOT NULL,
+        `enabled` Bool NOT NULL,
+        `created_at` Timestamp NOT NULL,
+        PRIMARY KEY (`source_id`)
+    );
+    """,
 )
 
 SCHEMA_TABLE_NAMES = (
@@ -936,6 +995,7 @@ SCHEMA_TABLE_NAMES = (
     "signals",
     "jobs",
     "ingestion_requests",
+    "telegram_sources",
 )
 
 SCHEMA_RATE_LIMIT_MESSAGE = "Request exceeded a limit on the number of schema operations"
@@ -964,9 +1024,7 @@ async def migrate_ydb_schema(
     try:
         await driver.wait(timeout=15, fail_fast=True)
         directory = await driver.scheme_client.list_directory(database)
-        existing_tables = {
-            entry.name for entry in directory.children if entry.is_any_table()
-        }
+        existing_tables = {entry.name for entry in directory.children if entry.is_any_table()}
         missing_statements = [
             (table_name, statement)
             for table_name, statement in zip(
@@ -1015,13 +1073,13 @@ async def _execute_schema_statement_with_backoff(
                 raise
             delay = float(2 ** (attempt - 1))
             LOGGER.warning(
-                "YDB schema operation was rate-limited; retrying in %.0f seconds "
-                "(attempt %d/%d)",
+                "YDB schema operation was rate-limited; retrying in %.0f seconds (attempt %d/%d)",
                 delay,
                 attempt + 1,
                 max_attempts,
             )
             await sleep(delay)
+
 
 SELECT_REQUEST_QUERY = """
 DECLARE $idempotency_key AS Utf8;
@@ -1204,6 +1262,26 @@ FROM `signals`
 WHERE signal_id = $signal_id;
 """
 
+SELECT_TELEGRAM_SOURCES_QUERY = """
+SELECT source_id, channel, display_name, enabled, created_at
+FROM `telegram_sources`
+ORDER BY created_at ASC, source_id ASC;
+"""
+
+UPSERT_TELEGRAM_SOURCE_QUERY = """
+DECLARE $source_id AS Utf8;
+DECLARE $channel AS Utf8;
+DECLARE $display_name AS Utf8;
+DECLARE $enabled AS Bool;
+DECLARE $created_at AS Timestamp;
+
+UPSERT INTO `telegram_sources` (
+    source_id, channel, display_name, enabled, created_at
+) VALUES (
+    $source_id, $channel, $display_name, $enabled, $created_at
+);
+"""
+
 VALIDATED_QUERIES = (
     SELECT_REQUEST_QUERY,
     INSERT_REQUEST_QUERY,
@@ -1213,4 +1291,6 @@ VALIDATED_QUERIES = (
     SELECT_NEWS_QUERY,
     SELECT_SIGNALS_QUERY,
     SELECT_SIGNAL_QUERY,
+    SELECT_TELEGRAM_SOURCES_QUERY,
+    UPSERT_TELEGRAM_SOURCE_QUERY,
 )

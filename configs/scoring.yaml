@@ -13,3 +13,7 @@ source_quality:
   market_news: 0.74
   telegram_ak47pfl: 0.68
   telegram_markettwits: 0.68
+  telegram_centralbank_russia: 0.95
+  telegram_moscowexchangeofficial: 0.95
+  telegram_bcs_express: 0.82
+  telegram_russianmacro: 0.78
