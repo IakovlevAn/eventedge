@@ -178,6 +178,11 @@ paths:
           in: query
           schema:
             type: string
+        - name: scope
+          in: query
+          schema:
+            type: string
+            enum: [market, sector, company]
         - name: limit
           in: query
           schema:
@@ -187,6 +192,64 @@ paths:
           description: News list with related signals.
         '400':
           description: Invalid request.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /v1/events:
+    get:
+      operationId: listMarketEvents
+      parameters:
+        - name: scope
+          in: query
+          schema:
+            type: string
+            enum: [market, sector, company]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Aggregated market, sector and company events.
+        '400':
+          description: Invalid request.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /v1/sources:
+    get:
+      operationId: listSources
+      responses:
+        '200':
+          description: Live RSS and Telegram source registry.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /v1/sources/telegram:
+    post:
+      operationId: createTelegramSource
+      parameters:
+        - name: X-EventEdge-Admin-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '201':
+          description: Telegram source added.
+        '401':
+          description: Invalid admin key.
+        '409':
+          description: Duplicate source or budget limit reached.
       x-yc-apigateway-integration:
         type: serverless_containers
         container_id: __API_CONTAINER_ID__

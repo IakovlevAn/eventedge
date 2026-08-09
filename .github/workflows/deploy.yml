@@ -172,12 +172,38 @@ jobs:
             if [[ "${attempt}" == "6" ]]; then exit 1; fi
             sleep 5
           done
-          curl --fail --silent --show-error \
-            --max-time 45 \
-            "${EVENTEDGE_API_URL}/v1/evals/export?format=csv&dataset=outcomes" \
-            --output /tmp/eventedge-evals.csv
-          grep -q 'signal_id,ticker,signal_as_of' /tmp/eventedge-evals.csv
+          for attempt in {1..6}; do
+            if curl --fail --silent --show-error \
+              --max-time 45 \
+              "${EVENTEDGE_API_URL}/v1/evals/export?format=csv&dataset=outcomes" \
+              --output /tmp/eventedge-evals.csv \
+              && grep -q 'signal_id,ticker,signal_as_of' /tmp/eventedge-evals.csv; then
+              break
+            fi
+            if [[ "${attempt}" == "6" ]]; then exit 1; fi
+            sleep 5
+          done
           echo "Production assessment, eval and export routes are ready"
+
+      - name: Smoke test source registry and market events
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in {1..6}; do
+            if curl --fail --silent --show-error \
+              --max-time 30 \
+              "${EVENTEDGE_API_URL}/v1/sources" \
+              | jq -e '.meta.telegram_limit == 12 and (.data | length) > 0' >/dev/null \
+              && curl --fail --silent --show-error \
+                --max-time 30 \
+                "${EVENTEDGE_API_URL}/v1/events?limit=1" \
+              | jq -e '.meta.limit == 1 and has("data")' >/dev/null; then
+              break
+            fi
+            if [[ "${attempt}" == "6" ]]; then exit 1; fi
+            sleep 5
+          done
+          echo "Production source registry and market-event routes are ready"
 
       - name: Smoke test web application
         shell: bash
