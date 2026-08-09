@@ -133,6 +133,33 @@ paths:
         type: serverless_containers
         container_id: __API_CONTAINER_ID__
         service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /v1/assessments:
+    get:
+      operationId: listAssessments
+      parameters:
+        - name: tickers
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Live hybrid and quant assessments for MOEX equities.
+        '400':
+          description: Invalid tickers.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /v1/evals:
+    get:
+      operationId: listEvals
+      responses:
+        '200':
+          description: Signal outcomes, evaluation metrics and demo account.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
   /v1/news:
     get:
       operationId: listNews

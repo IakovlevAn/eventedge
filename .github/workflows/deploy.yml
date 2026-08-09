@@ -128,6 +128,20 @@ jobs:
             | jq -e '.meta.requested == 1 and .meta.returned == 1' >/dev/null
           echo "Production batch market route is ready"
 
+      - name: Smoke test assessments and evals
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            --max-time 30 \
+            "${EVENTEDGE_API_URL}/v1/assessments?tickers=SBER,LKOH" \
+            | jq -e '.meta.requested == 2 and .meta.returned == 2' >/dev/null
+          curl --fail --silent --show-error \
+            --max-time 30 \
+            "${EVENTEDGE_API_URL}/v1/evals" \
+            | jq -e '.data | has("summary") and has("demo_account") and has("outcomes")' >/dev/null
+          echo "Production assessment and eval routes are ready"
+
       - name: Smoke test web application
         shell: bash
         run: |
