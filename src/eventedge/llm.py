@@ -80,7 +80,7 @@ class MetadataIamTokenProvider:
 class YandexGptNewsAnalyzer:
     """Semantic extractor with deterministic ticker prefilter and safe rule fallback."""
 
-    version = "yandexgpt-lite-0.1.0"
+    version = "yandexgpt-lite-0.2.0"
 
     def __init__(
         self,
@@ -117,17 +117,30 @@ class YandexGptNewsAnalyzer:
             return baseline.model_copy(
                 update={"extractor_version": "rules-fallback-0.1.0"}
             )
+        polarity = self._reconcile_polarity(payload.polarity, baseline.polarity)
         return SemanticFeatures(
             extractor_version=self.version,
             event_type=payload.event_type,
             instruments=baseline.instruments,
             facts=payload.facts,
-            polarity=payload.polarity,
+            polarity=polarity,
             materiality=payload.materiality,
             novelty=1.0,
             temporal_status=payload.temporal_status,
             rationale=payload.rationale,
         )
+
+    @staticmethod
+    def _reconcile_polarity(llm_polarity: float, rule_polarity: float) -> float:
+        """Prevent a confident text contradiction from becoming a one-sided signal."""
+        if rule_polarity == 0:
+            return llm_polarity
+        blended = 0.7 * llm_polarity + 0.3 * rule_polarity
+        if llm_polarity * rule_polarity < 0 and abs(rule_polarity) >= 0.5:
+            if abs(llm_polarity) >= 0.5:
+                return 0.0
+            return min(0.0, blended) if rule_polarity < 0 else max(0.0, blended)
+        return round(max(-1.0, min(1.0, blended)), 4)
 
     def _extract_sync(
         self,

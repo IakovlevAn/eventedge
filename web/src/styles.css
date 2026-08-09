@@ -5077,3 +5077,118 @@ button.chart-event-detail.is-active {
   .eval-export-note { grid-template-columns: 22px minmax(0, 1fr); }
   .eval-export-note a { grid-column: 2; justify-self: start; }
 }
+
+/* Signal epochs, exact event time and resilient company layout. */
+.signal-card-status {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+}
+
+.signal-card-status time {
+  color: #626a75;
+  font-size: 7px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.company-canvas,
+.chart-card,
+.price-chart-shell,
+.chart-visual,
+.chart-event-cluster,
+.chart-event-detail,
+.chart-event-detail > div {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.price-chart-shell,
+.chart-event-cluster,
+.chart-event-detail {
+  overflow: hidden;
+}
+
+.chart-event-detail strong {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  text-overflow: clip;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.chart-event-detail__open { flex: none; }
+
+.chart-event-guide { pointer-events: none; }
+.chart-event-guide line {
+  stroke: rgba(232, 235, 241, 0.68);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+}
+.chart-event-guide rect {
+  fill: #e5e7eb;
+  stroke: #0b0d11;
+  stroke-width: 1;
+}
+.chart-event-guide text {
+  fill: #101216;
+  font-size: 8px;
+  font-weight: 720;
+  font-variant-numeric: tabular-nums;
+}
+
+.company-mark[data-ticker="SIBN"] img,
+.company-mark[data-ticker="TATN"] img {
+  padding: 5px;
+  object-position: center;
+  transform: none;
+}
+
+.company-mark img {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.eval-model-select {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 3px 9px;
+  padding: 10px 12px;
+  border: 1px solid #30353e;
+  border-radius: 9px;
+  background: #111318;
+}
+
+.eval-model-select > span {
+  grid-column: 1 / -1;
+  color: #626a75;
+  font-size: 7px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.eval-model-select select {
+  min-width: 0;
+  color: #d7dbe1;
+  font: inherit;
+  font-size: 9px;
+  appearance: none;
+  border: 0;
+  outline: 0;
+  background: transparent;
+}
+
+.eval-model-select svg { color: #747c88; pointer-events: none; }
+.outcomes-table { min-width: 1020px; }
+
+@media (max-width: 720px) {
+  .signal-card-status { align-items: flex-end; }
+  .chart-event-detail__open { margin-left: 21px; }
+}

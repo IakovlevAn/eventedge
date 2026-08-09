@@ -184,6 +184,28 @@ class TelegramSourceRecord:
         }
 
 
+@dataclass(frozen=True)
+class EvaluationEpochRecord:
+    epoch_id: str
+    model_version: str
+    config_version: int
+    evaluated_at: datetime
+    outcomes: tuple[dict[str, object], ...]
+    observations: tuple[dict[str, object], ...]
+    observations_truncated: bool = False
+
+    def as_meta_dict(self) -> dict[str, object]:
+        return {
+            "epoch_id": self.epoch_id,
+            "model_version": self.model_version,
+            "config_version": self.config_version,
+            "evaluated_at": to_rfc3339(self.evaluated_at),
+            "signals": len(self.outcomes),
+            "observations": len(self.observations),
+            "observations_truncated": self.observations_truncated,
+        }
+
+
 class NewsRepository(Protocol):
     async def start(self) -> None: ...
 
@@ -226,6 +248,13 @@ class NewsRepository(Protocol):
         self,
         source: TelegramSourceRecord,
     ) -> TelegramSourceRecord: ...
+
+    async def upsert_evaluation_epoch(
+        self,
+        epoch: EvaluationEpochRecord,
+    ) -> EvaluationEpochRecord: ...
+
+    async def list_evaluation_epochs(self) -> list[EvaluationEpochRecord]: ...
 
 
 def utc_now() -> datetime:
@@ -434,6 +463,7 @@ class MemoryNewsRepository:
         self._news: dict[str, NewsRecord] = {}
         self._signals: dict[str, SignalRecord] = {}
         self._telegram_sources: dict[str, TelegramSourceRecord] = {}
+        self._evaluation_epochs: dict[str, EvaluationEpochRecord] = {}
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
@@ -547,6 +577,20 @@ class MemoryNewsRepository:
     ) -> TelegramSourceRecord:
         self._telegram_sources[source.source_id] = source
         return source
+
+    async def upsert_evaluation_epoch(
+        self,
+        epoch: EvaluationEpochRecord,
+    ) -> EvaluationEpochRecord:
+        self._evaluation_epochs[epoch.epoch_id] = epoch
+        return epoch
+
+    async def list_evaluation_epochs(self) -> list[EvaluationEpochRecord]:
+        return sorted(
+            self._evaluation_epochs.values(),
+            key=lambda epoch: (epoch.evaluated_at, epoch.epoch_id),
+            reverse=True,
+        )
 
 
 class YdbNewsRepository:
@@ -805,6 +849,23 @@ class YdbNewsRepository:
         )
         return source
 
+    async def upsert_evaluation_epoch(
+        self,
+        epoch: EvaluationEpochRecord,
+    ) -> EvaluationEpochRecord:
+        await self._require_pool().execute_with_retries(
+            UPSERT_EVALUATION_EPOCH_QUERY,
+            evaluation_epoch_parameters(epoch),
+        )
+        return epoch
+
+    async def list_evaluation_epochs(self) -> list[EvaluationEpochRecord]:
+        result_sets = await self._require_pool().execute_with_retries(
+            SELECT_EVALUATION_EPOCHS_QUERY,
+        )
+        rows = result_sets[0].rows if result_sets else []
+        return [evaluation_epoch_from_row(row) for row in rows]
+
     def _require_pool(self) -> ydb.aio.QuerySessionPool:
         if self._pool is None:
             raise RuntimeError("YDB repository has not been started")
@@ -934,6 +995,36 @@ def telegram_source_from_row(row: object) -> TelegramSourceRecord:
     )
 
 
+def evaluation_epoch_parameters(epoch: EvaluationEpochRecord) -> dict[str, object]:
+    return {
+        "$epoch_id": epoch.epoch_id,
+        "$model_version": epoch.model_version,
+        "$config_version": ydb.TypedValue(epoch.config_version, ydb.PrimitiveType.Uint32),
+        "$evaluated_at": ydb.TypedValue(epoch.evaluated_at, ydb.PrimitiveType.Timestamp),
+        "$outcomes": ydb.TypedValue(
+            json.dumps(epoch.outcomes, ensure_ascii=False),
+            ydb.PrimitiveType.Json,
+        ),
+        "$observations": ydb.TypedValue(
+            json.dumps(epoch.observations, ensure_ascii=False),
+            ydb.PrimitiveType.Json,
+        ),
+        "$observations_truncated": epoch.observations_truncated,
+    }
+
+
+def evaluation_epoch_from_row(row: object) -> EvaluationEpochRecord:
+    return EvaluationEpochRecord(
+        epoch_id=row.epoch_id,
+        model_version=row.model_version,
+        config_version=row.config_version,
+        evaluated_at=ensure_utc(row.evaluated_at),
+        outcomes=tuple(dict(item) for item in json_list(row.outcomes)),
+        observations=tuple(dict(item) for item in json_list(row.observations)),
+        observations_truncated=row.observations_truncated,
+    )
+
+
 SCHEMA_STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS `news_items` (
@@ -1028,6 +1119,18 @@ SCHEMA_STATEMENTS = (
         PRIMARY KEY (`source_id`)
     );
     """,
+    """
+    CREATE TABLE IF NOT EXISTS `evaluation_epochs` (
+        `epoch_id` Utf8 NOT NULL,
+        `model_version` Utf8 NOT NULL,
+        `config_version` Uint32 NOT NULL,
+        `evaluated_at` Timestamp NOT NULL,
+        `outcomes` Json NOT NULL,
+        `observations` Json NOT NULL,
+        `observations_truncated` Bool NOT NULL,
+        PRIMARY KEY (`epoch_id`)
+    );
+    """,
 )
 
 SCHEMA_TABLE_NAMES = (
@@ -1038,6 +1141,7 @@ SCHEMA_TABLE_NAMES = (
     "ingestion_requests",
     "telegram_sources",
     "telegram_source_metadata",
+    "evaluation_epochs",
 )
 
 SCHEMA_RATE_LIMIT_MESSAGE = "Request exceeded a limit on the number of schema operations"
@@ -1343,6 +1447,47 @@ UPSERT INTO `telegram_source_metadata` (
 );
 """
 
+SELECT_EVALUATION_EPOCHS_QUERY = """
+SELECT
+    epoch_id,
+    model_version,
+    config_version,
+    evaluated_at,
+    outcomes,
+    observations,
+    observations_truncated
+FROM `evaluation_epochs`
+ORDER BY evaluated_at DESC, epoch_id DESC;
+"""
+
+UPSERT_EVALUATION_EPOCH_QUERY = """
+DECLARE $epoch_id AS Utf8;
+DECLARE $model_version AS Utf8;
+DECLARE $config_version AS Uint32;
+DECLARE $evaluated_at AS Timestamp;
+DECLARE $outcomes AS Json;
+DECLARE $observations AS Json;
+DECLARE $observations_truncated AS Bool;
+
+UPSERT INTO `evaluation_epochs` (
+    epoch_id,
+    model_version,
+    config_version,
+    evaluated_at,
+    outcomes,
+    observations,
+    observations_truncated
+) VALUES (
+    $epoch_id,
+    $model_version,
+    $config_version,
+    $evaluated_at,
+    $outcomes,
+    $observations,
+    $observations_truncated
+);
+"""
+
 VALIDATED_QUERIES = (
     SELECT_REQUEST_QUERY,
     INSERT_REQUEST_QUERY,
@@ -1355,4 +1500,6 @@ VALIDATED_QUERIES = (
     SELECT_TELEGRAM_SOURCES_QUERY,
     UPSERT_TELEGRAM_SOURCE_QUERY,
     UPSERT_TELEGRAM_SOURCE_METADATA_QUERY,
+    SELECT_EVALUATION_EPOCHS_QUERY,
+    UPSERT_EVALUATION_EPOCH_QUERY,
 )

@@ -32,21 +32,21 @@ def build_payload(environment: Mapping[str, str]) -> dict[str, object]:
         "containerId": environment["YC_CONTAINER_ID"],
         "description": f"GitHub {environment['DEPLOY_SHA']}",
         "resources": {
-            "memory": "536870912",
+            "memory": "1073741824",
             "cores": "1",
             "coreFraction": "100",
         },
-        "executionTimeout": "60s",
+        "executionTimeout": "180s",
         "serviceAccountId": environment["YC_RUNTIME_SERVICE_ACCOUNT_ID"],
         "imageSpec": {
             "imageUrl": environment["IMAGE_URL"],
             "environment": runtime_environment,
         },
         "concurrency": "2",
-        "provisionPolicy": {"minInstances": "0"},
+        "provisionPolicy": {"minInstances": "1"},
         "scalingPolicy": {
-            "zoneInstancesLimit": "1",
-            "zoneRequestsLimit": "50",
+            "zoneInstancesLimit": "2",
+            "zoneRequestsLimit": "20",
         },
         "runtime": {"http": {}},
     }

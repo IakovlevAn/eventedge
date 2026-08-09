@@ -19,16 +19,16 @@ def test_deployment_payload_has_budget_caps() -> None:
     )
 
     assert payload["resources"] == {
-        "memory": "536870912",
+        "memory": "1073741824",
         "cores": "1",
         "coreFraction": "100",
     }
     assert payload["concurrency"] == "2"
-    assert payload["provisionPolicy"] == {"minInstances": "0"}
-    assert payload["executionTimeout"] == "60s"
+    assert payload["provisionPolicy"] == {"minInstances": "1"}
+    assert payload["executionTimeout"] == "180s"
     assert payload["scalingPolicy"] == {
-        "zoneInstancesLimit": "1",
-        "zoneRequestsLimit": "50",
+        "zoneInstancesLimit": "2",
+        "zoneRequestsLimit": "20",
     }
     assert payload["runtime"] == {"http": {}}
     assert payload["imageSpec"]["environment"] == {
@@ -69,17 +69,18 @@ def test_budget_policy_matches_deployment_caps() -> None:
 
     assert policy["currency"] == "RUB"
     assert policy["monthly_budget"] == 10_000
-    assert policy["notifications"]["thresholds_percent"] == [50, 80, 95]
+    assert policy["monthly_soft_cap"] == 8_500
+    assert policy["notifications"]["thresholds_percent"] == [25, 50, 70, 85, 95]
     assert policy["enforcement"] == {
         "billing_budget": "notification_only",
         "automatic_shutdown": False,
     }
     assert runtime == {
-        "memory_mb": 512,
+        "memory_mb": 1024,
         "cores": 1,
         "concurrency": 2,
-        "min_instances": 0,
-        "zone_instances_limit": 1,
-        "zone_requests_limit": 50,
-        "execution_timeout_seconds": 60,
+        "min_instances": 1,
+        "zone_instances_limit": 2,
+        "zone_requests_limit": 20,
+        "execution_timeout_seconds": 180,
     }

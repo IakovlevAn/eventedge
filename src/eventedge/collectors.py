@@ -515,6 +515,18 @@ MARKET_NOISE_TITLE_MARKERS = (
     "инвестиционный кейс",
     "идея в профите",
     "спекулятивн",
+    "выделяем акции",
+    "привлекательны для инвесторов",
+    "повысили целев",
+    "повысил целев",
+    "снизили целев",
+    "целевую цену",
+    "таргет по акци",
+    "рейтинг «покупать»",
+    "рейтинг покупать",
+    "рекомендуем покупать",
+    "наш выбор",
+    "топ акци",
     "арене",
     "арена",
     "футбол",
@@ -598,8 +610,8 @@ def is_market_signal_candidate(item: RssItem) -> bool:
     """
     if not is_moex_equity_title(item.title):
         return False
-    normalized_title = item.title.casefold()
-    if any(marker in normalized_title for marker in MARKET_NOISE_TITLE_MARKERS):
+    normalized_context = f"{item.title} {item.content[:1200]}".casefold()
+    if any(marker in normalized_context for marker in MARKET_NOISE_TITLE_MARKERS):
         return False
     features = RuleBasedNewsExtractor().extract(
         NewsAnalysisInput(

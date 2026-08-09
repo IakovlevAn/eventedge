@@ -161,14 +161,15 @@ def test_eval_analytics_and_exports_preserve_signal_outcomes() -> None:
         {"news_report": reporting_news()},
     )
 
-    assert outcome["returns"] == {"1h": 1.0, "1d": 3.0, "3d": 6.0}
+    assert outcome["returns"] == {"1h": 1.0, "4h": 3.0, "1d": 3.0, "3d": 6.0}
     assert outcome["verdict"] is True
     assert summary["hit_rate_pct"] == 100.0
-    assert summary["median_signed_return_pct"] == 6.0
+    assert summary["median_signed_return_pct"] == 3.0
     assert breakdowns["by_horizon"][0]["hit_rate_pct"] == 100.0
     assert relationships[0]["value"] is None
     assert quality_series[-1]["cumulative_hit_rate_pct"] == 100.0
     assert outcome_rows[0]["return_3d_pct"] == 6.0
+    assert outcome_rows[0]["return_4h_pct"] == 3.0
     assert timeseries_rows[-1]["offset_minutes"] == 3 * 24 * 60
     assert timeseries_rows[-1]["signed_return_pct"] == 6.0
     assert truncated is False
@@ -278,3 +279,11 @@ def test_eval_counts_one_market_event_and_prefers_latest_model() -> None:
     )
 
     assert [signal.id for signal in result] == ["sig_current_first"]
+
+    epoch_result = deduplicate_eval_events(
+        [old_model, current_model_corroboration, current_model_first],
+        {first_news.id: first_news, corroborating_news.id: corroborating_news},
+        preserve_model_epochs=True,
+    )
+
+    assert {signal.id for signal in epoch_result} == {"sig_old", "sig_current_first"}

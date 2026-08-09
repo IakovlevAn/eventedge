@@ -11,6 +11,7 @@ from eventedge.storage import (
     SCHEMA_STATEMENTS,
     SCHEMA_TABLE_NAMES,
     VALIDATED_QUERIES,
+    EvaluationEpochRecord,
     MemoryNewsRepository,
     NewsDocument,
     NewsRecord,
@@ -22,6 +23,40 @@ from eventedge.storage import (
     signal_from_row,
     stable_id,
 )
+
+
+def test_evaluation_epochs_are_kept_independently_by_model() -> None:
+    async def scenario() -> None:
+        repository = MemoryNewsRepository()
+        evaluated_at = datetime(2026, 8, 10, 12, tzinfo=UTC)
+        old = EvaluationEpochRecord(
+            epoch_id="eval_old",
+            model_version="news-baseline-0.2.0",
+            config_version=1,
+            evaluated_at=evaluated_at,
+            outcomes=({"signal_id": "sig_old"},),
+            observations=({"signal_id": "sig_old", "offset_minutes": 60},),
+        )
+        current = EvaluationEpochRecord(
+            epoch_id="eval_current",
+            model_version="news-baseline-0.3.0",
+            config_version=1,
+            evaluated_at=evaluated_at,
+            outcomes=({"signal_id": "sig_current"},),
+            observations=({"signal_id": "sig_current", "offset_minutes": 60},),
+        )
+
+        await repository.upsert_evaluation_epoch(old)
+        await repository.upsert_evaluation_epoch(current)
+        epochs = await repository.list_evaluation_epochs()
+
+        assert {epoch.model_version for epoch in epochs} == {
+            "news-baseline-0.2.0",
+            "news-baseline-0.3.0",
+        }
+        assert sum(len(epoch.observations) for epoch in epochs) == 2
+
+    asyncio.run(scenario())
 
 
 def test_legacy_signal_copies_are_collapsed() -> None:
