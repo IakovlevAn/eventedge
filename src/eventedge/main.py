@@ -34,6 +34,7 @@ from eventedge.collectors import (
 from eventedge.evals import (
     ASSESSMENT_MODEL_VERSION,
     build_assessment,
+    deduplicate_eval_signals,
     eval_breakdowns,
     eval_quality_series,
     eval_relationships,
@@ -770,7 +771,7 @@ async def _load_evaluation_material(
     news_by_id = {item.id: item for item in public_news(stored_news)}
     signals = [
         signal
-        for signal in deduplicate_signals(stored_signals)
+        for signal in deduplicate_eval_signals(deduplicate_signals(stored_signals))
         if signal.news_id in news_by_id
     ][:100]
     tickers = list(dict.fromkeys(signal.ticker for signal in signals))

@@ -422,6 +422,31 @@ def _verdict(direction: object, value: float | None) -> bool | None:
     return None
 
 
+def deduplicate_eval_signals(signals: Iterable[SignalRecord]) -> list[SignalRecord]:
+    """Count one trading decision once when several publications confirm it."""
+    unique: dict[tuple[object, ...], SignalRecord] = {}
+    for signal in signals:
+        key = (
+            signal.ticker,
+            signal.as_of,
+            signal.direction,
+            signal.action,
+            signal.horizon_value,
+            signal.horizon_unit,
+            signal.score,
+            signal.confidence,
+            signal.model_version,
+            signal.config_version,
+        )
+        previous = unique.get(key)
+        if previous is None or (signal.created_at, signal.id) > (
+            previous.created_at,
+            previous.id,
+        ):
+            unique[key] = signal
+    return sorted(unique.values(), key=lambda signal: (signal.as_of, signal.id), reverse=True)
+
+
 def _metric_slice(
     items: list[dict[str, object]],
     *,
