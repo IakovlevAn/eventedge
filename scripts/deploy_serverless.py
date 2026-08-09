@@ -16,10 +16,17 @@ OPERATION_URL = "https://operation.api.cloud.yandex.net/operations/{}"
 SECRET_PATTERN = re.compile(r"(?:y[01]_|t[01]_|AQAD-)[A-Za-z0-9_-]+")
 
 
-def build_payload(environment: Mapping[str, str]) -> dict[str, object]:
+def build_payload(
+    environment: Mapping[str, str],
+    *,
+    component: str = "api",
+) -> dict[str, object]:
+    if component not in {"api", "worker"}:
+        raise ValueError(f"Unsupported EventEdge component: {component}")
     runtime_environment = {
         "APP_ENV": "prod",
         "APP_REVISION": environment["DEPLOY_SHA"],
+        "EVENTEDGE_COMPONENT": component,
         "YDB_ENDPOINT": environment["YDB_ENDPOINT"],
         "YDB_DATABASE": environment["YDB_DATABASE"],
         "YANDEX_GPT_ENABLED": "true",
@@ -28,9 +35,14 @@ def build_payload(environment: Mapping[str, str]) -> dict[str, object]:
     }
     if admin_key := environment.get("EVENTEDGE_ADMIN_KEY"):
         runtime_environment["EVENTEDGE_ADMIN_KEY"] = admin_key
+    is_worker = component == "worker"
     return {
-        "containerId": environment["YC_CONTAINER_ID"],
-        "description": f"GitHub {environment['DEPLOY_SHA']}",
+        "containerId": (
+            environment["YC_WORKER_CONTAINER_ID"]
+            if is_worker
+            else environment["YC_CONTAINER_ID"]
+        ),
+        "description": f"GitHub {environment['DEPLOY_SHA']} ({component})",
         "resources": {
             "memory": "1073741824",
             "cores": "1",
@@ -42,11 +54,11 @@ def build_payload(environment: Mapping[str, str]) -> dict[str, object]:
             "imageUrl": environment["IMAGE_URL"],
             "environment": runtime_environment,
         },
-        "concurrency": "8",
-        "provisionPolicy": {"minInstances": "1"},
+        "concurrency": "1" if is_worker else "8",
+        "provisionPolicy": {"minInstances": "0" if is_worker else "1"},
         "scalingPolicy": {
-            "zoneInstancesLimit": "3",
-            "zoneRequestsLimit": "24",
+            "zoneInstancesLimit": "2" if is_worker else "3",
+            "zoneRequestsLimit": "2" if is_worker else "24",
         },
         "runtime": {"http": {}},
     }
@@ -99,13 +111,14 @@ def wait_for_operation(operation: dict[str, object], *, token: str) -> None:
 
 def main() -> None:
     token = os.environ["IAM_TOKEN"]
-    operation = request_json(
-        DEPLOY_URL,
-        token=token,
-        method="POST",
-        payload=build_payload(os.environ),
-    )
-    wait_for_operation(operation, token=token)
+    for component in ("api", "worker"):
+        operation = request_json(
+            DEPLOY_URL,
+            token=token,
+            method="POST",
+            payload=build_payload(os.environ, component=component),
+        )
+        wait_for_operation(operation, token=token)
 
 
 if __name__ == "__main__":

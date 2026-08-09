@@ -9,6 +9,7 @@ def test_deployment_payload_has_budget_caps() -> None:
     payload = build_payload(
         {
             "YC_CONTAINER_ID": "container-id",
+            "YC_WORKER_CONTAINER_ID": "worker-container-id",
             "YC_RUNTIME_SERVICE_ACCOUNT_ID": "runtime-sa-id",
             "YC_FOLDER_ID": "folder-id",
             "IMAGE_URL": "cr.yandex/registry/eventedge-api:sha",
@@ -34,6 +35,7 @@ def test_deployment_payload_has_budget_caps() -> None:
     assert payload["imageSpec"]["environment"] == {
         "APP_ENV": "prod",
         "APP_REVISION": "abc123",
+        "EVENTEDGE_COMPONENT": "api",
         "YDB_ENDPOINT": "grpcs://ydb.example:2135",
         "YDB_DATABASE": "/region/cloud/database",
         "YANDEX_GPT_ENABLED": "true",
@@ -49,6 +51,7 @@ def test_api_error_masker_hides_tokens() -> None:
 def test_admin_key_is_forwarded_only_when_configured() -> None:
     environment = {
         "YC_CONTAINER_ID": "container-id",
+        "YC_WORKER_CONTAINER_ID": "worker-container-id",
         "YC_RUNTIME_SERVICE_ACCOUNT_ID": "runtime-sa-id",
         "YC_FOLDER_ID": "folder-id",
         "IMAGE_URL": "cr.yandex/registry/eventedge-api:sha",
@@ -61,6 +64,31 @@ def test_admin_key_is_forwarded_only_when_configured() -> None:
     payload = build_payload(environment)
 
     assert payload["imageSpec"]["environment"]["EVENTEDGE_ADMIN_KEY"] == "example-test-key"
+
+
+def test_worker_payload_has_no_provisioned_instances() -> None:
+    payload = build_payload(
+        {
+            "YC_CONTAINER_ID": "container-id",
+            "YC_WORKER_CONTAINER_ID": "worker-container-id",
+            "YC_RUNTIME_SERVICE_ACCOUNT_ID": "runtime-sa-id",
+            "YC_FOLDER_ID": "folder-id",
+            "IMAGE_URL": "cr.yandex/registry/eventedge-api:sha",
+            "DEPLOY_SHA": "abc123",
+            "YDB_ENDPOINT": "grpcs://ydb.example:2135",
+            "YDB_DATABASE": "/region/cloud/database",
+        },
+        component="worker",
+    )
+
+    assert payload["containerId"] == "worker-container-id"
+    assert payload["concurrency"] == "1"
+    assert payload["provisionPolicy"] == {"minInstances": "0"}
+    assert payload["scalingPolicy"] == {
+        "zoneInstancesLimit": "2",
+        "zoneRequestsLimit": "2",
+    }
+    assert payload["imageSpec"]["environment"]["EVENTEDGE_COMPONENT"] == "worker"
 
 
 def test_budget_policy_matches_deployment_caps() -> None:
@@ -82,5 +110,14 @@ def test_budget_policy_matches_deployment_caps() -> None:
         "min_instances": 1,
         "zone_instances_limit": 3,
         "zone_requests_limit": 24,
+        "execution_timeout_seconds": 180,
+    }
+    assert policy["runtime_caps"]["collection_worker"] == {
+        "memory_mb": 1024,
+        "cores": 1,
+        "concurrency": 1,
+        "min_instances": 0,
+        "zone_instances_limit": 2,
+        "zone_requests_limit": 2,
         "execution_timeout_seconds": 180,
     }
