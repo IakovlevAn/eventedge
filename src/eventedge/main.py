@@ -665,14 +665,25 @@ async def list_assessments(
 
     repository: NewsRepository = request.app.state.news_repository
     market_data_client: MoexMarketDataClient = request.app.state.market_data_client
-    active_by_ticker, stored_news, market_results = await asyncio.gather(
-        active_signals_by_ticker(repository),
+    stored_signals, stored_news, market_results = await asyncio.gather(
+        repository.list_signals(
+            ticker=None,
+            directions=None,
+            status="active",
+            min_confidence=None,
+            limit=1000,
+        ),
         repository.list_news(source_id=None, limit=1000),
         asyncio.gather(
             *(market_data_client.snapshot(ticker) for ticker in normalized),
             return_exceptions=True,
         ),
     )
+    hidden_ids = hidden_news_ids(stored_news)
+    active_by_ticker: dict[str, SignalRecord] = {}
+    for signal in deduplicate_signals(stored_signals):
+        if signal.news_id not in hidden_ids and signal.ticker not in active_by_ticker:
+            active_by_ticker[signal.ticker] = signal
     visible_news = public_news(stored_news)
     data = []
     errors = []

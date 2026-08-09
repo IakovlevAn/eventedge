@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from datetime import date, timedelta
 from typing import Any
 
@@ -117,6 +119,59 @@ def test_intraday_candles_keep_moscow_time_and_interval() -> None:
     assert result["interval_minutes"] == 10
     assert result["candles"][0]["begin"] == "2026-08-07T07:00:00Z"
     assert result["candles"][-1]["close"] == 100.5
+
+
+def test_identical_concurrent_snapshots_share_one_load() -> None:
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def slow_request(url: str, params: dict[str, object]) -> dict[str, Any]:
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        time.sleep(0.01)
+        return fake_moex_request(url, params)
+
+    async def load() -> tuple[dict[str, object], dict[str, object]]:
+        client = MoexMarketDataClient(requester=slow_request)
+        first, second = await asyncio.gather(
+            client.snapshot("SBER"),
+            client.snapshot("sber"),
+        )
+        return first, second
+
+    first, second = asyncio.run(load())
+
+    assert first == second
+    assert calls == 2
+
+
+def test_market_loads_limit_parallel_external_requests() -> None:
+    active = 0
+    peak = 0
+    calls_lock = threading.Lock()
+
+    def measured_request(url: str, params: dict[str, object]) -> dict[str, Any]:
+        nonlocal active, peak
+        with calls_lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.01)
+        result = fake_moex_request(url, params)
+        with calls_lock:
+            active -= 1
+        return result
+
+    async def load() -> None:
+        client = MoexMarketDataClient(
+            requester=measured_request,
+            max_concurrent_requests=2,
+        )
+        await asyncio.gather(*(client.snapshot(ticker) for ticker in ("SBER", "LKOH", "YDEX")))
+
+    asyncio.run(load())
+
+    assert peak <= 2
 
 
 def test_directional_scenario_is_a_range_not_a_price_target() -> None:

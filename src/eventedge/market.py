@@ -94,19 +94,51 @@ class MoexMarketDataClient:
         *,
         requester: Callable[[str, dict[str, object]], dict[str, Any]] | None = None,
         cache_ttl_seconds: float = 30.0,
+        max_concurrent_requests: int = 3,
     ) -> None:
+        if max_concurrent_requests < 1:
+            raise ValueError("max_concurrent_requests must be positive")
         self._requester = requester or _request_json
         self._cache_ttl_seconds = cache_ttl_seconds
         self._cache: dict[str, tuple[float, dict[str, object]]] = {}
+        self._request_slots = asyncio.Semaphore(max_concurrent_requests)
+        self._inflight: dict[str, asyncio.Task[dict[str, object]]] = {}
+
+    async def _cached_load(
+        self,
+        cache_key: str,
+        loader: Callable[[], dict[str, object]],
+    ) -> dict[str, object]:
+        cached = self._cache.get(cache_key)
+        if cached and time.monotonic() - cached[0] < self._cache_ttl_seconds:
+            return cached[1]
+
+        existing = self._inflight.get(cache_key)
+        if existing is not None:
+            return await asyncio.shield(existing)
+
+        async def run() -> dict[str, object]:
+            async with self._request_slots:
+                result = await asyncio.to_thread(loader)
+            self._cache[cache_key] = (time.monotonic(), result)
+            return result
+
+        task = asyncio.create_task(run())
+        self._inflight[cache_key] = task
+
+        def clear_inflight(done: asyncio.Task[dict[str, object]]) -> None:
+            if self._inflight.get(cache_key) is done:
+                self._inflight.pop(cache_key, None)
+
+        task.add_done_callback(clear_inflight)
+        return await asyncio.shield(task)
 
     async def snapshot(self, ticker: str) -> dict[str, object]:
         normalized = ticker.upper()
-        cached = self._cache.get(normalized)
-        if cached and time.monotonic() - cached[0] < self._cache_ttl_seconds:
-            return cached[1]
-        result = await asyncio.to_thread(self._load_snapshot, normalized)
-        self._cache[normalized] = (time.monotonic(), result)
-        return result
+        return await self._cached_load(
+            f"snapshot:{normalized}",
+            lambda: self._load_snapshot(normalized),
+        )
 
     async def candles(
         self,
@@ -117,17 +149,10 @@ class MoexMarketDataClient:
     ) -> dict[str, object]:
         normalized = ticker.upper()
         cache_key = f"candles:{normalized}:{interval}:{lookback_days}"
-        cached = self._cache.get(cache_key)
-        if cached and time.monotonic() - cached[0] < self._cache_ttl_seconds:
-            return cached[1]
-        result = await asyncio.to_thread(
-            self._load_candles,
-            normalized,
-            interval,
-            lookback_days,
+        return await self._cached_load(
+            cache_key,
+            lambda: self._load_candles(normalized, interval, lookback_days),
         )
-        self._cache[cache_key] = (time.monotonic(), result)
-        return result
 
     def _load_candles(
         self,
