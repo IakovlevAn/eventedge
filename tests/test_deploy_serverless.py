@@ -23,7 +23,7 @@ def test_deployment_payload_has_budget_caps() -> None:
         "cores": "1",
         "coreFraction": "100",
     }
-    assert payload["concurrency"] == "4"
+    assert payload["concurrency"] == "2"
     assert payload["provisionPolicy"] == {"minInstances": "0"}
     assert payload["executionTimeout"] == "60s"
     assert payload["scalingPolicy"] == {
@@ -60,7 +60,7 @@ def test_budget_policy_matches_deployment_caps() -> None:
     assert runtime == {
         "memory_mb": 512,
         "cores": 1,
-        "concurrency": 4,
+        "concurrency": 2,
         "min_instances": 0,
         "zone_instances_limit": 1,
         "zone_requests_limit": 50,

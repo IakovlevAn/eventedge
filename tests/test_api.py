@@ -474,6 +474,9 @@ def test_evals_endpoint_exposes_analysis_and_downloads() -> None:
     original = app.state.market_data_client
 
     class FakeMarketDataClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
         async def candles(
             self,
             ticker: str,
@@ -481,6 +484,7 @@ def test_evals_endpoint_exposes_analysis_and_downloads() -> None:
             interval: int,
             lookback_days: int,
         ) -> dict[str, object]:
+            self.calls += 1
             assert interval == 10
             assert lookback_days == 14
             return {
@@ -496,7 +500,8 @@ def test_evals_endpoint_exposes_analysis_and_downloads() -> None:
                 "source": {"name": "MOEX ISS", "url": "https://iss.moex.com/iss/"},
             }
 
-    app.state.market_data_client = FakeMarketDataClient()
+    fake_market = FakeMarketDataClient()
+    app.state.market_data_client = fake_market
     try:
         response = client.get("/v1/evals")
         csv_export = client.get(
@@ -527,6 +532,9 @@ def test_evals_endpoint_exposes_analysis_and_downloads() -> None:
     assert timeseries_export.status_code == 200
     assert timeseries_export.json()["meta"]["dataset"] == "timeseries"
     assert timeseries_export.json()["meta"]["truncated"] is False
+    assert fake_market.calls == len(
+        {item["ticker"] for item in response.json()["data"]["outcomes"]}
+    )
 
 
 def test_instrument_snapshot_does_not_revive_hidden_exchange_noise() -> None:
