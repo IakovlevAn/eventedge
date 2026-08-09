@@ -39,7 +39,7 @@ def build_payload(environment: Mapping[str, str]) -> dict[str, object]:
                 "YANDEX_GPT_MODEL": "yandexgpt-lite",
             },
         },
-        "concurrency": "4",
+        "concurrency": "2",
         "provisionPolicy": {"minInstances": "0"},
         "scalingPolicy": {
             "zoneInstancesLimit": "1",

@@ -13,7 +13,7 @@ runtime_caps:
   serverless_container:
     memory_mb: 512
     cores: 1
-    concurrency: 4
+    concurrency: 2
     min_instances: 0
     zone_instances_limit: 1
     zone_requests_limit: 50

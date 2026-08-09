@@ -5,6 +5,7 @@ import csv
 import io
 import os
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -66,6 +67,7 @@ PUBLIC_HIDDEN_SOURCE_IDS = frozenset({"eventedge_smoke"})
 NEWS_COLLECTION_INTERVAL_SECONDS = 60
 NEWS_CLIENT_REFRESH_INTERVAL_SECONDS = 30
 NEWS_DELIVERY_TARGET_SECONDS = 120
+EVALUATION_CACHE_TTL_SECONDS = 60
 NEWS_COLLECTION_LANES = (
     {
         "id": "fast",
@@ -164,6 +166,9 @@ app = FastAPI(
 )
 app.state.news_repository = repository_from_environment(os.environ)
 app.state.market_data_client = MoexMarketDataClient()
+app.state.evaluation_material_cache = None
+app.state.evaluation_material_inflight = None
+app.state.evaluation_material_lock = asyncio.Lock()
 app.state.collectors = {
     "cbr_press": collect_cbr_press,
     "fast_news": collect_fast_news,
@@ -735,16 +740,15 @@ async def list_assessments(
     )
 
 
-async def evaluation_material(
-    request: Request,
+async def _load_evaluation_material(
+    repository: NewsRepository,
+    market_data_client: MoexMarketDataClient,
 ) -> tuple[
     list[dict[str, object]],
     list[SignalRecord],
     dict[str, list[dict[str, object]]],
     dict[str, NewsRecord],
 ]:
-    repository: NewsRepository = request.app.state.news_repository
-    market_data_client: MoexMarketDataClient = request.app.state.market_data_client
     stored_signals, stored_news = await asyncio.gather(
         repository.list_signals(
             ticker=None,
@@ -780,6 +784,61 @@ async def evaluation_material(
         for signal in signals
     ]
     return outcomes, signals, candles_by_ticker, news_by_id
+
+
+async def evaluation_material(
+    request: Request,
+) -> tuple[
+    list[dict[str, object]],
+    list[SignalRecord],
+    dict[str, list[dict[str, object]]],
+    dict[str, NewsRecord],
+]:
+    state = request.app.state
+    repository: NewsRepository = state.news_repository
+    market_data_client: MoexMarketDataClient = state.market_data_client
+    cache_key = (id(repository), id(market_data_client))
+    cached = state.evaluation_material_cache
+    if (
+        cached is not None
+        and cached[1] == cache_key
+        and time.monotonic() - cached[0] < EVALUATION_CACHE_TTL_SECONDS
+    ):
+        return cached[2]
+
+    async with state.evaluation_material_lock:
+        cached = state.evaluation_material_cache
+        if (
+            cached is not None
+            and cached[1] == cache_key
+            and time.monotonic() - cached[0] < EVALUATION_CACHE_TTL_SECONDS
+        ):
+            return cached[2]
+        inflight = state.evaluation_material_inflight
+        if inflight is not None and inflight[0] == cache_key:
+            task = inflight[1]
+        else:
+            task = asyncio.create_task(
+                _load_evaluation_material(repository, market_data_client)
+            )
+            state.evaluation_material_inflight = (cache_key, task)
+
+            def cache_result(done: asyncio.Task) -> None:
+                current = state.evaluation_material_inflight
+                if current is None or current[1] is not done:
+                    return
+                state.evaluation_material_inflight = None
+                if done.cancelled() or done.exception() is not None:
+                    return
+                state.evaluation_material_cache = (
+                    time.monotonic(),
+                    cache_key,
+                    done.result(),
+                )
+
+            task.add_done_callback(cache_result)
+
+    return await asyncio.shield(task)
 
 
 @app.get("/v1/evals", tags=["Evals"])
