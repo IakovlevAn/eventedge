@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 from eventedge.evals import (
     build_assessment,
+    deduplicate_eval_events,
     deduplicate_eval_signals,
     eval_breakdowns,
     eval_quality_series,
@@ -84,7 +85,7 @@ def signal_record() -> SignalRecord:
         evidence_refs=("news_report",),
         expires_at=timestamp + timedelta(days=3),
         invalidation_conditions=(),
-        model_version="news-baseline-0.1.1",
+        model_version="news-baseline-0.2.0",
         config_version=1,
         created_at=timestamp,
     )
@@ -233,3 +234,47 @@ def test_eval_counts_identical_decision_once_across_corroborating_news() -> None
 
     assert len(result) == 2
     assert {signal.id for signal in result} == {"sig_corroboration", "sig_different"}
+
+
+def test_eval_counts_one_market_event_and_prefers_latest_model() -> None:
+    published = datetime(2026, 8, 6, 9, tzinfo=UTC)
+    first_news = replace(
+        reporting_news(),
+        id="news_first",
+        published_at=published,
+        received_at=published + timedelta(minutes=1),
+        title="Совет директоров Сбербанка рекомендовал дивиденды за полугодие",
+    )
+    corroborating_news = replace(
+        reporting_news(),
+        id="news_second",
+        published_at=published + timedelta(minutes=20),
+        received_at=published + timedelta(minutes=21),
+        title="Сбербанк рекомендовал дивиденды за первое полугодие",
+    )
+    old_model = replace(
+        signal_record(),
+        id="sig_old",
+        news_id=first_news.id,
+        as_of=first_news.received_at,
+        model_version="news-baseline-0.1.1",
+    )
+    current_model_first = replace(
+        old_model,
+        id="sig_current_first",
+        model_version="news-baseline-0.2.0",
+    )
+    current_model_corroboration = replace(
+        current_model_first,
+        id="sig_current_second",
+        news_id=corroborating_news.id,
+        as_of=corroborating_news.received_at,
+        confidence=0.95,
+    )
+
+    result = deduplicate_eval_events(
+        [old_model, current_model_corroboration, current_model_first],
+        {first_news.id: first_news, corroborating_news.id: corroborating_news},
+    )
+
+    assert [signal.id for signal in result] == ["sig_current_first"]

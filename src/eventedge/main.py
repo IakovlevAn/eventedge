@@ -23,19 +23,22 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
 from eventedge import __version__
-from eventedge.analysis import DEFAULT_MOEX_ALIASES
+from eventedge.analysis import NewsAnalysisInput, RuleBasedNewsExtractor
 from eventedge.collectors import (
+    RssItem,
     collect_cbr_press,
     collect_discovery_news,
     collect_fast_news,
     collect_market_news,
     collect_slow_news,
+    is_market_signal_candidate,
     is_moex_equity_title,
 )
 from eventedge.configs.collection import load_collection_config
 from eventedge.evals import (
     ASSESSMENT_MODEL_VERSION,
     build_assessment,
+    deduplicate_eval_events,
     deduplicate_eval_signals,
     eval_breakdowns,
     eval_quality_series,
@@ -65,6 +68,8 @@ from eventedge.storage import (
     YdbNewsRepository,
     canonical_payload_hash,
     deduplicate_signals,
+    filter_signals,
+    normalize_signal_freshness,
 )
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
@@ -80,6 +85,47 @@ NEWS_CLIENT_REFRESH_INTERVAL_SECONDS = 30
 NEWS_DELIVERY_TARGET_SECONDS = 120
 EVALUATION_CACHE_TTL_SECONDS = 60
 MAX_TELEGRAM_CHANNELS = 18
+DEFAULT_ASSESSMENT_TICKERS = (
+    "SBER",
+    "LKOH",
+    "YDEX",
+    "NVTK",
+    "TATN",
+    "ROSN",
+    "GMKN",
+    "MGNT",
+    "SIBN",
+    "GAZP",
+    "VTBR",
+    "PLZL",
+    "CHMF",
+    "ALRS",
+    "MOEX",
+    "AFLT",
+    "NLMK",
+    "PHOR",
+    "OZON",
+    "X5",
+)
+
+
+def latest_model_signal_per_news(signals: list[SignalRecord]) -> list[SignalRecord]:
+    """Keep one visible signal revision for each news/instrument pair."""
+    selected: dict[tuple[str, str], SignalRecord] = {}
+    for signal in signals:
+        key = (signal.news_id, signal.ticker)
+        current = selected.get(key)
+        if current is None or (
+            signal.model_version,
+            signal.created_at,
+            signal.id,
+        ) > (
+            current.model_version,
+            current.created_at,
+            current.id,
+        ):
+            selected[key] = signal
+    return sorted(selected.values(), key=lambda signal: (signal.as_of, signal.id), reverse=True)
 
 
 class NewsIngestRequest(BaseModel):
@@ -138,6 +184,13 @@ class TelegramSourceCreate(BaseModel):
     @classmethod
     def normalize_channel(cls, value: str) -> str:
         return value.removeprefix("@")
+
+
+class SignalReprocessRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: Annotated[int, Field(ge=1, le=3)] = 3
+    news_ids: list[str] = Field(default_factory=list, max_length=3)
 
 
 def repository_from_environment(environment: Mapping[str, str]) -> NewsRepository:
@@ -434,15 +487,17 @@ async def list_news(
     repository: NewsRepository = request.app.state.news_repository
     stored_news = await repository.list_news(source_id=source_id, limit=1000)
     visible_news = public_news(stored_news)
-    signals = await repository.list_signals(
+    stored_signals = await repository.list_signals(
         ticker=None,
         directions=None,
         status=None,
         min_confidence=None,
         limit=1000,
     )
+    news_by_id = {item.id: item for item in stored_news}
+    signals = normalize_signal_freshness(stored_signals, news_by_id)
     signals_by_news: dict[str, list[dict[str, object]]] = {}
-    for signal in deduplicate_signals(signals):
+    for signal in latest_model_signal_per_news(deduplicate_signals(signals)):
         signals_by_news.setdefault(signal.news_id, []).append(
             {
                 "id": signal.id,
@@ -528,13 +583,16 @@ async def list_market_events(
 ) -> JSONResponse:
     repository: NewsRepository = request.app.state.news_repository
     news = public_news(await repository.list_news(source_id=None, limit=1000))
-    signals = deduplicate_signals(
-        await repository.list_signals(
-            ticker=None,
-            directions=None,
-            status=None,
-            min_confidence=None,
-            limit=1000,
+    stored_signals = await repository.list_signals(
+        ticker=None,
+        directions=None,
+        status=None,
+        min_confidence=None,
+        limit=1000,
+    )
+    signals = latest_model_signal_per_news(
+        deduplicate_signals(
+            normalize_signal_freshness(stored_signals, {item.id: item for item in news})
         )
     )
     signals_by_news: dict[str, list[dict[str, object]]] = {}
@@ -684,6 +742,147 @@ async def create_telegram_source(
     return JSONResponse(status_code=201, content={"data": source.as_api_dict()})
 
 
+@app.post("/v1/admin/signals/reprocess", tags=["Signals"])
+async def reprocess_signal_candidates(
+    payload: SignalReprocessRequest,
+    request: Request,
+    admin_key: Annotated[str | None, Header(alias="X-EventEdge-Admin-Key")] = None,
+) -> JSONResponse:
+    """Re-run the current candidate policy on stored news in small budget-capped batches."""
+    expected_key = os.environ.get("EVENTEDGE_ADMIN_KEY")
+    if not expected_key:
+        return problem_response(
+            request,
+            status=503,
+            code="SOURCE_ADMIN_NOT_CONFIGURED",
+            title="Signal administration is not configured",
+            detail="Set EVENTEDGE_ADMIN_KEY for the production runtime.",
+        )
+    if not admin_key or not hmac.compare_digest(admin_key, expected_key):
+        return problem_response(
+            request,
+            status=401,
+            code="INVALID_ADMIN_KEY",
+            title="Invalid admin key",
+            detail="A valid X-EventEdge-Admin-Key header is required.",
+        )
+
+    repository: NewsRepository = request.app.state.news_repository
+    stored_news, stored_signals = await asyncio.gather(
+        repository.list_news(source_id=None, limit=1000),
+        repository.list_signals(
+            ticker=None,
+            directions=None,
+            status=None,
+            min_confidence=None,
+            limit=1000,
+        ),
+    )
+    current_news_ids = {
+        signal.news_id
+        for signal in stored_signals
+        if signal.model_version == "news-baseline-0.2.0"
+    }
+    candidates = []
+    for item in public_news(stored_news):
+        if payload.news_ids and item.id not in payload.news_ids:
+            continue
+        if item.id in current_news_ids or item.source_id in {"cbr_press", "market_background"}:
+            continue
+        categories = item.source_metadata.get("categories", [])
+        candidate = RssItem(
+            external_id=item.external_id,
+            published_at=item.published_at,
+            title=item.title,
+            url=item.url,
+            content=item.content,
+            categories=tuple(str(value) for value in categories)
+            if isinstance(categories, list | tuple)
+            else (),
+        )
+        if is_market_signal_candidate(candidate):
+            candidates.append((item, candidate))
+
+    selected = candidates[: payload.limit]
+
+    async def reprocess_one(item: NewsRecord, candidate: RssItem) -> dict[str, object]:
+        features = RuleBasedNewsExtractor().extract(
+            NewsAnalysisInput(
+                source_id=item.source_id,
+                title=item.title,
+                content=item.content,
+                language=item.language,
+            )
+        )
+        metadata = dict(item.source_metadata)
+        metadata.update(
+            {
+                "signal_candidate": True,
+                "classification_version": "candidate-gate-0.2.0",
+                "tickers": [
+                    instrument.ticker
+                    for instrument in features.instruments
+                    if instrument.relevance >= 0.9 and instrument.ticker != "MOEX"
+                ],
+            }
+        )
+        hash_payload = {
+            "source_id": item.source_id,
+            "external_id": item.external_id,
+            "published_at": item.published_at.isoformat(),
+            "title": item.title,
+            "url": item.url,
+            "content": item.content,
+            "language": item.language,
+            "source_metadata": metadata,
+            "reprocess_version": "news-baseline-0.2.0",
+        }
+        result = await repository.ingest(
+            f"reprocess:{item.id}:news-baseline-0.2.0",
+            NewsDocument(
+                source_id=item.source_id,
+                external_id=item.external_id,
+                published_at=item.published_at,
+                received_at=item.received_at,
+                title=item.title,
+                url=item.url,
+                content=item.content,
+                language=item.language,
+                source_metadata=metadata,
+                payload_hash=canonical_payload_hash(hash_payload),
+            ),
+            generate_signals=True,
+        )
+        return {
+            "news_id": item.id,
+            "job_id": result.job.id,
+            "result_ref": result.job.result_ref,
+            "replayed": result.replayed,
+        }
+
+    results = await asyncio.gather(
+        *(reprocess_one(item, candidate) for item, candidate in selected),
+        return_exceptions=True,
+    )
+    completed = [result for result in results if isinstance(result, dict)]
+    failed = [type(result).__name__ for result in results if isinstance(result, BaseException)]
+    request.app.state.evaluation_material_cache = None
+    return JSONResponse(
+        content={
+            "data": completed,
+            "meta": {
+                "selected": len(selected),
+                "completed": len(completed),
+                "failed": len(failed),
+                "failure_types": failed,
+                "remaining_candidates": max(0, len(candidates) - len(completed)),
+                "model_version": "news-baseline-0.2.0",
+                "batch_limit": 3,
+            },
+        }
+    )
+
+
 @app.get("/v1/signals", tags=["Signals"])
 async def list_signals(
     request: Request,
@@ -713,18 +912,28 @@ async def list_signals(
         )
 
     repository: NewsRepository = request.app.state.news_repository
-    signals = await repository.list_signals(
+    stored_signals = await repository.list_signals(
+        ticker=ticker,
+        directions=requested_directions,
+        status=None,
+        min_confidence=min_confidence,
+        limit=1000,
+    )
+    news = await repository.list_news(source_id=None, limit=1000)
+    hidden_ids = hidden_news_ids(news)
+    news_by_id = {item.id: item for item in news}
+    signals = filter_signals(
+        normalize_signal_freshness(stored_signals, news_by_id),
         ticker=ticker,
         directions=requested_directions,
         status=status or "active",
         min_confidence=min_confidence,
         limit=1000,
     )
-    news = await repository.list_news(source_id=None, limit=1000)
-    hidden_ids = hidden_news_ids(news)
-    signals = deduplicate_signals(signal for signal in signals if signal.news_id not in hidden_ids)[
-        :limit
-    ]
+    signals = deduplicate_eval_events(
+        deduplicate_signals(signal for signal in signals if signal.news_id not in hidden_ids),
+        news_by_id,
+    )[:limit]
     data = [signal.as_api_dict() for signal in signals]
     cache_payload = {
         "ticker": ticker,
@@ -779,6 +988,11 @@ async def get_signal(
             title="Signal not found",
             detail="The signal does not exist or is not visible.",
         )
+    stored_news = await repository.list_news(source_id=None, limit=1000)
+    signal = normalize_signal_freshness(
+        [signal],
+        {item.id: item for item in stored_news},
+    )[0]
     data = signal.as_api_dict()
     etag = f'"{canonical_payload_hash(data)[:24]}"'
     if if_none_match == etag:
@@ -819,15 +1033,24 @@ async def active_signals_by_ticker(repository: NewsRepository) -> dict[str, Sign
         repository.list_signals(
             ticker=None,
             directions=None,
-            status="active",
+            status=None,
             min_confidence=None,
             limit=1000,
         ),
         repository.list_news(source_id=None, limit=1000),
     )
     hidden_ids = hidden_news_ids(news)
+    news_by_id = {item.id: item for item in news}
+    active = filter_signals(
+        normalize_signal_freshness(signals, news_by_id),
+        ticker=None,
+        directions=None,
+        status="active",
+        min_confidence=None,
+        limit=1000,
+    )
     result: dict[str, SignalRecord] = {}
-    for signal in deduplicate_signals(signals):
+    for signal in deduplicate_eval_events(deduplicate_signals(active), news_by_id):
         if signal.news_id not in hidden_ids and signal.ticker not in result:
             result[signal.ticker] = signal
     return result
@@ -835,7 +1058,7 @@ async def active_signals_by_ticker(repository: NewsRepository) -> dict[str, Sign
 
 def _requested_assessment_tickers(value: str | None) -> list[str] | None:
     normalized = (
-        list(DEFAULT_MOEX_ALIASES)
+        list(DEFAULT_ASSESSMENT_TICKERS)
         if value is None
         else list(dict.fromkeys(part.strip().upper() for part in value.split(",") if part.strip()))
     )
@@ -869,7 +1092,7 @@ async def list_assessments(
         repository.list_signals(
             ticker=None,
             directions=None,
-            status="active",
+            status=None,
             min_confidence=None,
             limit=1000,
         ),
@@ -880,8 +1103,17 @@ async def list_assessments(
         ),
     )
     hidden_ids = hidden_news_ids(stored_news)
+    news_by_id = {item.id: item for item in stored_news}
+    active_signals = filter_signals(
+        normalize_signal_freshness(stored_signals, news_by_id),
+        ticker=None,
+        directions=None,
+        status="active",
+        min_confidence=None,
+        limit=1000,
+    )
     active_by_ticker: dict[str, SignalRecord] = {}
-    for signal in deduplicate_signals(stored_signals):
+    for signal in deduplicate_eval_events(deduplicate_signals(active_signals), news_by_id):
         if signal.news_id not in hidden_ids and signal.ticker not in active_by_ticker:
             active_by_ticker[signal.ticker] = signal
     visible_news = public_news(stored_news)
@@ -949,11 +1181,14 @@ async def _load_evaluation_material(
         repository.list_news(source_id=None, limit=1000),
     )
     news_by_id = {item.id: item for item in public_news(stored_news)}
-    signals = [
-        signal
-        for signal in deduplicate_eval_signals(deduplicate_signals(stored_signals))
-        if signal.news_id in news_by_id
-    ][:100]
+    signals = deduplicate_eval_events(
+        (
+            signal
+            for signal in deduplicate_eval_signals(deduplicate_signals(stored_signals))
+            if signal.news_id in news_by_id
+        ),
+        news_by_id,
+    )[:100]
     tickers = list(dict.fromkeys(signal.ticker for signal in signals))
     candle_results = await asyncio.gather(
         *(market_data_client.candles(ticker, interval=10, lookback_days=14) for ticker in tickers),
@@ -1104,6 +1339,9 @@ async def export_evals(
             "news_id",
             "news_source_id",
             "news_url",
+            "news_published_at",
+            "news_received_at",
+            "delivery_lag_seconds",
             "entry_at",
             "entry_price",
             "return_1h_pct",

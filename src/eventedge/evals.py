@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import statistics
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
@@ -336,6 +337,12 @@ def evaluate_signal(
             "title": news.title,
             "source_id": news.source_id,
             "url": news.url,
+            "published_at": to_rfc3339(news.published_at),
+            "received_at": to_rfc3339(news.received_at),
+            "delivery_lag_seconds": max(
+                0,
+                round((news.received_at - news.published_at).total_seconds()),
+            ),
         }
         if news
         else None,
@@ -445,6 +452,89 @@ def deduplicate_eval_signals(signals: Iterable[SignalRecord]) -> list[SignalReco
         ):
             unique[key] = signal
     return sorted(unique.values(), key=lambda signal: (signal.as_of, signal.id), reverse=True)
+
+
+EVAL_TITLE_STOP_WORDS = frozenset(
+    {
+        "для",
+        "как",
+        "при",
+        "что",
+        "это",
+        "или",
+        "после",
+        "перед",
+        "уже",
+        "акции",
+        "акция",
+        "рублей",
+        "года",
+        "году",
+    }
+)
+
+
+def _eval_title_tokens(title: str) -> set[str]:
+    return {
+        token
+        for token in re.sub(r"[^a-zа-яё0-9]+", " ", title.casefold()).split()
+        if len(token) > 2 and token not in EVAL_TITLE_STOP_WORDS
+    }
+
+
+def _same_eval_event(left: NewsRecord, right: NewsRecord) -> bool:
+    left_tokens = _eval_title_tokens(left.title)
+    right_tokens = _eval_title_tokens(right.title)
+    if not left_tokens or not right_tokens:
+        return False
+    if left_tokens == right_tokens:
+        return True
+    if abs((left.published_at - right.published_at).total_seconds()) > 72 * 60 * 60:
+        return False
+    overlap = len(left_tokens & right_tokens)
+    return overlap / min(len(left_tokens), len(right_tokens)) >= 0.6
+
+
+def deduplicate_eval_events(
+    signals: Iterable[SignalRecord],
+    news_by_id: dict[str, NewsRecord],
+) -> list[SignalRecord]:
+    """Evaluate one market event once, even when several publications repeat it."""
+    groups: list[list[SignalRecord]] = []
+    for signal in sorted(signals, key=lambda item: (item.as_of, item.id)):
+        news = news_by_id.get(signal.news_id)
+        if news is None:
+            continue
+        group = next(
+            (
+                candidate
+                for candidate in groups
+                if candidate[0].ticker == signal.ticker
+                and (representative_news := news_by_id.get(candidate[0].news_id)) is not None
+                and _same_eval_event(representative_news, news)
+            ),
+            None,
+        )
+        if group is None:
+            groups.append([signal])
+        else:
+            group.append(signal)
+
+    representatives = []
+    for group in groups:
+        latest_model = max(signal.model_version for signal in group)
+        current_model = [signal for signal in group if signal.model_version == latest_model]
+        representatives.append(
+            min(
+                current_model,
+                key=lambda signal: (
+                    news_by_id[signal.news_id].published_at,
+                    signal.as_of,
+                    signal.id,
+                ),
+            )
+        )
+    return sorted(representatives, key=lambda signal: (signal.as_of, signal.id), reverse=True)
 
 
 def _metric_slice(
@@ -660,6 +750,9 @@ def outcome_export_rows(outcomes: list[dict[str, object]]) -> list[dict[str, obj
                 "news_id": news.get("id"),
                 "news_source_id": news.get("source_id"),
                 "news_url": news.get("url"),
+                "news_published_at": news.get("published_at"),
+                "news_received_at": news.get("received_at"),
+                "delivery_lag_seconds": news.get("delivery_lag_seconds"),
                 "entry_at": entry.get("at"),
                 "entry_price": entry.get("price"),
                 "return_1h_pct": _return_at(item, "1h"),

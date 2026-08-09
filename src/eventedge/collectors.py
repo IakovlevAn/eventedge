@@ -312,7 +312,7 @@ async def collect_news_items(
             "tickers": [
                 instrument.ticker
                 for instrument in features.instruments
-                if instrument.relevance >= 0.6 and instrument.ticker != "MOEX"
+                if instrument.relevance >= 0.9 and instrument.ticker != "MOEX"
             ],
         }
         # Keep the existing RSS payload shape stable so a deployment does not
@@ -499,9 +499,22 @@ MARKET_NOISE_TITLE_MARKERS = (
     "технический анализ",
     "целевая цена",
     "акции могут вырасти",
+    "цена акций",
+    "котировки выросли",
+    "котировки упали",
+    "котировки снизились",
+    "обновили максимум",
     "обзор размещения",
     "идеи на первичном рынке",
     "итоги недели",
+    "итоги торгов",
+    "главное к открытию",
+    "прогнозы и комментарии",
+    "мнение аналитиков",
+    "мнение экспертов",
+    "инвестиционный кейс",
+    "идея в профите",
+    "спекулятивн",
     "арене",
     "арена",
     "футбол",
@@ -543,10 +556,18 @@ MARKET_EVENT_MARKERS = (
     "купил",
     "банкрот",
     "суд ",
+    "иск ",
+    "штраф",
+    "расследован",
+    "арест",
+    "обыск",
     "директор",
+    "назначил",
+    "покинул",
     "партнерств",
     "партнёрств",
     "соглашени",
+    "контракт",
     "объединил",
     "приостанов",
     "возобнов",
@@ -555,17 +576,30 @@ MARKET_EVENT_MARKERS = (
     "поставк",
     "экспорт",
     "налог",
+    "рекомендовал",
+    "утвердил",
+    "одобрил",
+    "подтвердил прогноз",
+    "отменил",
+    "капзатрат",
+    "инвестпрограмм",
+    "допэмисс",
+    "эмисси",
+    "кредитн рейтинг",
+    "рейтинг",
 )
 
 
 def is_market_signal_candidate(item: RssItem) -> bool:
-    """Keep direct, event-like company news and reject opinion/sports collisions."""
+    """High-recall gate for direct company events before semantic analysis.
+
+    The gate only decides whether analysis is worth running. The semantic
+    extractor and deterministic scorer still decide direction and strength.
+    """
     if not is_moex_equity_title(item.title):
         return False
     normalized_title = item.title.casefold()
     if any(marker in normalized_title for marker in MARKET_NOISE_TITLE_MARKERS):
-        return False
-    if not any(marker in normalized_title for marker in MARKET_EVENT_MARKERS):
         return False
     features = RuleBasedNewsExtractor().extract(
         NewsAnalysisInput(
@@ -575,9 +609,18 @@ def is_market_signal_candidate(item: RssItem) -> bool:
             language="ru",
         )
     )
-    if not features.instruments or features.event_type is EventType.OTHER:
+    direct_instruments = [
+        instrument for instrument in features.instruments if instrument.relevance >= 0.9
+    ]
+    if not direct_instruments:
         return False
-    if all(item.ticker == "MOEX" for item in features.instruments):
+    normalized_context = f"{item.title} {item.content[:1500]}".casefold()
+    if (
+        not any(marker in normalized_context for marker in MARKET_EVENT_MARKERS)
+        and features.event_type is EventType.OTHER
+    ):
+        return False
+    if all(instrument.ticker == "MOEX" for instrument in direct_instruments):
         return features.event_type in {
             EventType.FINANCIAL_RESULTS,
             EventType.DIVIDEND,
@@ -602,7 +645,7 @@ def is_company_news_candidate(item: RssItem) -> bool:
         )
     )
     return any(
-        instrument.relevance >= 0.6 and instrument.ticker != "MOEX"
+        instrument.relevance >= 0.9 and instrument.ticker != "MOEX"
         for instrument in features.instruments
     )
 

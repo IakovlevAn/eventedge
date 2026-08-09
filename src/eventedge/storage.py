@@ -288,7 +288,8 @@ def process_document(
         "feat_",
         f"{news_id}\x00{document.payload_hash}\x00{features.extractor_version}",
     )
-    expires_at = document.received_at + timedelta(days=3)
+    signal_as_of = max(document.received_at, document.published_at)
+    expires_at = document.published_at + timedelta(days=3)
     signal_status = "active" if expires_at > created_at else "expired"
     signal_records = tuple(
         SignalRecord(
@@ -301,8 +302,8 @@ def process_document(
             ),
             news_id=news_id,
             ticker=signal.ticker,
-            as_of=document.received_at,
-            data_cutoff_at=document.received_at,
+            as_of=signal_as_of,
+            data_cutoff_at=signal_as_of,
             status=signal_status,
             direction=signal.direction.value,
             action=signal.action.value,
@@ -401,6 +402,28 @@ def deduplicate_signals(signals: Iterable[SignalRecord]) -> list[SignalRecord]:
         ):
             unique[key] = signal
     return sorted(unique.values(), key=lambda signal: (signal.as_of, signal.id), reverse=True)
+
+
+def normalize_signal_freshness(
+    signals: Iterable[SignalRecord],
+    news_by_id: Mapping[str, NewsRecord],
+    *,
+    now: datetime | None = None,
+) -> list[SignalRecord]:
+    """Anchor signal lifetime to publication time, not delayed discovery time."""
+    current_time = now or utc_now()
+    normalized = []
+    for signal in signals:
+        news = news_by_id.get(signal.news_id)
+        publication_expiry = news.published_at + timedelta(days=3) if news else signal.expires_at
+        expires_at = min(signal.expires_at, publication_expiry)
+        status = (
+            "expired"
+            if signal.status == "active" and expires_at <= current_time
+            else signal.status
+        )
+        normalized.append(replace(signal, status=status, expires_at=expires_at))
+    return normalized
 
 
 class MemoryNewsRepository:

@@ -206,6 +206,46 @@ paths:
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
+  /v1/admin/signals/reprocess:
+    post:
+      tags: [Signals]
+      summary: Reprocess stored news with the current candidate and signal model
+      operationId: reprocessSignalCandidates
+      security:
+        - adminApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                limit:
+                  type: integer
+                  minimum: 1
+                  maximum: 3
+                  default: 3
+                news_ids:
+                  type: array
+                  maxItems: 3
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Budget-capped batch result and remaining candidate count.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
   /v1/signals:
     get:
       tags: [Signals]

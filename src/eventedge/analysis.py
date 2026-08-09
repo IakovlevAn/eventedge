@@ -112,14 +112,14 @@ class BaselineSignal(BaseModel):
     factor_contributions: Annotated[list[FactorContribution], Field(min_length=5, max_length=5)]
     feature_schema_version: Literal["news-features-0.1"]
     extractor_version: str
-    model_version: Literal["news-baseline-0.1.1"]
+    model_version: Literal["news-baseline-0.2.0"]
     config_version: int
 
 
 class BaselineScoringConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    model_version: Literal["news-baseline-0.1.1"] = "news-baseline-0.1.1"
+    model_version: Literal["news-baseline-0.2.0"] = "news-baseline-0.2.0"
     config_version: Annotated[int, Field(ge=1)] = 1
     positive_threshold: Annotated[float, Field(ge=0, le=100)] = 18
     negative_threshold: Annotated[float, Field(ge=-100, le=0)] = -18
@@ -154,13 +154,61 @@ DEFAULT_MOEX_ALIASES: dict[str, tuple[str, ...]] = {
     "TATN": ("татнефть", "tatneft", "tatn"),
     "ROSN": ("роснефть", "rosneft", "rosn"),
     "GMKN": ("норникель", "норильский никель", "nornickel", "gmkn"),
-    "MGNT": ("магнит", "magnit", "mgnt"),
+    "MGNT": ("«магнит»", '"магнит"', "пао магнит", "ритейлер магнит", "magnit", "mgnt"),
     "SIBN": ("газпром нефть", "gazprom neft", "sibn"),
     "GAZP": ("газпром", "gazprom", "gazp"),
     "VTBR": ("втб", "vtb", "vtbr"),
     "PLZL": ("полюс", "polyus", "plzl"),
     "CHMF": ("северсталь", "severstal", "chmf"),
     "ALRS": ("алроса", "alrosa", "alrs"),
+    "AFLT": ("аэрофлот", "aeroflot", "aflt"),
+    "AFKS": ("афк система", "afk sistema", "afks"),
+    "AKRN": ("акрон", "acron", "akrn"),
+    "ASTR": ("группа астра", "astra linux", "astr"),
+    "BANE": ("башнефть", "bashneft", "bane"),
+    "BELU": ("новабев", "novabev", "belu"),
+    "BSPB": ("банк санкт-петербург", "банк санкт петербург", "bspb"),
+    "CBOM": ("московский кредитный банк", "мкб", "cbom"),
+    "DELI": ("делимобиль", "delimobil", "deli"),
+    "DOMRF": ("дом.рф", "дом рф", "domrf"),
+    "ENPG": ("эн+", "en+ group", "enpg"),
+    "FEES": ("россети", "rosseti", "fees"),
+    "FIXP": ("fix price", "фикс прайс", "fixp"),
+    "FLOT": ("совкомфлот", "sovcomflot", "flot"),
+    "HEAD": ("headhunter", "хэдхантер", "head"),
+    "HYDR": ("русгидро", "rushydro", "hydr"),
+    "IRAO": ("интер рао", "inter rao", "irao"),
+    "KMAZ": ("камаз", "kamaz", "kmaz"),
+    "LEAS": ("европлан", "europlan", "leas"),
+    "LSRG": ("группа лср", "лср", "lsrg"),
+    "MAGN": ("ммк", "магнитогорский металлургический комбинат", "magn"),
+    "MDMG": ("мать и дитя", "md medical group", "mdmg"),
+    "MTSS": ("мтс", "mobile telesystems", "mtss"),
+    "MVID": ("м.видео", "мвидео", "mvideo", "mvid"),
+    "NLMK": ("нлмк", "новолипецкий металлургический комбинат", "nlmk"),
+    "NMTP": ("нмтп", "новороссийский морской торговый порт", "nmtp"),
+    "OGKB": ("огк-2", "огк 2", "ogkb"),
+    "OZON": ("ozon", "озон", "ozon"),
+    "PHOR": ("фосагро", "phosagro", "phor"),
+    "PIKK": ("группа пик", "пик сз", "pikk"),
+    "POSI": ("positive technologies", "позитив технолоджиз", "группа позитив", "posi"),
+    "RENI": ("ренессанс страхование", "reni"),
+    "RTKM": ("ростелеком", "rostelecom", "rtkm"),
+    "RUAL": ("русал", "rusal", "rual"),
+    "SELG": ("селигдар", "seligdar", "selg"),
+    "SGZH": ("сегежа", "segezha", "sgzh"),
+    "SMLT": ("группа самолет", "группа самолёт", "smlt"),
+    "SNGS": ("сургутнефтегаз", "surgutneftegas", "sngs"),
+    "SOFL": ("софтлайн", "softline", "sofl"),
+    "TGKA": ("тгк-1", "тгк 1", "tgka"),
+    "TRNFP": ("транснефть", "transneft", "trnfp"),
+    "UGLD": ("южуралзолото", "югк", "ugld"),
+    "UNAC": ("объединенная авиастроительная корпорация", "оак", "unac"),
+    "UPRO": ("юнипро", "unipro", "upro"),
+    "VKCO": ("вконтакте", "vk company", "vkco"),
+    "VSMO": ("всмпо-ависма", "всмпо ависма", "vsmo"),
+    "WUSH": ("whoosh", "вуш", "wush"),
+    "X5": ("x5", "икс 5", "корпоративный центр икс 5"),
     # The exchange name appears in almost every MOEX notice. Only the ticker itself
     # is specific enough to associate a source document with the listed company.
     "MOEX": ("moex",),
@@ -178,10 +226,42 @@ EVENT_RULES: tuple[tuple[EventType, tuple[str, ...], float], ...] = (
         0.90,
     ),
     (EventType.DIVIDEND, ("дивиденд", "выплат акционер", "реестр акционер"), 0.85),
-    (EventType.REGULATION, ("регулятор", "лицензи", "пошлин", "требовани"), 0.78),
+    (
+        EventType.REGULATION,
+        (
+            "регулятор",
+            "лицензи",
+            "пошлин",
+            "требовани",
+            "суд ",
+            "иск ",
+            "банкрот",
+            "штраф",
+            "расследован",
+        ),
+        0.78,
+    ),
     (EventType.PRODUCTION, ("добыч", "производств", "выпуск", "мощност"), 0.72),
-    (EventType.MANAGEMENT, ("генеральный директор", "совет директоров", "руководител"), 0.65),
-    (EventType.PARTNERSHIP, ("партнерств", "партнёрств", "соглашени", "совместн"), 0.62),
+    (
+        EventType.MANAGEMENT,
+        ("генеральный директор", "совет директоров", "руководител", "назначил", "покинул"),
+        0.65,
+    ),
+    (
+        EventType.PARTNERSHIP,
+        (
+            "партнерств",
+            "партнёрств",
+            "соглашени",
+            "совместн",
+            "сделк",
+            "продал",
+            "купил",
+            "приобрел",
+            "приобрёл",
+        ),
+        0.72,
+    ),
     (EventType.PRODUCT, ("запустил", "новый продукт", "сервис", "технолог"), 0.55),
     (EventType.MACRO, ("ключевая ставка", "инфляц", "ввп", "денежно-кредитн"), 0.75),
 )
@@ -198,6 +278,10 @@ POSITIVE_TERMS = (
     "повысил",
     "рекордн",
     "одобрил",
+    "рекомендовал",
+    "подтвердил прогноз",
+    "возобновил",
+    "получил лицензи",
 )
 
 NEGATIVE_TERMS = (
@@ -213,6 +297,12 @@ NEGATIVE_TERMS = (
     "дефолт",
     "санкц",
     "ограничен",
+    "арест",
+    "обыск",
+    "штраф",
+    "банкрот",
+    "авари",
+    "пожар",
 )
 
 FUTURE_TERMS = ("планирует", "ожидает", "намерен", "прогнозирует", "может", "будет")
