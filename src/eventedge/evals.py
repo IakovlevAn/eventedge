@@ -434,12 +434,12 @@ def deduplicate_eval_signals(signals: Iterable[SignalRecord]) -> list[SignalReco
             signal.horizon_value,
             signal.horizon_unit,
             signal.score,
-            signal.confidence,
             signal.model_version,
             signal.config_version,
         )
         previous = unique.get(key)
-        if previous is None or (signal.created_at, signal.id) > (
+        if previous is None or (signal.confidence, signal.created_at, signal.id) > (
+            previous.confidence,
             previous.created_at,
             previous.id,
         ):

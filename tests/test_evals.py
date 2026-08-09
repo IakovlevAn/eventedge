@@ -218,6 +218,7 @@ def test_eval_counts_identical_decision_once_across_corroborating_news() -> None
         first,
         id="sig_corroboration",
         news_id="news_corroboration",
+        confidence=first.confidence + 0.05,
         created_at=first.created_at + timedelta(minutes=1),
     )
     different_decision = replace(
