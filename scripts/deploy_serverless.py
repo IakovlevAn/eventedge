@@ -42,11 +42,11 @@ def build_payload(environment: Mapping[str, str]) -> dict[str, object]:
             "imageUrl": environment["IMAGE_URL"],
             "environment": runtime_environment,
         },
-        "concurrency": "2",
+        "concurrency": "8",
         "provisionPolicy": {"minInstances": "1"},
         "scalingPolicy": {
-            "zoneInstancesLimit": "5",
-            "zoneRequestsLimit": "50",
+            "zoneInstancesLimit": "3",
+            "zoneRequestsLimit": "24",
         },
         "runtime": {"http": {}},
     }

@@ -23,12 +23,12 @@ def test_deployment_payload_has_budget_caps() -> None:
         "cores": "1",
         "coreFraction": "100",
     }
-    assert payload["concurrency"] == "2"
+    assert payload["concurrency"] == "8"
     assert payload["provisionPolicy"] == {"minInstances": "1"}
     assert payload["executionTimeout"] == "180s"
     assert payload["scalingPolicy"] == {
-        "zoneInstancesLimit": "5",
-        "zoneRequestsLimit": "50",
+        "zoneInstancesLimit": "3",
+        "zoneRequestsLimit": "24",
     }
     assert payload["runtime"] == {"http": {}}
     assert payload["imageSpec"]["environment"] == {
@@ -78,9 +78,9 @@ def test_budget_policy_matches_deployment_caps() -> None:
     assert runtime == {
         "memory_mb": 1024,
         "cores": 1,
-        "concurrency": 2,
+        "concurrency": 8,
         "min_instances": 1,
-        "zone_instances_limit": 5,
-        "zone_requests_limit": 50,
+        "zone_instances_limit": 3,
+        "zone_requests_limit": 24,
         "execution_timeout_seconds": 180,
     }
