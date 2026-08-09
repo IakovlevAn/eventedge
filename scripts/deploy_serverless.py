@@ -21,7 +21,7 @@ def build_payload(environment: Mapping[str, str]) -> dict[str, object]:
         "containerId": environment["YC_CONTAINER_ID"],
         "description": f"GitHub {environment['DEPLOY_SHA']}",
         "resources": {
-            "memory": "268435456",
+            "memory": "536870912",
             "cores": "1",
             "coreFraction": "100",
         },
@@ -39,7 +39,7 @@ def build_payload(environment: Mapping[str, str]) -> dict[str, object]:
                 "YANDEX_GPT_MODEL": "yandexgpt-lite",
             },
         },
-        "concurrency": "8",
+        "concurrency": "4",
         "provisionPolicy": {"minInstances": "0"},
         "scalingPolicy": {
             "zoneInstancesLimit": "1",

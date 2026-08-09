@@ -94,7 +94,7 @@ class MoexMarketDataClient:
         *,
         requester: Callable[[str, dict[str, object]], dict[str, Any]] | None = None,
         cache_ttl_seconds: float = 30.0,
-        max_concurrent_requests: int = 3,
+        max_concurrent_requests: int = 6,
     ) -> None:
         if max_concurrent_requests < 1:
             raise ValueError("max_concurrent_requests must be positive")

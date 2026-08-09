@@ -15,10 +15,11 @@ def test_deployment_payload_has_budget_caps() -> None:
     )
 
     assert payload["resources"] == {
-        "memory": "268435456",
+        "memory": "536870912",
         "cores": "1",
         "coreFraction": "100",
     }
+    assert payload["concurrency"] == "4"
     assert payload["provisionPolicy"] == {"minInstances": "0"}
     assert payload["executionTimeout"] == "60s"
     assert payload["scalingPolicy"] == {

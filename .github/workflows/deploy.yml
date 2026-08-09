@@ -122,10 +122,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl --fail --silent --show-error \
-            --max-time 25 \
-            "${EVENTEDGE_API_URL}/v1/instruments/snapshots?tickers=SBER" \
-            | jq -e '.meta.requested == 1 and .meta.returned == 1' >/dev/null
+          for attempt in {1..6}; do
+            if curl --fail --silent --show-error \
+              --max-time 30 \
+              "${EVENTEDGE_API_URL}/v1/instruments/snapshots?tickers=SBER" \
+              | jq -e '.meta.requested == 1 and .meta.returned == 1' >/dev/null; then
+              break
+            fi
+            if [[ "${attempt}" == "6" ]]; then exit 1; fi
+            sleep 5
+          done
           echo "Production batch market route is ready"
 
       - name: Smoke test assessments and evals
@@ -134,9 +140,9 @@ jobs:
           set -euo pipefail
           for attempt in {1..6}; do
             if curl --fail --silent --show-error \
-              --max-time 30 \
-              "${EVENTEDGE_API_URL}/v1/assessments?tickers=SBER,LKOH" \
-              | jq -e '.meta.requested == 2 and .meta.returned == 2' >/dev/null; then
+              --max-time 55 \
+              "${EVENTEDGE_API_URL}/v1/assessments" \
+              | jq -e '.meta.requested == 15 and .meta.returned == 15' >/dev/null; then
               break
             fi
             if [[ "${attempt}" == "6" ]]; then exit 1; fi
@@ -144,7 +150,7 @@ jobs:
           done
           for attempt in {1..6}; do
             if curl --fail --silent --show-error \
-              --max-time 30 \
+              --max-time 45 \
               "${EVENTEDGE_API_URL}/v1/evals" \
               | jq -e '.data | has("summary") and has("demo_account") and has("outcomes")' >/dev/null; then
               break
