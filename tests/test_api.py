@@ -37,6 +37,43 @@ def test_invalid_request_id_is_replaced() -> None:
     assert response.headers["X-Request-Id"].startswith("req_")
 
 
+def test_source_registry_and_protected_telegram_addition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = client.get("/v1/sources")
+
+    assert registry.status_code == 200
+    assert registry.json()["meta"]["telegram_limit"] == 12
+    assert registry.json()["meta"]["telegram_active"] >= 6
+    assert any(source["source_id"] == "telegram_bcs_express" for source in registry.json()["data"])
+
+    unavailable = client.post(
+        "/v1/sources/telegram",
+        json={"channel": "eventedge_test_one"},
+    )
+    assert unavailable.status_code == 503
+
+    monkeypatch.setenv("EVENTEDGE_ADMIN_KEY", "test-admin-key")
+    unauthorized = client.post(
+        "/v1/sources/telegram",
+        json={"channel": "eventedge_test_one"},
+        headers={"X-EventEdge-Admin-Key": "wrong-key"},
+    )
+    assert unauthorized.status_code == 401
+
+    created = client.post(
+        "/v1/sources/telegram",
+        json={
+            "channel": "eventedge_test_one",
+            "display_name": "EventEdge test",
+        },
+        headers={"X-EventEdge-Admin-Key": "test-admin-key"},
+    )
+    assert created.status_code == 201
+    assert created.json()["data"]["source_id"] == "telegram_eventedge_test_one"
+    assert created.json()["data"]["managed"] is True
+
+
 def test_timer_event_dispatches_private_collector() -> None:
     original = app.state.collectors["cbr_press"]
 
@@ -51,9 +88,7 @@ def test_timer_event_dispatches_private_collector() -> None:
                 "messages": [
                     {
                         "event_metadata": {
-                            "event_type": (
-                                "yandex.cloud.events.serverless.triggers.TimerMessage"
-                            )
+                            "event_type": ("yandex.cloud.events.serverless.triggers.TimerMessage")
                         },
                         "details": {"payload": "cbr_press"},
                     }
@@ -66,9 +101,7 @@ def test_timer_event_dispatches_private_collector() -> None:
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "collectors": {
-            "cbr_press": {"fetched": 2, "accepted": 1, "replayed": 1}
-        },
+        "collectors": {"cbr_press": {"fetched": 2, "accepted": 1, "replayed": 1}},
     }
 
 
@@ -86,9 +119,7 @@ def test_fast_news_timer_dispatches_minute_collector() -> None:
                 "messages": [
                     {
                         "event_metadata": {
-                            "event_type": (
-                                "yandex.cloud.events.serverless.triggers.TimerMessage"
-                            )
+                            "event_type": ("yandex.cloud.events.serverless.triggers.TimerMessage")
                         },
                         "details": {"payload": "fast_news"},
                     }
@@ -203,6 +234,10 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
                 "moex_news",
                 "telegram_ak47pfl",
                 "telegram_markettwits",
+                "telegram_centralbank_russia",
+                "telegram_moscowexchangeofficial",
+                "telegram_bcs_express",
+                "telegram_russianmacro",
             ],
         },
         {
@@ -217,13 +252,20 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
         },
     ]
     stored = next(
-        item
-        for item in news.json()["data"]
-        if item["external_id"] == NEWS_PAYLOAD["external_id"]
+        item for item in news.json()["data"] if item["external_id"] == NEWS_PAYLOAD["external_id"]
     )
     assert stored["title"] == NEWS_PAYLOAD["title"]
     assert stored["content"] == NEWS_PAYLOAD["content"]
+    assert stored["event"]["scope"] == "company"
+    assert stored["event"]["tickers"] == ["SBER"]
     assert stored["related_signals"][0]["id"] == signal_id
+
+    events = client.get("/v1/events", params={"scope": "company", "limit": 100})
+    assert events.status_code == 200
+    assert any(
+        event["news_ids"] == [stored["id"]] and event["scope"] == "company"
+        for event in events.json()["data"]
+    )
 
     cached = client.get(
         f"/v1/signals/{signal_id}",
@@ -355,9 +397,7 @@ def test_batch_instrument_snapshots_return_partial_results() -> None:
 
     assert response.status_code == 200
     assert [item["ticker"] for item in response.json()["data"]] == ["SBER", "LKOH"]
-    assert response.json()["errors"] == [
-        {"ticker": "MISS", "code": "INSTRUMENT_NOT_FOUND"}
-    ]
+    assert response.json()["errors"] == [{"ticker": "MISS", "code": "INSTRUMENT_NOT_FOUND"}]
     assert response.json()["meta"] == {
         "requested": 3,
         "returned": 2,

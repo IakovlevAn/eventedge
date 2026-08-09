@@ -28,3 +28,19 @@ telegram_channels:
     channel: markettwits
     max_items: 20
     timeout_seconds: 10
+  telegram_centralbank_russia:
+    channel: centralbank_russia
+    max_items: 20
+    timeout_seconds: 10
+  telegram_moscowexchangeofficial:
+    channel: MoscowExchangeOfficial
+    max_items: 20
+    timeout_seconds: 10
+  telegram_bcs_express:
+    channel: bcs_express
+    max_items: 20
+    timeout_seconds: 10
+  telegram_russianmacro:
+    channel: russianmacro
+    max_items: 20
+    timeout_seconds: 10

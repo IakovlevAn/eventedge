@@ -210,6 +210,34 @@ def default_source_config() -> SourceConfig:
                 max_items=20,
                 timeout_seconds=10,
             ),
+            TelegramChannelConfig(
+                name="telegram_centralbank_russia",
+                source_id="telegram_centralbank_russia",
+                channel="centralbank_russia",
+                max_items=20,
+                timeout_seconds=10,
+            ),
+            TelegramChannelConfig(
+                name="telegram_moscowexchangeofficial",
+                source_id="telegram_moscowexchangeofficial",
+                channel="MoscowExchangeOfficial",
+                max_items=20,
+                timeout_seconds=10,
+            ),
+            TelegramChannelConfig(
+                name="telegram_bcs_express",
+                source_id="telegram_bcs_express",
+                channel="bcs_express",
+                max_items=20,
+                timeout_seconds=10,
+            ),
+            TelegramChannelConfig(
+                name="telegram_russianmacro",
+                source_id="telegram_russianmacro",
+                channel="russianmacro",
+                max_items=20,
+                timeout_seconds=10,
+            ),
         ),
     )
 

@@ -20,6 +20,10 @@ def test_missing_yaml_uses_dataclass_defaults(tmp_path: Path) -> None:
     assert [source.channel for source in sources.telegram_channels] == [
         "AK47pfl",
         "markettwits",
+        "centralbank_russia",
+        "MoscowExchangeOfficial",
+        "bcs_express",
+        "russianmacro",
     ]
     assert collection.lanes[0].interval_seconds == 60
     assert scoring.source_quality["telegram_markettwits"] == 0.68
@@ -38,7 +42,7 @@ telegram_channels:
     )
 
     config = load_source_config(tmp_path)
-    ak47, markettwits = config.telegram_channels
+    ak47, markettwits, *_ = config.telegram_channels
 
     assert ak47.max_items == 20
     assert markettwits.max_items == 40
@@ -70,7 +74,7 @@ source_quality:
     scoring = load_scoring_config(tmp_path)
 
     assert collection.lanes[0].interval_seconds == 120
-    assert collection.lanes[0].source_ids[-1] == "telegram_markettwits"
+    assert collection.lanes[0].source_ids[-1] == "telegram_russianmacro"
     assert scoring.default_source_quality == 0.6
     assert scoring.source_quality["telegram_markettwits"] == 0.72
     assert scoring.source_quality["interfax"] == 0.9

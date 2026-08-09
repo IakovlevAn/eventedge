@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hmac
 import io
 import os
 import re
@@ -44,6 +45,7 @@ from eventedge.evals import (
     event_time_export_rows,
     outcome_export_rows,
 )
+from eventedge.events import classify_news_event, cluster_market_events
 from eventedge.llm import analyzer_from_environment
 from eventedge.market import (
     InstrumentNotFoundError,
@@ -51,6 +53,7 @@ from eventedge.market import (
     MoexMarketDataClient,
     scenario_range,
 )
+from eventedge.source_registry import configured_sources
 from eventedge.storage import (
     IdempotencyConflictError,
     MemoryNewsRepository,
@@ -58,6 +61,7 @@ from eventedge.storage import (
     NewsRecord,
     NewsRepository,
     SignalRecord,
+    TelegramSourceRecord,
     YdbNewsRepository,
     canonical_payload_hash,
     deduplicate_signals,
@@ -75,6 +79,7 @@ NEWS_COLLECTION_INTERVAL_SECONDS = next(
 NEWS_CLIENT_REFRESH_INTERVAL_SECONDS = 30
 NEWS_DELIVERY_TARGET_SECONDS = 120
 EVALUATION_CACHE_TTL_SECONDS = 60
+MAX_TELEGRAM_CHANNELS = 12
 
 
 class NewsIngestRequest(BaseModel):
@@ -122,6 +127,18 @@ class TimerEnvelope(BaseModel):
     messages: Annotated[list[TimerMessage], Field(min_length=1, max_length=100)]
 
 
+class TelegramSourceCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel: Annotated[str, Field(pattern=r"^@?[A-Za-z0-9_]{3,48}$")]
+    display_name: Annotated[str | None, Field(min_length=2, max_length=80)] = None
+
+    @field_validator("channel")
+    @classmethod
+    def normalize_channel(cls, value: str) -> str:
+        return value.removeprefix("@")
+
+
 def repository_from_environment(environment: Mapping[str, str]) -> NewsRepository:
     analyzer = analyzer_from_environment(environment)
     endpoint = environment.get("YDB_ENDPOINT")
@@ -145,6 +162,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await repository.stop()
+
 
 app = FastAPI(
     title="EventEdge API",
@@ -315,9 +333,7 @@ async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONRespons
     repository: NewsRepository = request.app.state.news_repository
     collectors = request.app.state.collectors
     results: dict[str, dict[str, int]] = {}
-    for collector_name in dict.fromkeys(
-        message.details.payload for message in envelope.messages
-    ):
+    for collector_name in dict.fromkeys(message.details.payload for message in envelope.messages):
         collector = collectors.get(collector_name)
         if collector is None:
             return problem_response(
@@ -411,12 +427,12 @@ async def list_news(
         str | None,
         Query(pattern=r"^[a-z][a-z0-9_-]{2,63}$"),
     ] = None,
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    scope: Annotated[Literal["market", "sector", "company"] | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 20,
 ) -> JSONResponse:
     repository: NewsRepository = request.app.state.news_repository
     stored_news = await repository.list_news(source_id=source_id, limit=1000)
     visible_news = public_news(stored_news)
-    news = visible_news[:limit]
     signals = await repository.list_signals(
         ticker=None,
         directions=None,
@@ -437,8 +453,21 @@ async def list_news(
                 "status": signal.status,
             }
         )
+    event_by_news = {
+        item.id: classify_news_event(
+            title=item.title,
+            content=item.content,
+            source_metadata=item.source_metadata,
+            related_signals=signals_by_news.get(item.id, []),
+        )
+        for item in visible_news
+    }
+    scoped_news = [
+        item for item in visible_news if scope is None or event_by_news[item.id]["scope"] == scope
+    ]
+    news = scoped_news[:limit]
     source_stats: dict[str, dict[str, object]] = {}
-    for item in visible_news:
+    for item in scoped_news:
         stat = source_stats.setdefault(
             item.source_id,
             {
@@ -449,22 +478,26 @@ async def list_news(
             },
         )
         stat["count"] = int(stat["count"]) + 1
-        stat["signal_count"] = int(stat["signal_count"]) + len(
-            signals_by_news.get(item.id, [])
-        )
+        stat["signal_count"] = int(stat["signal_count"]) + len(signals_by_news.get(item.id, []))
     data = []
     for item in news:
         record = item.as_api_dict()
         record["related_signals"] = signals_by_news.get(item.id, [])
+        record["event"] = event_by_news[item.id]
         data.append(record)
+    scope_counts = {"market": 0, "sector": 0, "company": 0}
+    for event in event_by_news.values():
+        scope_counts[str(event["scope"])] += 1
     return JSONResponse(
         content={
             "data": data,
             "meta": {
                 "limit": limit,
-                "total": len(visible_news),
-                "has_more": len(visible_news) > limit,
+                "total": len(scoped_news),
+                "has_more": len(scoped_news) > limit,
                 "next_cursor": None,
+                "scope": scope,
+                "scope_counts": scope_counts,
                 "last_ingested_at": (
                     max(item.created_at for item in visible_news)
                     .astimezone(UTC)
@@ -484,6 +517,169 @@ async def list_news(
             },
         }
     )
+
+
+@app.get("/v1/events", tags=["Events"])
+async def list_market_events(
+    request: Request,
+    scope: Annotated[Literal["market", "sector", "company"] | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> JSONResponse:
+    repository: NewsRepository = request.app.state.news_repository
+    news = public_news(await repository.list_news(source_id=None, limit=1000))
+    signals = deduplicate_signals(
+        await repository.list_signals(
+            ticker=None,
+            directions=None,
+            status=None,
+            min_confidence=None,
+            limit=1000,
+        )
+    )
+    signals_by_news: dict[str, list[dict[str, object]]] = {}
+    for signal in signals:
+        signals_by_news.setdefault(signal.news_id, []).append(
+            {
+                "id": signal.id,
+                "ticker": signal.ticker,
+                "direction": signal.direction,
+                "score": signal.score,
+                "confidence": signal.confidence,
+                "status": signal.status,
+            }
+        )
+    candidates: list[dict[str, object]] = []
+    for item in news:
+        related_signals = signals_by_news.get(item.id, [])
+        projection = classify_news_event(
+            title=item.title,
+            content=item.content,
+            source_metadata=item.source_metadata,
+            related_signals=related_signals,
+        )
+        if scope is not None and projection["scope"] != scope:
+            continue
+        candidates.append(
+            {
+                "id": f"event_{item.id.removeprefix('news_')}",
+                "title": item.title,
+                "summary": item.content,
+                "published_at": item.as_api_dict()["published_at"],
+                "source_id": item.source_id,
+                "source_url": item.url,
+                "news_id": item.id,
+                "related_signals": related_signals,
+                **projection,
+            }
+        )
+    events = cluster_market_events(candidates)
+    return JSONResponse(
+        content={
+            "data": events[:limit],
+            "meta": {
+                "limit": limit,
+                "scope": scope,
+                "total": len(events),
+                "has_more": len(events) > limit,
+            },
+        }
+    )
+
+
+@app.get("/v1/sources", tags=["Sources"])
+async def list_sources(request: Request) -> JSONResponse:
+    repository: NewsRepository = request.app.state.news_repository
+    stored_news = public_news(await repository.list_news(source_id=None, limit=1000))
+    stats: dict[str, dict[str, object]] = {}
+    for item in stored_news:
+        stat = stats.setdefault(
+            item.source_id,
+            {"count": 0, "last_published_at": item.as_api_dict()["published_at"]},
+        )
+        stat["count"] = int(stat["count"]) + 1
+
+    sources = configured_sources()
+    configured_ids = {str(source["source_id"]) for source in sources}
+    for source in await repository.list_telegram_sources():
+        if source.source_id not in configured_ids:
+            sources.append(source.as_api_dict())
+    for source in sources:
+        source.update(stats.get(str(source["source_id"]), {"count": 0, "last_published_at": None}))
+    return JSONResponse(
+        content={
+            "data": sources,
+            "meta": {
+                "telegram_limit": MAX_TELEGRAM_CHANNELS,
+                "telegram_active": sum(
+                    source.get("kind") == "Telegram" and source.get("enabled") for source in sources
+                ),
+                "poll_interval_seconds": NEWS_COLLECTION_INTERVAL_SECONDS,
+            },
+        }
+    )
+
+
+@app.post("/v1/sources/telegram", tags=["Sources"], status_code=201)
+async def create_telegram_source(
+    payload: TelegramSourceCreate,
+    request: Request,
+    admin_key: Annotated[str | None, Header(alias="X-EventEdge-Admin-Key")] = None,
+) -> JSONResponse:
+    expected_key = os.environ.get("EVENTEDGE_ADMIN_KEY")
+    if not expected_key:
+        return problem_response(
+            request,
+            status=503,
+            code="SOURCE_ADMIN_NOT_CONFIGURED",
+            title="Source administration is not configured",
+            detail="Set EVENTEDGE_ADMIN_KEY for the production runtime.",
+        )
+    if not admin_key or not hmac.compare_digest(admin_key, expected_key):
+        return problem_response(
+            request,
+            status=401,
+            code="INVALID_ADMIN_KEY",
+            title="Invalid admin key",
+            detail="A valid X-EventEdge-Admin-Key header is required.",
+        )
+
+    repository: NewsRepository = request.app.state.news_repository
+    configured = configured_sources()
+    dynamic = await repository.list_telegram_sources()
+    static_telegram = [source for source in configured if source.get("kind") == "Telegram"]
+    normalized_channel = payload.channel.casefold()
+    existing_channels = {
+        str(source.get("channel", "")).casefold() for source in static_telegram
+    } | {source.channel.casefold() for source in dynamic}
+    if normalized_channel in existing_channels:
+        return problem_response(
+            request,
+            status=409,
+            code="SOURCE_ALREADY_EXISTS",
+            title="Telegram source already exists",
+            detail=f"@{payload.channel} is already in the source registry.",
+        )
+    if (
+        len(static_telegram) + len([source for source in dynamic if source.enabled])
+        >= MAX_TELEGRAM_CHANNELS
+    ):
+        return problem_response(
+            request,
+            status=409,
+            code="SOURCE_LIMIT_REACHED",
+            title="Telegram source limit reached",
+            detail=f"At most {MAX_TELEGRAM_CHANNELS} Telegram channels can be active.",
+        )
+
+    source = TelegramSourceRecord(
+        source_id=f"telegram_{normalized_channel}",
+        channel=payload.channel,
+        display_name=payload.display_name or f"@{payload.channel}",
+        enabled=True,
+        created_at=datetime.now(UTC),
+    )
+    await repository.upsert_telegram_source(source)
+    return JSONResponse(status_code=201, content={"data": source.as_api_dict()})
 
 
 @app.get("/v1/signals", tags=["Signals"])
@@ -524,9 +720,9 @@ async def list_signals(
     )
     news = await repository.list_news(source_id=None, limit=1000)
     hidden_ids = hidden_news_ids(news)
-    signals = deduplicate_signals(
-        signal for signal in signals if signal.news_id not in hidden_ids
-    )[:limit]
+    signals = deduplicate_signals(signal for signal in signals if signal.news_id not in hidden_ids)[
+        :limit
+    ]
     data = [signal.as_api_dict() for signal in signals]
     cache_payload = {
         "ticker": ticker,
@@ -604,11 +800,7 @@ def instrument_data(
             horizon_unit=active_signal.horizon_unit,
         )
 
-    market = {
-        key: value
-        for key, value in market_snapshot.items()
-        if key not in {"ticker", "name"}
-    }
+    market = {key: value for key, value in market_snapshot.items() if key not in {"ticker", "name"}}
     return {
         "ticker": ticker,
         "name": market_snapshot["name"],
@@ -643,14 +835,12 @@ def _requested_assessment_tickers(value: str | None) -> list[str] | None:
     normalized = (
         list(DEFAULT_MOEX_ALIASES)
         if value is None
-        else list(
-            dict.fromkeys(
-                part.strip().upper() for part in value.split(",") if part.strip()
-            )
-        )
+        else list(dict.fromkeys(part.strip().upper() for part in value.split(",") if part.strip()))
     )
-    if not normalized or len(normalized) > 20 or any(
-        not re.fullmatch(r"[A-Z0-9]{1,12}", ticker) for ticker in normalized
+    if (
+        not normalized
+        or len(normalized) > 20
+        or any(not re.fullmatch(r"[A-Z0-9]{1,12}", ticker) for ticker in normalized)
     ):
         return None
     return normalized
@@ -815,9 +1005,7 @@ async def evaluation_material(
         if inflight is not None and inflight[0] == cache_key:
             task = inflight[1]
         else:
-            task = asyncio.create_task(
-                _load_evaluation_material(repository, market_data_client)
-            )
+            task = asyncio.create_task(_load_evaluation_material(repository, market_data_client))
             state.evaluation_material_inflight = (cache_key, task)
 
             def cache_result(done: asyncio.Task) -> None:
@@ -967,8 +1155,10 @@ async def list_instrument_snapshots(
     normalized = list(
         dict.fromkeys(part.strip().upper() for part in tickers.split(",") if part.strip())
     )
-    if not normalized or len(normalized) > 20 or any(
-        not re.fullmatch(r"[A-Z0-9]{1,12}", ticker) for ticker in normalized
+    if (
+        not normalized
+        or len(normalized) > 20
+        or any(not re.fullmatch(r"[A-Z0-9]{1,12}", ticker) for ticker in normalized)
     ):
         return problem_response(
             request,

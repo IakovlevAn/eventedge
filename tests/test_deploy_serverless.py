@@ -46,6 +46,23 @@ def test_api_error_masker_hides_tokens() -> None:
     assert masked("failed t1_secret-value") == "failed ***"
 
 
+def test_admin_key_is_forwarded_only_when_configured() -> None:
+    environment = {
+        "YC_CONTAINER_ID": "container-id",
+        "YC_RUNTIME_SERVICE_ACCOUNT_ID": "runtime-sa-id",
+        "YC_FOLDER_ID": "folder-id",
+        "IMAGE_URL": "cr.yandex/registry/eventedge-api:sha",
+        "DEPLOY_SHA": "abc123",
+        "YDB_ENDPOINT": "grpcs://ydb.example:2135",
+        "YDB_DATABASE": "/region/cloud/database",
+        "EVENTEDGE_ADMIN_KEY": "example-test-key",
+    }
+
+    payload = build_payload(environment)
+
+    assert payload["imageSpec"]["environment"]["EVENTEDGE_ADMIN_KEY"] == "example-test-key"
+
+
 def test_budget_policy_matches_deployment_caps() -> None:
     policy = yaml.safe_load(Path("infra/budget-policy.yaml").read_text(encoding="utf-8"))
     runtime = policy["runtime_caps"]["serverless_container"]

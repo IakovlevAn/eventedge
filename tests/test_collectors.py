@@ -17,6 +17,7 @@ from eventedge.collectors import (
     is_company_news_candidate,
     is_google_market_background_candidate,
     is_google_market_signal_candidate,
+    is_market_event_candidate,
     is_market_signal_candidate,
     is_moex_equity_title,
     is_watched_company_news,
@@ -254,6 +255,20 @@ def test_market_candidate_requires_company_event_and_rejects_opinion() -> None:
     assert is_company_news_candidate(opinion) is False
 
 
+def test_market_event_filter_keeps_sector_incident_without_company_signal() -> None:
+    incident = RssItem(
+        external_id="sector-incident",
+        published_at=datetime(2026, 8, 9, tzinfo=UTC),
+        title="БПЛА повредил склад Wildberries",
+        url="https://t.me/example/1",
+        content="Логистический объект временно остановил работу.",
+        categories=(),
+    )
+
+    assert is_market_event_candidate(incident) is True
+    assert is_market_signal_candidate(incident) is False
+
+
 def test_market_candidate_rejects_promo_and_debt_noise() -> None:
     promo = RssItem(
         external_id="market-3",
@@ -358,10 +373,10 @@ def test_composite_collector_isolates_a_failed_feed(
     result = asyncio.run(collectors_module.collect_market_news(repository))
 
     assert result == {
-        "fetched": 8,
-        "matched": 8,
+        "fetched": 12,
+        "matched": 12,
         "signal_candidates": 0,
-        "accepted": 8,
+        "accepted": 12,
         "replayed": 0,
         "failed": 7,
     }
@@ -411,12 +426,16 @@ def test_fast_collector_uses_only_direct_feeds_and_isolates_failures(
     assert telegram_called == [
         ("telegram_ak47pfl", 5),
         ("telegram_markettwits", 5),
+        ("telegram_centralbank_russia", 5),
+        ("telegram_moscowexchangeofficial", 5),
+        ("telegram_bcs_express", 5),
+        ("telegram_russianmacro", 5),
     ]
     assert result == {
-        "fetched": 5,
-        "matched": 5,
+        "fetched": 9,
+        "matched": 9,
         "signal_candidates": 0,
-        "accepted": 5,
+        "accepted": 9,
         "replayed": 0,
         "failed": 1,
     }
