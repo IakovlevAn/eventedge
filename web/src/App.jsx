@@ -2007,7 +2007,7 @@ export default function App() {
       try {
         const [signalResponse, newsResponse, sourceResponse] = await Promise.all([
           fetch(apiUrl("/v1/signals?status=active&limit=100"), { signal: controller.signal }),
-          fetch(apiUrl("/v1/news?limit=300"), { signal: controller.signal }),
+          fetch(apiUrl("/v1/news?limit=100"), { signal: controller.signal }),
           fetch(apiUrl("/v1/sources"), { signal: controller.signal }),
         ]);
         if (!signalResponse.ok || !newsResponse.ok || !sourceResponse.ok) throw new Error("API вернул ошибку. Попробуй обновить страницу.");
@@ -2060,7 +2060,7 @@ export default function App() {
       }
     };
     load();
-    const refreshMs = 30000;
+    const refreshMs = 60000;
     const interval = window.setInterval(load, refreshMs);
     const handleVisibility = () => {
       if (document.visibilityState === "visible") load();

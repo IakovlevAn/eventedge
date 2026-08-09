@@ -90,6 +90,7 @@ NEWS_COLLECTION_INTERVAL_SECONDS = next(
 NEWS_CLIENT_REFRESH_INTERVAL_SECONDS = 30
 NEWS_DELIVERY_TARGET_SECONDS = 120
 EVALUATION_CACHE_TTL_SECONDS = 60
+CONTENT_SNAPSHOT_TTL_SECONDS = 15 if os.environ.get("APP_ENV") == "prod" else 0
 MAX_TELEGRAM_CHANNELS = 18
 DEFAULT_ASSESSMENT_TICKERS = (
     "SBER",
@@ -237,6 +238,8 @@ app.state.market_data_client = MoexMarketDataClient()
 app.state.evaluation_material_cache = None
 app.state.evaluation_material_inflight = None
 app.state.evaluation_material_lock = asyncio.Lock()
+app.state.content_snapshot_cache = None
+app.state.content_snapshot_lock = asyncio.Lock()
 app.state.collectors = {
     "cbr_press": collect_cbr_press,
     "fast_news": collect_fast_news,
@@ -270,6 +273,53 @@ def hidden_news_ids(items: list[NewsRecord]) -> set[str]:
         if item.source_id in PUBLIC_HIDDEN_SOURCE_IDS
         or (item.source_id == "moex_news" and not is_moex_equity_title(item.title))
     }
+
+
+async def load_content_snapshot(request: Request) -> tuple[list[NewsRecord], list[SignalRecord]]:
+    """Coalesce the repeated YDB reads used by the public market endpoints."""
+    repository: NewsRepository = request.app.state.news_repository
+    now = time.monotonic()
+    cached = request.app.state.content_snapshot_cache
+    if (
+        CONTENT_SNAPSHOT_TTL_SECONDS > 0
+        and cached is not None
+        and cached["repository"] is repository
+        and cached["expires_at"] > now
+    ):
+        return cached["news"], cached["signals"]
+
+    async with request.app.state.content_snapshot_lock:
+        now = time.monotonic()
+        cached = request.app.state.content_snapshot_cache
+        if (
+            CONTENT_SNAPSHOT_TTL_SECONDS > 0
+            and cached is not None
+            and cached["repository"] is repository
+            and cached["expires_at"] > now
+        ):
+            return cached["news"], cached["signals"]
+        news, signals = await asyncio.gather(
+            repository.list_news(source_id=None, limit=1000),
+            repository.list_signals(
+                ticker=None,
+                directions=None,
+                status=None,
+                min_confidence=None,
+                limit=1000,
+            ),
+        )
+        if CONTENT_SNAPSHOT_TTL_SECONDS > 0:
+            request.app.state.content_snapshot_cache = {
+                "repository": repository,
+                "expires_at": now + CONTENT_SNAPSHOT_TTL_SECONDS,
+                "news": news,
+                "signals": signals,
+            }
+        return news, signals
+
+
+def invalidate_content_snapshot(request: Request) -> None:
+    request.app.state.content_snapshot_cache = None
 
 
 def health_payload() -> dict[str, str]:
@@ -404,6 +454,7 @@ async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONRespons
                 detail=f"Collector {collector_name!r} is not configured.",
             )
         results[collector_name] = await collector(repository)
+    invalidate_content_snapshot(request)
     return JSONResponse({"status": "ok", "collectors": results})
 
 
@@ -450,6 +501,7 @@ async def ingest_news(
     headers = {"Location": f"/v1/jobs/{result.job.id}"}
     if result.replayed:
         headers["Idempotency-Replayed"] = "true"
+    invalidate_content_snapshot(request)
     return JSONResponse(
         status_code=202,
         content={"data": result.job.as_api_dict()},
@@ -490,16 +542,10 @@ async def list_news(
     scope: Annotated[Literal["market", "sector", "company"] | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 20,
 ) -> JSONResponse:
-    repository: NewsRepository = request.app.state.news_repository
-    stored_news = await repository.list_news(source_id=source_id, limit=1000)
+    stored_news, stored_signals = await load_content_snapshot(request)
+    if source_id is not None:
+        stored_news = [item for item in stored_news if item.source_id == source_id]
     visible_news = public_news(stored_news)
-    stored_signals = await repository.list_signals(
-        ticker=None,
-        directions=None,
-        status=None,
-        min_confidence=None,
-        limit=1000,
-    )
     news_by_id = {item.id: item for item in stored_news}
     signals = normalize_signal_freshness(stored_signals, news_by_id)
     signals_by_news: dict[str, list[dict[str, object]]] = {}
@@ -587,15 +633,8 @@ async def list_market_events(
     scope: Annotated[Literal["market", "sector", "company"] | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> JSONResponse:
-    repository: NewsRepository = request.app.state.news_repository
-    news = public_news(await repository.list_news(source_id=None, limit=1000))
-    stored_signals = await repository.list_signals(
-        ticker=None,
-        directions=None,
-        status=None,
-        min_confidence=None,
-        limit=1000,
-    )
+    stored_news, stored_signals = await load_content_snapshot(request)
+    news = public_news(stored_news)
     signals = latest_model_signal_per_news(
         deduplicate_signals(
             normalize_signal_freshness(stored_signals, {item.id: item for item in news})
@@ -654,7 +693,8 @@ async def list_market_events(
 @app.get("/v1/sources", tags=["Sources"])
 async def list_sources(request: Request) -> JSONResponse:
     repository: NewsRepository = request.app.state.news_repository
-    stored_news = public_news(await repository.list_news(source_id=None, limit=1000))
+    stored_news, _ = await load_content_snapshot(request)
+    stored_news = public_news(stored_news)
     stats: dict[str, dict[str, object]] = {}
     for item in stored_news:
         stat = stats.setdefault(
@@ -873,6 +913,7 @@ async def reprocess_signal_candidates(
     completed = [result for result in results if isinstance(result, dict)]
     failed = [type(result).__name__ for result in results if isinstance(result, BaseException)]
     request.app.state.evaluation_material_cache = None
+    invalidate_content_snapshot(request)
     return JSONResponse(
         content={
             "data": completed,
@@ -918,15 +959,7 @@ async def list_signals(
             detail="direction must contain only up, neutral or down.",
         )
 
-    repository: NewsRepository = request.app.state.news_repository
-    stored_signals = await repository.list_signals(
-        ticker=ticker,
-        directions=requested_directions,
-        status=None,
-        min_confidence=min_confidence,
-        limit=1000,
-    )
-    news = await repository.list_news(source_id=None, limit=1000)
+    news, stored_signals = await load_content_snapshot(request)
     hidden_ids = hidden_news_ids(news)
     news_by_id = {item.id: item for item in news}
     signals = filter_signals(
@@ -1110,22 +1143,15 @@ async def list_assessments(
             detail="tickers must contain 1 to 20 comma-separated MOEX tickers.",
         )
 
-    repository: NewsRepository = request.app.state.news_repository
     market_data_client: MoexMarketDataClient = request.app.state.market_data_client
-    stored_signals, stored_news, market_results = await asyncio.gather(
-        repository.list_signals(
-            ticker=None,
-            directions=None,
-            status=None,
-            min_confidence=None,
-            limit=1000,
-        ),
-        repository.list_news(source_id=None, limit=1000),
+    content, market_results = await asyncio.gather(
+        load_content_snapshot(request),
         asyncio.gather(
             *(market_data_client.snapshot(ticker) for ticker in normalized),
             return_exceptions=True,
         ),
     )
+    stored_news, stored_signals = content
     hidden_ids = hidden_news_ids(stored_news)
     news_by_id = {item.id: item for item in stored_news}
     active_signals = filter_signals(
