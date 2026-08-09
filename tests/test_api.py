@@ -1,9 +1,12 @@
 import asyncio
+import time
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 
+import eventedge.main as main_module
 from eventedge.main import app
 from eventedge.storage import MemoryNewsRepository, NewsDocument
 
@@ -39,6 +42,20 @@ def test_invalid_request_id_is_replaced() -> None:
 
     assert response.status_code == 200
     assert response.headers["X-Request-Id"].startswith("req_")
+
+
+def test_readiness_reuses_recent_repository_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ready = AsyncMock(side_effect=AssertionError("readiness probe should use recent success"))
+    monkeypatch.setattr(main_module, "RECENT_REPOSITORY_SUCCESS_TTL_SECONDS", 120)
+    monkeypatch.setattr(app.state.news_repository, "ready", ready)
+    app.state.repository_last_success_at = time.monotonic()
+
+    response = client.get("/health/ready")
+
+    assert response.status_code == 200
+    ready.assert_not_awaited()
 
 
 def test_source_registry_and_protected_telegram_addition(

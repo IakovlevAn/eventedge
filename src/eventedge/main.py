@@ -91,6 +91,7 @@ NEWS_CLIENT_REFRESH_INTERVAL_SECONDS = 30
 NEWS_DELIVERY_TARGET_SECONDS = 120
 EVALUATION_CACHE_TTL_SECONDS = 60
 CONTENT_SNAPSHOT_TTL_SECONDS = 15 if os.environ.get("APP_ENV") == "prod" else 0
+RECENT_REPOSITORY_SUCCESS_TTL_SECONDS = 120 if os.environ.get("APP_ENV") == "prod" else 0
 MAX_TELEGRAM_CHANNELS = 18
 DEFAULT_ASSESSMENT_TICKERS = (
     "SBER",
@@ -219,6 +220,7 @@ def repository_from_environment(environment: Mapping[str, str]) -> NewsRepositor
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     repository: NewsRepository = application.state.news_repository
     await repository.start()
+    application.state.repository_last_success_at = time.monotonic()
     try:
         yield
     finally:
@@ -240,6 +242,7 @@ app.state.evaluation_material_inflight = None
 app.state.evaluation_material_lock = asyncio.Lock()
 app.state.content_snapshot_cache = None
 app.state.content_snapshot_lock = asyncio.Lock()
+app.state.repository_last_success_at = None
 app.state.collectors = {
     "cbr_press": collect_cbr_press,
     "fast_news": collect_fast_news,
@@ -308,6 +311,7 @@ async def load_content_snapshot(request: Request) -> tuple[list[NewsRecord], lis
                 limit=1000,
             ),
         )
+        request.app.state.repository_last_success_at = time.monotonic()
         if CONTENT_SNAPSHOT_TTL_SECONDS > 0:
             request.app.state.content_snapshot_cache = {
                 "repository": repository,
@@ -423,10 +427,21 @@ async def liveness() -> dict[str, str]:
 @app.get("/health/ready", tags=["Health"])
 async def readiness(request: Request) -> Response:
     repository: NewsRepository = request.app.state.news_repository
-    try:
-        ready = await repository.ready()
-    except Exception:
-        ready = False
+    last_success_at = request.app.state.repository_last_success_at
+    recently_succeeded = (
+        RECENT_REPOSITORY_SUCCESS_TTL_SECONDS > 0
+        and last_success_at is not None
+        and time.monotonic() - last_success_at <= RECENT_REPOSITORY_SUCCESS_TTL_SECONDS
+    )
+    if recently_succeeded:
+        ready = True
+    else:
+        try:
+            ready = await asyncio.wait_for(repository.ready(), timeout=2.5)
+        except Exception:
+            ready = False
+        if ready:
+            request.app.state.repository_last_success_at = time.monotonic()
     if not ready:
         return problem_response(
             request,

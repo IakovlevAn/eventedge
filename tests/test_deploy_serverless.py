@@ -28,8 +28,8 @@ def test_deployment_payload_has_budget_caps() -> None:
     assert payload["provisionPolicy"] == {"minInstances": "1"}
     assert payload["executionTimeout"] == "180s"
     assert payload["scalingPolicy"] == {
-        "zoneInstancesLimit": "3",
-        "zoneRequestsLimit": "24",
+        "zoneInstancesLimit": "1",
+        "zoneRequestsLimit": "8",
     }
     assert payload["runtime"] == {"http": {}}
     assert payload["imageSpec"]["environment"] == {
@@ -108,8 +108,8 @@ def test_budget_policy_matches_deployment_caps() -> None:
         "cores": 1,
         "concurrency": 8,
         "min_instances": 1,
-        "zone_instances_limit": 3,
-        "zone_requests_limit": 24,
+        "zone_instances_limit": 1,
+        "zone_requests_limit": 8,
         "execution_timeout_seconds": 180,
     }
     assert policy["runtime_caps"]["collection_worker"] == {
