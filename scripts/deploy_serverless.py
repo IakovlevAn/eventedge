@@ -45,8 +45,8 @@ def build_payload(environment: Mapping[str, str]) -> dict[str, object]:
         "concurrency": "2",
         "provisionPolicy": {"minInstances": "1"},
         "scalingPolicy": {
-            "zoneInstancesLimit": "2",
-            "zoneRequestsLimit": "20",
+            "zoneInstancesLimit": "5",
+            "zoneRequestsLimit": "50",
         },
         "runtime": {"http": {}},
     }
