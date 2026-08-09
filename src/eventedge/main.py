@@ -19,6 +19,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
 from eventedge import __version__
+from eventedge.analysis import DEFAULT_MOEX_ALIASES
 from eventedge.collectors import (
     collect_cbr_press,
     collect_discovery_news,
@@ -26,6 +27,12 @@ from eventedge.collectors import (
     collect_market_news,
     collect_slow_news,
     is_moex_equity_title,
+)
+from eventedge.evals import (
+    build_assessment,
+    demo_account,
+    eval_summary,
+    evaluate_signal,
 )
 from eventedge.llm import analyzer_from_environment
 from eventedge.market import (
@@ -43,6 +50,7 @@ from eventedge.storage import (
     SignalRecord,
     YdbNewsRepository,
     canonical_payload_hash,
+    deduplicate_signals,
 )
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
@@ -416,7 +424,7 @@ async def list_news(
         limit=1000,
     )
     signals_by_news: dict[str, list[dict[str, object]]] = {}
-    for signal in signals:
+    for signal in deduplicate_signals(signals):
         signals_by_news.setdefault(signal.news_id, []).append(
             {
                 "id": signal.id,
@@ -515,9 +523,9 @@ async def list_signals(
     )
     news = await repository.list_news(source_id=None, limit=1000)
     hidden_ids = hidden_news_ids(news)
-    signals = [signal for signal in signals if signal.news_id not in hidden_ids][
-        :limit
-    ]
+    signals = deduplicate_signals(
+        signal for signal in signals if signal.news_id not in hidden_ids
+    )[:limit]
     data = [signal.as_api_dict() for signal in signals]
     cache_payload = {
         "ticker": ticker,
@@ -617,10 +625,157 @@ async def active_signals_by_ticker(repository: NewsRepository) -> dict[str, Sign
     )
     hidden_ids = hidden_news_ids(news)
     result: dict[str, SignalRecord] = {}
-    for signal in signals:
+    for signal in deduplicate_signals(signals):
         if signal.news_id not in hidden_ids and signal.ticker not in result:
             result[signal.ticker] = signal
     return result
+
+
+def _requested_assessment_tickers(value: str | None) -> list[str] | None:
+    normalized = (
+        list(DEFAULT_MOEX_ALIASES)
+        if value is None
+        else list(
+            dict.fromkeys(
+                part.strip().upper() for part in value.split(",") if part.strip()
+            )
+        )
+    )
+    if not normalized or len(normalized) > 20 or any(
+        not re.fullmatch(r"[A-Z0-9]{1,12}", ticker) for ticker in normalized
+    ):
+        return None
+    return normalized
+
+
+@app.get("/v1/assessments", tags=["Signals"])
+async def list_assessments(
+    request: Request,
+    tickers: Annotated[str | None, Query(max_length=260)] = None,
+) -> Response:
+    normalized = _requested_assessment_tickers(tickers)
+    if normalized is None:
+        return problem_response(
+            request,
+            status=400,
+            code="INVALID_PARAMETER",
+            title="Invalid assessment tickers",
+            detail="tickers must contain 1 to 20 comma-separated MOEX tickers.",
+        )
+
+    repository: NewsRepository = request.app.state.news_repository
+    market_data_client: MoexMarketDataClient = request.app.state.market_data_client
+    active_by_ticker, stored_news, market_results = await asyncio.gather(
+        active_signals_by_ticker(repository),
+        repository.list_news(source_id=None, limit=1000),
+        asyncio.gather(
+            *(market_data_client.snapshot(ticker) for ticker in normalized),
+            return_exceptions=True,
+        ),
+    )
+    visible_news = public_news(stored_news)
+    data = []
+    errors = []
+    for ticker, result in zip(normalized, market_results, strict=True):
+        if isinstance(result, asyncio.CancelledError):
+            raise result
+        if isinstance(result, InstrumentNotFoundError):
+            errors.append({"ticker": ticker, "code": "INSTRUMENT_NOT_FOUND"})
+            continue
+        if isinstance(result, BaseException):
+            errors.append({"ticker": ticker, "code": "MARKET_DATA_UNAVAILABLE"})
+            continue
+        assessment = build_assessment(
+            ticker,
+            result,
+            visible_news,
+            active_by_ticker.get(ticker),
+        )
+        assessment["scenario"] = scenario_range(
+            result,
+            direction=str(assessment["direction"]),
+            score=float(assessment["score"]),
+            confidence=float(assessment["confidence"]),
+            horizon_value=3,
+            horizon_unit="trading_days",
+        )
+        data.append(assessment)
+
+    return JSONResponse(
+        content={
+            "data": data,
+            "errors": errors,
+            "meta": {
+                "requested": len(normalized),
+                "returned": len(data),
+                "directed": sum(item["direction"] != "neutral" for item in data),
+                "market_biases": sum(item["bias_direction"] != "neutral" for item in data),
+                "news_backed": sum(item["assessment_type"] == "hybrid" for item in data),
+                "refresh_after_seconds": 30,
+                "score_scale": {"min": -100, "neutral_low": -18, "neutral_high": 18, "max": 100},
+            },
+        }
+    )
+
+
+@app.get("/v1/evals", tags=["Evals"])
+async def list_evals(request: Request) -> JSONResponse:
+    repository: NewsRepository = request.app.state.news_repository
+    market_data_client: MoexMarketDataClient = request.app.state.market_data_client
+    stored_signals, stored_news = await asyncio.gather(
+        repository.list_signals(
+            ticker=None,
+            directions=None,
+            status=None,
+            min_confidence=None,
+            limit=1000,
+        ),
+        repository.list_news(source_id=None, limit=1000),
+    )
+    news_by_id = {item.id: item for item in public_news(stored_news)}
+    signals = [
+        signal
+        for signal in deduplicate_signals(stored_signals)
+        if signal.news_id in news_by_id
+    ][:100]
+    tickers = list(dict.fromkeys(signal.ticker for signal in signals))
+    candle_results = await asyncio.gather(
+        *(market_data_client.candles(ticker, interval=10, lookback_days=14) for ticker in tickers),
+        return_exceptions=True,
+    )
+    candles_by_ticker = {
+        ticker: result.get("candles", [])
+        for ticker, result in zip(tickers, candle_results, strict=True)
+        if isinstance(result, dict)
+    }
+    outcomes = [
+        evaluate_signal(
+            signal,
+            candles_by_ticker.get(signal.ticker, []),
+            news_by_id.get(signal.news_id),
+        )
+        for signal in signals
+    ]
+    summary = eval_summary(outcomes)
+    account = demo_account(outcomes)
+    return JSONResponse(
+        content={
+            "data": {
+                "summary": summary,
+                "demo_account": account,
+                "outcomes": outcomes,
+            },
+            "meta": {
+                "generated_at": utc_now(),
+                "refresh_after_seconds": 60,
+                "evaluation_window": "1h / 1d / 3d after the first tradable candle",
+                "warning": (
+                    "Prototype retrospective on the available MOEX window; "
+                    "it is not a point-in-time calibrated backtest or proof of alpha."
+                ),
+            },
+        }
+    )
 
 
 @app.get("/v1/instruments/snapshots", tags=["Instruments"])

@@ -413,6 +413,107 @@ def test_batch_instrument_snapshots_validate_tickers() -> None:
     assert response.json()["code"] == "INVALID_PARAMETER"
 
 
+def test_assessments_cover_companies_without_fresh_news_signal() -> None:
+    original = app.state.market_data_client
+
+    class FakeMarketDataClient:
+        async def snapshot(self, ticker: str) -> dict[str, object]:
+            return {
+                "ticker": ticker,
+                "name": ticker,
+                "last_price": "105.0",
+                "currency": "RUB",
+                "observed_at": "2026-08-08T16:00:08Z",
+                "daily_change_pct": 1.4,
+                "volume_shares": 2_000_000,
+                "value_rub": 300_000_000.0,
+                "lot_size": 1,
+                "liquidity_status": "sufficient",
+                "daily_volatility_pct": 1.6,
+                "annualized_volatility_pct": 25.4,
+                "candles": [
+                    {
+                        "begin": f"2026-08-0{day}T07:00:00Z",
+                        "open": 99 + day,
+                        "close": 100 + day,
+                        "high": 101 + day,
+                        "low": 98 + day,
+                        "value_rub": 300_000_000.0,
+                        "volume_shares": 1_000_000 + day * 10_000,
+                    }
+                    for day in range(1, 7)
+                ],
+                "source": {"name": "MOEX ISS", "url": "https://iss.moex.com/iss/"},
+            }
+
+    app.state.market_data_client = FakeMarketDataClient()
+    try:
+        response = client.get("/v1/assessments", params={"tickers": "SBER,LKOH"})
+    finally:
+        app.state.market_data_client = original
+
+    assert response.status_code == 200
+    assert [item["ticker"] for item in response.json()["data"]] == ["SBER", "LKOH"]
+    assert all(item["assessment_type"] in {"hybrid", "quant"} for item in response.json()["data"])
+    assert {
+        "price_reaction",
+        "volume",
+        "volatility",
+        "liquidity",
+        "reporting",
+    } <= {
+        factor["code"]
+        for item in response.json()["data"]
+        for factor in item["factor_contributions"]
+    }
+    assert response.json()["meta"]["returned"] == 2
+    assert response.json()["meta"]["market_biases"] == 2
+
+
+def test_evals_endpoint_exposes_outcomes_and_demo_account() -> None:
+    original = app.state.market_data_client
+
+    class FakeMarketDataClient:
+        async def candles(
+            self,
+            ticker: str,
+            *,
+            interval: int,
+            lookback_days: int,
+        ) -> dict[str, object]:
+            assert interval == 10
+            assert lookback_days == 14
+            return {
+                "ticker": ticker,
+                "interval_minutes": 10,
+                "observed_at": "2026-08-11T10:20:00Z",
+                "candles": [
+                    {"begin": "2026-08-08T10:20:00Z", "open": 100, "close": 100},
+                    {"begin": "2026-08-08T11:20:00Z", "open": 100, "close": 101},
+                    {"begin": "2026-08-09T10:20:00Z", "open": 101, "close": 103},
+                    {"begin": "2026-08-11T10:20:00Z", "open": 103, "close": 105},
+                ],
+                "source": {"name": "MOEX ISS", "url": "https://iss.moex.com/iss/"},
+            }
+
+    app.state.market_data_client = FakeMarketDataClient()
+    try:
+        response = client.get("/v1/evals")
+    finally:
+        app.state.market_data_client = original
+
+    assert response.status_code == 200
+    assert set(response.json()["data"]) == {"summary", "demo_account", "outcomes"}
+    assert response.json()["data"]["demo_account"]["rules"] == {
+        "position_share_pct": 10.0,
+        "commission_per_side_pct": 0.05,
+        "slippage_per_side_pct": 0.05,
+        "exit_horizon": "3 calendar days",
+        "max_open_positions": 10,
+    }
+    assert "point-in-time" in response.json()["meta"]["warning"]
+
+
 def test_instrument_snapshot_does_not_revive_hidden_exchange_noise() -> None:
     noisy_news = {
         **NEWS_PAYLOAD,

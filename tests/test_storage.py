@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -12,10 +13,48 @@ from eventedge.storage import (
     MemoryNewsRepository,
     NewsDocument,
     YdbNewsRepository,
+    deduplicate_signals,
     filter_signals,
     signal_from_row,
     stable_id,
 )
+
+
+def test_legacy_signal_copies_are_collapsed() -> None:
+    first = signal_from_row(
+        SimpleNamespace(
+            signal_id="sig_first",
+            news_id="news_same",
+            ticker="SBER",
+            as_of=datetime(2026, 8, 8, 10),
+            data_cutoff_at=datetime(2026, 8, 8, 10),
+            status="active",
+            direction="up",
+            action="consider_buy",
+            horizon_value=3,
+            horizon_unit="calendar_days",
+            score=25.0,
+            strength=0.25,
+            confidence=0.75,
+            summary="First",
+            factor_contributions="[]",
+            evidence_refs="[]",
+            expires_at=datetime(2026, 8, 11, 10),
+            invalidation_conditions="[]",
+            model_version="news-baseline-0.1.1",
+            config_version=1,
+            created_at=datetime(2026, 8, 8, 10),
+        )
+    )
+    newer = replace(
+        first,
+        id="sig_newer",
+        created_at=datetime(2026, 8, 8, 10, 5, tzinfo=UTC),
+    )
+
+    result = deduplicate_signals([first, newer])
+
+    assert [signal.id for signal in result] == ["sig_newer"]
 
 
 def test_concurrent_retries_create_one_job() -> None:

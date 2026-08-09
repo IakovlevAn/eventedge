@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -260,7 +260,7 @@ def process_document(
             id=stable_id(
                 "sig_",
                 (
-                    f"{news_id}\x00{document.payload_hash}\x00{signal.ticker}\x00"
+                    f"{news_id}\x00{signal.ticker}\x00"
                     f"{signal.model_version}\x00{signal.config_version}"
                 ),
             ),
@@ -347,6 +347,26 @@ def filter_signals(
         and (min_confidence is None or signal.confidence >= min_confidence)
     )
     return sorted(filtered, key=lambda signal: (signal.as_of, signal.id), reverse=True)[:limit]
+
+
+def deduplicate_signals(signals: Iterable[SignalRecord]) -> list[SignalRecord]:
+    """Collapse legacy copies of one canonical news/ticker/model signal."""
+    unique: dict[tuple[object, ...], SignalRecord] = {}
+    for signal in signals:
+        key = (
+            signal.news_id,
+            signal.ticker,
+            signal.as_of,
+            signal.model_version,
+            signal.config_version,
+        )
+        previous = unique.get(key)
+        if previous is None or (signal.created_at, signal.id) > (
+            previous.created_at,
+            previous.id,
+        ):
+            unique[key] = signal
+    return sorted(unique.values(), key=lambda signal: (signal.as_of, signal.id), reverse=True)
 
 
 class MemoryNewsRepository:
