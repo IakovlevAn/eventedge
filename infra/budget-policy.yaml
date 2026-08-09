@@ -2,8 +2,9 @@ version: 1
 currency: RUB
 period: monthly
 monthly_budget: 10000
+monthly_soft_cap: 8500
 notifications:
-  thresholds_percent: [50, 80, 95]
+  thresholds_percent: [25, 50, 70, 85, 95]
   recipients:
     - cloud_owner
 enforcement:
@@ -11,17 +12,19 @@ enforcement:
   automatic_shutdown: false
 runtime_caps:
   serverless_container:
-    memory_mb: 512
+    memory_mb: 1024
     cores: 1
     concurrency: 2
-    min_instances: 0
-    zone_instances_limit: 1
-    zone_requests_limit: 50
-    execution_timeout_seconds: 60
+    min_instances: 1
+    zone_instances_limit: 2
+    zone_requests_limit: 20
+    execution_timeout_seconds: 180
   source_collection:
     max_telegram_channels: 18
     telegram_poll_interval_seconds: 60
     llm_analysis: signal_candidates_only
 notes:
   - The Yandex Cloud billing budget sends alerts but does not stop resource consumption.
+  - One provisioned instance removes API cold starts; the second instance exists only under load.
+  - At 8500 RUB, freeze resource increases and review the current-month forecast.
   - Automatic shutdown requires a separate explicitly approved runbook or trigger.

@@ -285,6 +285,11 @@ const companyBrands = {
   CHMF: { colors: ["#586474", "#151a21"], glyph: "СВ", asset: "/brands/CHMF.png" },
   ALRS: { colors: ["#45a4b3", "#236a77"], glyph: "АЛ", asset: "/brands/ALRS.png" },
   MOEX: { colors: ["#174d86", "#112f53"], glyph: "МБ", asset: "/brands/MOEX.png" },
+  AFLT: { colors: ["#0956a0", "#d61920"], glyph: "АФ", asset: "/brands/AFLT.png" },
+  NLMK: { colors: ["#006d80", "#013d49"], glyph: "НЛ", asset: "/brands/NLMK.png" },
+  PHOR: { colors: ["#1675ba", "#0d477a"], glyph: "ФА", asset: "/brands/PHOR.png" },
+  OZON: { colors: ["#005bff", "#003ab5"], glyph: "OZ", asset: "/brands/OZON.png" },
+  X5: { colors: ["#5dbb46", "#ec7425"], glyph: "X5", asset: "/brands/X5.png" },
 };
 
 const companyMeta = {
@@ -296,6 +301,9 @@ const companyMeta = {
   GAZP: ["Газпром", "Нефть и газ"], VTBR: ["ВТБ", "Финансы"],
   PLZL: ["Полюс", "Металлы"], CHMF: ["Северсталь", "Металлы"],
   ALRS: ["АЛРОСА", "Металлы"], MOEX: ["Московская биржа", "Финансы"],
+  AFLT: ["Аэрофлот", "Транспорт"], NLMK: ["НЛМК", "Металлы"],
+  PHOR: ["ФосАгро", "Химия"], OZON: ["Ozon", "Ритейл"],
+  X5: ["X5 Group", "Ритейл"],
 };
 
 const actionLabels = {
@@ -432,6 +440,8 @@ function signalFromApi(item) {
     market: null,
     scenario: null,
     updated: formatRelative(item.as_of),
+    signalAt: item.as_of,
+    signalCreatedAt: item.created_at,
     action: actionLabels[item.action] || item.action,
     invalidation: (item.invalidation_conditions || []).join(" "),
     factors: (item.factor_contributions || []).map((factor) => ({
@@ -446,7 +456,8 @@ function assessmentFromApi(item) {
   const [company, sector] = companyMeta[item.ticker] || [item.ticker, "Российский рынок"];
   return {
     ...item,
-    displayDirection: item.bias_direction || item.direction,
+    displayDirection: item.direction,
+    marketBiasDirection: item.bias_direction,
     company,
     sector,
     confidence: Math.round(item.confidence * 100),
@@ -458,6 +469,8 @@ function assessmentFromApi(item) {
     scenario: item.scenario || null,
     series: item.market?.candles || [],
     updated: formatRelative(item.as_of),
+    signalAt: item.news_signal?.as_of || item.as_of,
+    signalCreatedAt: item.news_signal?.created_at || item.as_of,
     action: actionLabels[item.action] || item.action,
     invalidation: item.assessment_type === "hybrid"
       ? "Пересмотреть оценку при новой существенной новости или смене реакции рынка."
@@ -638,6 +651,7 @@ function PriceChart({ dailySeries = [], intradaySeries = [], intradayStatus = "i
   const [hoveredIndex, setHoveredIndex] = useState(null);
   const [selectedClusterKey, setSelectedClusterKey] = useState(null);
   const [selectedEventId, setSelectedEventId] = useState(null);
+  const [hoveredClusterKey, setHoveredClusterKey] = useState(null);
 
   const normalizedDaily = dailySeries.map((item, index) => typeof item === "number" ? {
     begin: new Date(Date.now() - (dailySeries.length - index) * 86400000).toISOString(),
@@ -734,6 +748,10 @@ function PriceChart({ dailySeries = [], intradaySeries = [], intradayStatus = "i
   const strongestCluster = [...eventClusters].sort((left, right) => right.impact - left.impact)[0];
   const selectedCluster = eventClusters.find((cluster) => cluster.key === selectedClusterKey) || strongestCluster;
   const selectedEvent = selectedCluster?.events.find((event) => event.id === selectedEventId) || selectedCluster?.events[0];
+  const guidedCluster = eventClusters.find((cluster) => cluster.key === hoveredClusterKey) || selectedCluster;
+  const guideLabel = guidedCluster ? formatPublicationTime(guidedCluster.strongest.publishedAt) : "";
+  const guideWidth = 128;
+  const guideX = guidedCluster ? Math.max(2, Math.min(plotWidth - guideWidth - 2, guidedCluster.x - guideWidth / 2)) : 0;
 
   const handlePointerMove = (event) => {
     const svg = event.currentTarget;
@@ -802,6 +820,11 @@ function PriceChart({ dailySeries = [], intradaySeries = [], intradayStatus = "i
           <line className="chart-volume-base" x1="0" y1={volumeBottom} x2={plotWidth} y2={volumeBottom} />
           {tickIndexes.map((index) => <text className="chart-date-label" key={index} x={xForIndex(index)} y="310" textAnchor={index === 0 ? "start" : index === candles.length - 1 ? "end" : "middle"}>{new Intl.DateTimeFormat("ru-RU", isIntraday ? { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" } : { day: "2-digit", month: "short" }).format(new Date(candles[index].begin))}</text>)}
           {hoveredIndex !== null && <g className="chart-crosshair"><line x1={xForIndex(activeIndex)} y1={plotTop} x2={xForIndex(activeIndex)} y2={volumeBottom} /><circle cx={xForIndex(activeIndex)} cy={yForPrice(activeCandle.close)} r="4" /></g>}
+          {guidedCluster && <g className="chart-event-guide" aria-hidden="true">
+            <line x1={guidedCluster.x} y1={guidedCluster.y + guidedCluster.radius} x2={guidedCluster.x} y2="290" />
+            <rect x={guideX} y="291" width={guideWidth} height="18" rx="5" />
+            <text x={guideX + guideWidth / 2} y="303.5" textAnchor="middle">{guideLabel}</text>
+          </g>}
           {eventClusters.map((cluster) => (
             <g
               className={`chart-event chart-event--${cluster.direction} ${cluster.key === selectedCluster?.key ? "is-selected" : ""}`}
@@ -810,9 +833,10 @@ function PriceChart({ dailySeries = [], intradaySeries = [], intradayStatus = "i
               tabIndex="0"
               aria-label={`Публикация ${formatPublicationTime(cluster.strongest.publishedAt)}. Открыть ${cluster.newsCount} ${cluster.newsCount === 1 ? "новость" : "новости"}. Самая сильная: ${cluster.strongest.title}`}
               onClick={(clickEvent) => { clickEvent.stopPropagation(); setSelectedClusterKey(cluster.key); setSelectedEventId(cluster.strongest.id); }}
+              onPointerEnter={() => setHoveredClusterKey(cluster.key)}
+              onPointerLeave={() => setHoveredClusterKey(null)}
               onKeyDown={(keyboardEvent) => { if (keyboardEvent.key === "Enter" || keyboardEvent.key === " ") { setSelectedClusterKey(cluster.key); setSelectedEventId(cluster.strongest.id); } }}
             >
-              <title>{`Опубликовано источником ${formatPublicationTime(cluster.strongest.publishedAt)}. ${cluster.newsCount > 1 ? `${cluster.newsCount} новости. Максимальный вес: ${cluster.strongest.signal ? formatScore(cluster.strongest.signal.score) : "фон"}` : cluster.strongest.title}`}</title>
               <line x1={cluster.x} y1={cluster.y + cluster.radius} x2={cluster.x} y2={Math.min(plotBottom, cluster.y + cluster.radius + 15)} />
               <circle cx={cluster.x} cy={cluster.y} r={cluster.radius} />
               {cluster.newsCount > 1 && <text x={cluster.x} y={cluster.y + 2.7} textAnchor="middle">{cluster.newsCount}</text>}
@@ -998,7 +1022,7 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
       <section className="terminal-window">
         <div className="terminal-toolbar">
           <div className="terminal-title">
-            <div><span className="workspace-kicker">Live intelligence</span><h1>Компании в фокусе</h1></div>
+            <div><h1>Компании в фокусе</h1></div>
             <div className="filter-wrap">
               <button type="button" className={`text-button ${filter !== "all" ? "is-active" : ""}`} onClick={() => { setFilterOpen((value) => !value); setSortOpen(false); }}>
                 <Filter size={14} />
@@ -1060,8 +1084,8 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
           <div className="company-card-grid">
             {filteredSignals.map((signal) => {
               const available = signal.available !== false;
-              const displayDirection = signal.displayDirection || signal.direction;
-              const directionLabel = signal.direction === "neutral" && displayDirection !== "neutral" ? `Уклон ${displayDirection === "up" ? "вверх" : "вниз"}` : null;
+              const displayDirection = signal.direction;
+              const directionLabel = null;
               const evidence = signal.evidence?.[0];
               const openCard = () => available ? onSelect(signal.ticker) : onOpenNews(signal.ticker);
               return (
@@ -1076,7 +1100,7 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
                   <span className="company-signal-card__glow" aria-hidden="true" />
                   <header>
                     <span className="company-signal-card__identity"><CompanyMark signal={signal} /><span><strong>{signal.ticker}</strong><small>{signal.company}</small></span></span>
-                    {available ? <Direction direction={displayDirection} label={directionLabel} /> : <span className="waiting-badge"><i /> Наблюдение</span>}
+                    {available ? <span className="signal-card-status"><Direction direction={displayDirection} label={directionLabel} /><time>Сигнал {formatRelative(signal.signalAt)}</time></span> : <span className="waiting-badge"><i /> Наблюдение</span>}
                   </header>
                   <div className="company-signal-card__body">
                     <div className="company-signal-card__score">
@@ -1096,7 +1120,7 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
                   <div className="company-signal-card__metrics">
                     <span><small>Уверенность оценки</small><strong>{available ? `${signal.confidence}%` : "—"}</strong></span>
                     <span><small>Горизонт</small><strong>{signal.horizon}</strong></span>
-                    <span><small>Обновлено</small><strong>{signal.updated}</strong></span>
+                    <span><small>{signal.assessment_type === "quant" ? "Оценка рассчитана" : "Сигнал создан"}</small><strong>{formatPublicationTime(signal.signalAt)}</strong></span>
                   </div>
                   <footer>
                     <span>{evidence ? <Newspaper size={12} /> : <BarChart3 size={12} />} {evidence ? evidence.title : available ? signal.assessment_type === "quant" ? "Открыть рыночные факторы" : "Открыть расчёт сигнала" : "Посмотреть ленту компании"}</span>
@@ -1170,7 +1194,7 @@ function CompanyScreen({ signal, companyNews, marketStatus, marketUpdatedAt, onB
           <strong>{signal.ticker}</strong>
           <span>{signal.company} · MOEX</span>
         </div>
-        <div className="company-header__signal"><Direction direction={signal.displayDirection || signal.direction} label={signal.direction === "neutral" && signal.displayDirection !== "neutral" ? `Уклон ${signal.displayDirection === "up" ? "вверх" : "вниз"}` : null} /><span>{signal.horizon}</span></div>
+        <div className="company-header__signal"><Direction direction={signal.direction} /><span>{signal.horizon} · сигнал {formatPublicationTime(signal.signalAt)}</span></div>
       </div>
 
       <section className="company-canvas">
@@ -1387,6 +1411,7 @@ function EvalsScreen() {
   const [payload, setPayload] = useState(null);
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState("");
+  const [selectedModelVersion, setSelectedModelVersion] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1395,7 +1420,8 @@ function EvalsScreen() {
       if (refreshing || document.visibilityState === "hidden") return;
       refreshing = true;
       try {
-        const response = await fetch(apiUrl("/v1/evals"), { signal: controller.signal });
+        const query = selectedModelVersion ? `?model_version=${encodeURIComponent(selectedModelVersion)}` : "";
+        const response = await fetch(apiUrl(`/v1/evals${query}`), { signal: controller.signal });
         if (!response.ok) throw new Error("Evals API временно недоступен.");
         setPayload(await response.json());
         setStatus("ready");
@@ -1418,7 +1444,7 @@ function EvalsScreen() {
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, []);
+  }, [selectedModelVersion]);
 
   if (status !== "ready") return <DataState error={status === "error" ? error : ""} onRetry={() => window.location.reload()} />;
 
@@ -1426,19 +1452,22 @@ function EvalsScreen() {
   const hitRate = summary.hit_rate_pct === null ? "—" : `${summary.hit_rate_pct}%`;
   const averageReturn = summary.average_signed_return_pct === null ? "—" : formatPct(summary.average_signed_return_pct);
   const medianReturn = summary.median_signed_return_pct === null ? "—" : formatPct(summary.median_signed_return_pct);
-  const horizonLabels = { "1h": "1 час", "1d": "1 день", "3d": "3 дня" };
+  const horizonLabels = { "1h": "1 час", "4h": "4 часа", "1d": "1 день", "3d": "3 дня" };
   const directionLabels = { up: "Вверх", down: "Вниз", neutral: "Нейтрально" };
   const latestQuality = qualitySeries.at(-1);
+  const modelEpochs = payload.meta.model_epochs || [];
+  const activeModelVersion = payload.meta.selected_model_version || selectedModelVersion;
 
   return (
     <main className="screen section-screen evals-screen">
       <section className="page-hero evals-hero">
         <div><span className="eyebrow"><Activity size={13} /> Проверка реальностью</span><h1>Evals: сигналы в цифрах</h1><p>Каждый сигнал сопоставляется с реальной ценой MOEX. Здесь видно, как меняется качество по горизонтам, направлениям, бумагам и уверенности.</p></div>
         <div className="eval-hero-actions">
-          <div className="eval-live"><i /><span><strong>Обновляется раз в минуту</strong><small>{formatRelative(payload.meta.generated_at)} · 10‑минутные свечи</small></span></div>
+          <div className="eval-live"><i /><span><strong>Обновляется раз в минуту</strong><small>{formatRelative(payload.meta.generated_at)} · основной горизонт 4 часа</small></span></div>
+          <label className="eval-model-select"><span>Эпоха модели</span><select value={activeModelVersion || ""} onChange={(event) => setSelectedModelVersion(event.target.value)}>{modelEpochs.map((epoch) => <option value={epoch.model_version} key={epoch.epoch_id}>{epoch.model_version} · cfg {epoch.config_version} · n={epoch.signals}</option>)}</select><ChevronDown size={13} /></label>
           <div className="eval-exports">
-            <a href={apiUrl("/v1/evals/export?format=csv&dataset=outcomes")} download><Download size={13} /> Outcomes CSV</a>
-            <a href={apiUrl("/v1/evals/export?format=csv&dataset=timeseries")} download><Download size={13} /> Time series CSV</a>
+            <a href={apiUrl("/v1/evals/export?format=csv&dataset=outcomes&model_version=all")} download><Download size={13} /> Все эпохи · outcomes</a>
+            <a href={apiUrl("/v1/evals/export?format=csv&dataset=timeseries&model_version=all")} download><Download size={13} /> Все эпохи · raw</a>
           </div>
         </div>
       </section>
@@ -1447,8 +1476,8 @@ function EvalsScreen() {
 
       <section className="eval-kpis">
         <article><span>Проверено сигналов</span><strong>{summary.evaluated}</strong><small>из {summary.signals_total} доступных в хранилище</small></article>
-        <article><span>Попадание направления</span><strong>{hitRate}</strong><small>по самому длинному доступному горизонту</small></article>
-        <article><span>Средняя реакция</span><strong className={Number(summary.average_signed_return_pct) >= 0 ? "market-positive" : "market-negative"}>{averageReturn}</strong><small>медиана {medianReturn} · доходность со знаком сигнала</small></article>
+        <article><span>Попадание направления</span><strong>{hitRate}</strong><small>через 4 часа, fallback на 1 час</small></article>
+        <article><span>Средняя реакция</span><strong className={Number(summary.average_signed_return_pct) >= 0 ? "market-positive" : "market-negative"}>{averageReturn}</strong><small>медиана {medianReturn} · signed return за 4 часа</small></article>
         <article><span>Покрытие eval</span><strong>{summary.coverage_pct}%</strong><small>{summary.pending} ждут первый outcome · {summary.partial || 0} оценены частично · {summary.unavailable} вне окна</small></article>
       </section>
 
@@ -1514,18 +1543,18 @@ function EvalsScreen() {
 
       <section className="eval-export-note">
         <FileText size={17} />
-        <div><strong>Данные готовы для внешнего анализа</strong><span>Outcomes — одна строка на сигнал. Time series — свечи от входа до +3 дней с offset, объёмом и signed return. Оба набора доступны в CSV и JSON через API.</span></div>
-        <a href={apiUrl("/v1/evals/export?format=json&dataset=outcomes")} target="_blank" rel="noreferrer">JSON <ArrowUpRight size={12} /></a>
+        <div><strong>Данные по эпохам не затираются</strong><span>UI считает качество на 1–4 часах. В БД и выгрузке хранятся model/config version и сырые 10‑минутные свечи до +3 дней для временных рядов.</span></div>
+        <a href={apiUrl("/v1/evals/export?format=json&dataset=outcomes&model_version=all")} target="_blank" rel="noreferrer">Все эпохи JSON <ArrowUpRight size={12} /></a>
       </section>
 
       <section className="outcomes-card">
         <div className="section-heading"><span><BarChart3 size={15} /> Реакция после каждого сигнала</span><small>цена от первой торгуемой свечи</small></div>
         <div className="eval-table-wrap">
           <table className="eval-table outcomes-table">
-            <thead><tr><th>Сигнал</th><th>Новость</th><th>1 час</th><th>1 день</th><th>3 дня</th><th>Вердикт</th></tr></thead>
+            <thead><tr><th>Сигнал</th><th>Новость</th><th>1 час</th><th>4 часа</th><th>1 день</th><th>3 дня</th><th>Вердикт</th></tr></thead>
             <tbody>
               {outcomes.slice(0, 30).map((outcome) => {
-                const observedHorizon = ["3d", "1d", "1h"].find((period) => outcome.returns?.[period] !== null && outcome.returns?.[period] !== undefined);
+                const observedHorizon = ["4h", "1h"].find((period) => outcome.returns?.[period] !== null && outcome.returns?.[period] !== undefined);
                 const observedLabel = observedHorizon ? horizonLabels[observedHorizon] : null;
                 const verdict = outcome.status === "unavailable"
                   ? <span className="eval-verdict is-unavailable">Нет истории</span>
@@ -1537,7 +1566,7 @@ function EvalsScreen() {
                 return <tr key={outcome.signal_id}>
                   <td><div className="outcome-signal"><strong>{outcome.ticker}</strong><Direction direction={outcome.direction} /><small>{formatScore(outcome.score)} п.</small></div></td>
                   <td>{outcome.news ? <a href={outcome.news.url} target="_blank" rel="noreferrer"><span>{outcome.news.source_id}</span><strong>{outcome.news.title}</strong></a> : <span>Источник недоступен</span>}</td>
-                  {["1h", "1d", "3d"].map((period) => {
+                  {["1h", "4h", "1d", "3d"].map((period) => {
                     const value = outcome.returns?.[period];
                     return <td key={period} className={value === null || value === undefined ? "" : Number(value) >= 0 ? "market-positive" : "market-negative"}>{formatPct(value)}</td>;
                   })}
@@ -1731,8 +1760,8 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
 
 const apiEndpoints = [
   { id: "assessments", method: "GET", path: "/v1/assessments", title: "Live‑оценки рынка", description: "Гибридная или quant‑оценка всех компаний с пятью не‑LLM факторами.", parameter: { name: "tickers", type: "string", description: "Опциональный список тикеров MOEX через запятую" } },
-  { id: "evals", method: "GET", path: "/v1/evals", title: "Анализ качества сигналов", description: "Outcomes, горизонты, бумаги, confidence buckets, корреляции и cumulative quality.", parameter: null },
-  { id: "evals_export", method: "GET", path: "/v1/evals/export?format=csv&dataset=timeseries", title: "Выгрузка Evals", description: "CSV/JSON: одна строка на сигнал или event-time ряд свечей до +3 дней.", parameter: { name: "dataset", type: "string", description: "outcomes или timeseries; format — csv или json" } },
+  { id: "evals", method: "GET", path: "/v1/evals", title: "Анализ качества сигналов", description: "Короткие 1ч/4ч метрики, Pearson и выбор сохранённой эпохи модели.", parameter: { name: "model_version", type: "string", description: "Версия news-модели; без параметра выбирается текущая эпоха" } },
+  { id: "evals_export", method: "GET", path: "/v1/evals/export?format=csv&dataset=timeseries&model_version=all", title: "Выгрузка Evals", description: "CSV/JSON: все эпохи моделей и сырой event-time ряд свечей до +3 дней.", parameter: { name: "dataset", type: "string", description: "outcomes или timeseries; model_version — версия или all" } },
   { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Семантические news‑сигналы", description: "Новостный слой: событие, направление и вес из semantic‑модели. Финальная оценка hybrid-market-0.1.0, включающая рыночные факторы, возвращается через /v1/assessments.", parameter: { name: "limit", type: "integer", description: "Количество записей, максимум 100" } },
   { id: "news", method: "GET", path: "/v1/news?limit=20", title: "Лента новостей", description: "Исходные публикации, event-проекция и связанные сигналы.", parameter: { name: "limit", type: "integer", description: "Количество публикаций, максимум 500" } },
   { id: "events", method: "GET", path: "/v1/events?limit=20", title: "Рыночные события", description: "Публикации как события уровня рынок, отрасль или компания.", parameter: { name: "scope", type: "string", description: "market, sector или company" } },
@@ -1766,12 +1795,13 @@ function ApiScreen() {
 }` : endpoint.id === "evals" ? `{
   "data": {
     "summary": {"evaluated":12,"hit_rate_pct":58.3},
-    "breakdowns": {"by_horizon":[{"horizon":"3d","hit_rate_pct":58.3}]},
-    "relationships": [{"code":"signal_strength_vs_3d_return","value":0.21}],
-    "outcomes": [{"ticker":"SBER","returns":{"1h":0.4,"1d":1.2,"3d":2.1},"verdict":true}]
-  }
-}` : endpoint.id === "evals_export" ? `signal_id,ticker,signal_as_of,direction,score,confidence,observation_at,offset_minutes,return_pct
-sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,2026-08-08T08:00:00Z,60,0.42` : endpoint.id === "snapshot" ? `{
+    "breakdowns": {"by_horizon":[{"horizon":"4h","hit_rate_pct":58.3}]},
+    "relationships": [{"code":"signal_strength_vs_4h_return","value":0.21}],
+    "outcomes": [{"ticker":"SBER","model_version":"news-baseline-0.3.0","returns":{"1h":0.4,"4h":0.8,"1d":1.2,"3d":2.1},"verdict":true}]
+  },
+  "meta": {"selected_model_version":"news-baseline-0.3.0","primary_horizon":"4h"}
+}` : endpoint.id === "evals_export" ? `signal_id,ticker,signal_as_of,direction,score,confidence,model_version,config_version,observation_at,offset_minutes,return_pct
+sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,news-baseline-0.3.0,1,2026-08-08T08:00:00Z,60,0.42` : endpoint.id === "snapshot" ? `{
   "data": {
     "ticker": "SBER",
     "market": {

@@ -332,6 +332,7 @@ def evaluate_signal(
         "score": signal.score,
         "confidence": signal.confidence,
         "model_version": signal.model_version,
+        "config_version": signal.config_version,
         "news": {
             "id": news.id,
             "title": news.title,
@@ -357,7 +358,7 @@ def evaluate_signal(
     entry_price = _number(entry_row.get("open"))
     assert entry_price is not None
     returns: dict[str, float | None] = {}
-    target_hours = {"1h": 1, "1d": 24, "3d": 72}
+    target_hours = {"1h": 1, "4h": 4, "1d": 24, "3d": 72}
     for label, hours in target_hours.items():
         target = entry_time + timedelta(hours=hours)
         target_row = next((row for timestamp, row in rows if timestamp >= target), None)
@@ -369,7 +370,10 @@ def evaluate_signal(
         if latest_price is not None
         else None
     )
-    primary = next((returns[key] for key in ("3d", "1d", "1h") if returns[key] is not None), None)
+    # The product is intentionally short-term: the UI verdict is based on the
+    # first four tradable hours, while 1d/3d observations remain available for
+    # raw research and exports.
+    primary = next((returns[key] for key in ("4h", "1h") if returns[key] is not None), None)
     verdict = None
     if primary is not None:
         if signal.direction == "neutral":
@@ -390,7 +394,8 @@ def evaluate_signal(
     }
 
 
-EVAL_HORIZONS = ("1h", "1d", "3d")
+EVAL_HORIZONS = ("1h", "4h", "1d", "3d")
+PRIMARY_EVAL_HORIZON = "4h"
 
 
 def _return_at(item: dict[str, object], horizon: str) -> float | None:
@@ -404,7 +409,7 @@ def _primary_return(item: dict[str, object]) -> float | None:
     return next(
         (
             value
-            for horizon in reversed(EVAL_HORIZONS)
+            for horizon in (PRIMARY_EVAL_HORIZON, "1h")
             if (value := _return_at(item, horizon)) is not None
         ),
         None,
@@ -498,6 +503,8 @@ def _same_eval_event(left: NewsRecord, right: NewsRecord) -> bool:
 def deduplicate_eval_events(
     signals: Iterable[SignalRecord],
     news_by_id: dict[str, NewsRecord],
+    *,
+    preserve_model_epochs: bool = False,
 ) -> list[SignalRecord]:
     """Evaluate one market event once, even when several publications repeat it."""
     groups: list[list[SignalRecord]] = []
@@ -510,6 +517,13 @@ def deduplicate_eval_events(
                 candidate
                 for candidate in groups
                 if candidate[0].ticker == signal.ticker
+                and (
+                    not preserve_model_epochs
+                    or (
+                        candidate[0].model_version == signal.model_version
+                        and candidate[0].config_version == signal.config_version
+                    )
+                )
                 and (representative_news := news_by_id.get(candidate[0].news_id)) is not None
                 and _same_eval_event(representative_news, news)
             ),
@@ -523,7 +537,11 @@ def deduplicate_eval_events(
     representatives = []
     for group in groups:
         latest_model = max(signal.model_version for signal in group)
-        current_model = [signal for signal in group if signal.model_version == latest_model]
+        current_model = (
+            group
+            if preserve_model_epochs
+            else [signal for signal in group if signal.model_version == latest_model]
+        )
         representatives.append(
             min(
                 current_model,
@@ -663,31 +681,34 @@ def _correlation_interpretation(value: float | None, observations: int) -> str:
 
 
 def eval_relationships(outcomes: list[dict[str, object]]) -> list[dict[str, object]]:
-    strength_pairs = []
-    confidence_pairs = []
-    for item in outcomes:
-        value = _return_at(item, "3d")
-        signed = _signed_return(item.get("direction"), value)
-        score = _number(item.get("score"))
-        confidence = _number(item.get("confidence"))
-        if signed is not None and score is not None:
-            strength_pairs.append((abs(score), signed))
-        verdict = _verdict(item.get("direction"), value)
-        if verdict is not None and confidence is not None:
-            confidence_pairs.append((confidence, float(verdict)))
-
-    definitions = (
-        (
-            "signal_strength_vs_3d_return",
-            "Сила сигнала ↔ результат 3д",
-            strength_pairs,
-        ),
-        (
-            "confidence_vs_3d_hit",
-            "Уверенность ↔ попадание 3д",
-            confidence_pairs,
-        ),
-    )
+    definitions = []
+    for horizon, horizon_label in (("1h", "1ч"), ("4h", "4ч")):
+        strength_pairs = []
+        confidence_pairs = []
+        for item in outcomes:
+            value = _return_at(item, horizon)
+            signed = _signed_return(item.get("direction"), value)
+            score = _number(item.get("score"))
+            confidence = _number(item.get("confidence"))
+            if signed is not None and score is not None:
+                strength_pairs.append((abs(score), signed))
+            verdict = _verdict(item.get("direction"), value)
+            if verdict is not None and confidence is not None:
+                confidence_pairs.append((confidence, float(verdict)))
+        definitions.extend(
+            (
+                (
+                    f"signal_strength_vs_{horizon}_return",
+                    f"Сила сигнала ↔ результат {horizon_label}",
+                    strength_pairs,
+                ),
+                (
+                    f"confidence_vs_{horizon}_hit",
+                    f"Уверенность ↔ попадание {horizon_label}",
+                    confidence_pairs,
+                ),
+            )
+        )
     result = []
     for code, label, pairs in definitions:
         value = _correlation(pairs)
@@ -746,6 +767,7 @@ def outcome_export_rows(outcomes: list[dict[str, object]]) -> list[dict[str, obj
                 "score": item["score"],
                 "confidence": item["confidence"],
                 "model_version": item["model_version"],
+                "config_version": item.get("config_version"),
                 "status": item["status"],
                 "news_id": news.get("id"),
                 "news_source_id": news.get("source_id"),
@@ -756,6 +778,7 @@ def outcome_export_rows(outcomes: list[dict[str, object]]) -> list[dict[str, obj
                 "entry_at": entry.get("at"),
                 "entry_price": entry.get("price"),
                 "return_1h_pct": _return_at(item, "1h"),
+                "return_4h_pct": _return_at(item, "4h"),
                 "return_1d_pct": _return_at(item, "1d"),
                 "return_3d_pct": _return_at(item, "3d"),
                 "latest_price": item.get("latest_price"),
@@ -805,6 +828,7 @@ def event_time_export_rows(
                     "score": signal.score,
                     "confidence": signal.confidence,
                     "model_version": signal.model_version,
+                    "config_version": signal.config_version,
                     "news_id": signal.news_id,
                     "news_source_id": news.source_id if news else None,
                     "entry_at": to_rfc3339(entry_at),

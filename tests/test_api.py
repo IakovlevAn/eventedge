@@ -121,7 +121,7 @@ def test_admin_reprocesses_one_explicit_stored_candidate(
 
     assert response.status_code == 200
     assert response.json()["meta"]["completed"] == 1
-    assert response.json()["meta"]["model_version"] == "news-baseline-0.2.0"
+    assert response.json()["meta"]["model_version"] == "news-baseline-0.3.0"
     assert response.json()["data"][0]["news_id"] == stored.id
     assert response.json()["data"][0]["result_ref"].startswith("sig_")
 
@@ -198,6 +198,7 @@ def test_signal_list_has_contract_shape_and_etag() -> None:
             "model_scope": "news_event",
             "final_assessment_endpoint": "/v1/assessments",
             "final_assessment_model_version": "hybrid-market-0.1.0",
+            "model_version": "news-baseline-0.3.0",
         },
     }
     assert response.headers["ETag"].startswith('"')
@@ -263,7 +264,7 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
     assert signal.json()["data"]["ticker"] == "SBER"
     assert signal.json()["data"]["direction"] == "up"
     assert signal.json()["data"]["action"] == "consider_buy"
-    assert signal.json()["data"]["model_version"] == "news-baseline-0.2.0"
+    assert signal.json()["data"]["model_version"] == "news-baseline-0.3.0"
     assert len(signal.json()["data"]["factor_contributions"]) == 5
 
     listed = client.get("/v1/signals", params={"ticker": "SBER", "direction": "up"})
@@ -629,7 +630,9 @@ def test_evals_endpoint_exposes_analysis_and_downloads() -> None:
         "quality_series",
         "outcomes",
     }
-    assert len(response.json()["data"]["breakdowns"]["by_horizon"]) == 3
+    assert len(response.json()["data"]["breakdowns"]["by_horizon"]) == 4
+    assert response.json()["meta"]["primary_horizon"] == "4h"
+    assert response.json()["meta"]["model_epochs"]
     assert "point-in-time" in response.json()["meta"]["warning"]
     assert csv_export.status_code == 200
     assert csv_export.headers["content-type"].startswith("text/csv")

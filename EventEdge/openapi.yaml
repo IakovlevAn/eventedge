@@ -61,6 +61,13 @@ paths:
       summary: Evaluate stored signals and expose analytical quality slices
       operationId: listEvals
       security: []
+      parameters:
+        - name: model_version
+          in: query
+          description: Model epoch to show. Defaults to the current news model when available.
+          schema:
+            type: string
+            pattern: '^[a-z0-9._-]{3,80}$'
       responses:
         '200':
           description: Outcomes, aggregate metrics, breakdowns and relationships.
@@ -91,6 +98,13 @@ paths:
             type: string
             enum: [outcomes, timeseries]
             default: outcomes
+        - name: model_version
+          in: query
+          description: Export one model epoch or all retained epochs.
+          schema:
+            type: string
+            default: all
+            pattern: '^(all|[a-z0-9._-]{3,80})$'
       responses:
         '200':
           description: Downloadable analytical dataset.
@@ -274,6 +288,12 @@ paths:
             format: double
             minimum: 0
             maximum: 1
+        - name: model_version
+          in: query
+          description: Select one immutable news-model epoch. Active view defaults to current.
+          schema:
+            type: string
+            pattern: '^[a-z0-9._-]{3,80}$'
         - name: active_at
           in: query
           description: Return signals active at this instant. Defaults to now.

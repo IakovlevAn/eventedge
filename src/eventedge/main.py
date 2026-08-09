@@ -23,7 +23,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
 from eventedge import __version__
-from eventedge.analysis import NewsAnalysisInput, RuleBasedNewsExtractor
+from eventedge.analysis import (
+    CURRENT_NEWS_MODEL_VERSION,
+    NewsAnalysisInput,
+    RuleBasedNewsExtractor,
+)
 from eventedge.collectors import (
     RssItem,
     collect_cbr_press,
@@ -58,6 +62,7 @@ from eventedge.market import (
 )
 from eventedge.source_registry import configured_sources
 from eventedge.storage import (
+    EvaluationEpochRecord,
     IdempotencyConflictError,
     MemoryNewsRepository,
     NewsDocument,
@@ -70,6 +75,7 @@ from eventedge.storage import (
     deduplicate_signals,
     filter_signals,
     normalize_signal_freshness,
+    stable_id,
 )
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
@@ -781,7 +787,7 @@ async def reprocess_signal_candidates(
     current_news_ids = {
         signal.news_id
         for signal in stored_signals
-        if signal.model_version == "news-baseline-0.2.0"
+        if signal.model_version == CURRENT_NEWS_MODEL_VERSION
     }
     candidates = []
     for item in public_news(stored_news):
@@ -835,10 +841,10 @@ async def reprocess_signal_candidates(
             "content": item.content,
             "language": item.language,
             "source_metadata": metadata,
-            "reprocess_version": "news-baseline-0.2.0",
+            "reprocess_version": CURRENT_NEWS_MODEL_VERSION,
         }
         result = await repository.ingest(
-            f"reprocess:{item.id}:news-baseline-0.2.0",
+            f"reprocess:{item.id}:{CURRENT_NEWS_MODEL_VERSION}",
             NewsDocument(
                 source_id=item.source_id,
                 external_id=item.external_id,
@@ -876,7 +882,7 @@ async def reprocess_signal_candidates(
                 "failed": len(failed),
                 "failure_types": failed,
                 "remaining_candidates": max(0, len(candidates) - len(completed)),
-                "model_version": "news-baseline-0.2.0",
+                "model_version": CURRENT_NEWS_MODEL_VERSION,
                 "batch_limit": 3,
             },
         }
@@ -892,6 +898,7 @@ async def list_signals(
         Literal["active", "expired", "superseded", "invalidated"] | None, Query()
     ] = None,
     min_confidence: Annotated[float | None, Query(ge=0, le=1)] = None,
+    model_version: Annotated[str | None, Query(pattern=r"^[a-z0-9._-]{3,80}$")] = None,
     cursor: Annotated[str | None, Query(max_length=1024)] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
@@ -930,8 +937,20 @@ async def list_signals(
         min_confidence=min_confidence,
         limit=1000,
     )
+    selected_model_version = (
+        model_version
+        or (CURRENT_NEWS_MODEL_VERSION if (status or "active") == "active" else None)
+    )
     signals = deduplicate_eval_events(
-        deduplicate_signals(signal for signal in signals if signal.news_id not in hidden_ids),
+        deduplicate_signals(
+            signal
+            for signal in signals
+            if signal.news_id not in hidden_ids
+            and (
+                selected_model_version is None
+                or signal.model_version == selected_model_version
+            )
+        ),
         news_by_id,
     )[:limit]
     data = [signal.as_api_dict() for signal in signals]
@@ -958,6 +977,7 @@ async def list_signals(
                 "model_scope": "news_event",
                 "final_assessment_endpoint": "/v1/assessments",
                 "final_assessment_model_version": ASSESSMENT_MODEL_VERSION,
+                "model_version": selected_model_version,
             },
         },
         headers={"ETag": etag},
@@ -1051,7 +1071,11 @@ async def active_signals_by_ticker(repository: NewsRepository) -> dict[str, Sign
     )
     result: dict[str, SignalRecord] = {}
     for signal in deduplicate_eval_events(deduplicate_signals(active), news_by_id):
-        if signal.news_id not in hidden_ids and signal.ticker not in result:
+        if (
+            signal.model_version == CURRENT_NEWS_MODEL_VERSION
+            and signal.news_id not in hidden_ids
+            and signal.ticker not in result
+        ):
             result[signal.ticker] = signal
     return result
 
@@ -1114,7 +1138,11 @@ async def list_assessments(
     )
     active_by_ticker: dict[str, SignalRecord] = {}
     for signal in deduplicate_eval_events(deduplicate_signals(active_signals), news_by_id):
-        if signal.news_id not in hidden_ids and signal.ticker not in active_by_ticker:
+        if (
+            signal.model_version == CURRENT_NEWS_MODEL_VERSION
+            and signal.news_id not in hidden_ids
+            and signal.ticker not in active_by_ticker
+        ):
             active_by_ticker[signal.ticker] = signal
     visible_news = public_news(stored_news)
     data = []
@@ -1169,6 +1197,7 @@ async def _load_evaluation_material(
     list[SignalRecord],
     dict[str, list[dict[str, object]]],
     dict[str, NewsRecord],
+    list[EvaluationEpochRecord],
 ]:
     stored_signals, stored_news = await asyncio.gather(
         repository.list_signals(
@@ -1188,7 +1217,8 @@ async def _load_evaluation_material(
             if signal.news_id in news_by_id
         ),
         news_by_id,
-    )[:100]
+        preserve_model_epochs=True,
+    )[:200]
     tickers = list(dict.fromkeys(signal.ticker for signal in signals))
     candle_results = await asyncio.gather(
         *(market_data_client.candles(ticker, interval=10, lookback_days=14) for ticker in tickers),
@@ -1207,7 +1237,46 @@ async def _load_evaluation_material(
         )
         for signal in signals
     ]
-    return outcomes, signals, candles_by_ticker, news_by_id
+    generated_at = datetime.now(UTC)
+    epoch_records = []
+    for model_version, config_version in sorted(
+        {(signal.model_version, signal.config_version) for signal in signals}
+    ):
+        epoch_signals = [
+            signal
+            for signal in signals
+            if signal.model_version == model_version
+            and signal.config_version == config_version
+        ]
+        signal_ids = {signal.id for signal in epoch_signals}
+        epoch_outcomes = [
+            outcome for outcome in outcomes if outcome["signal_id"] in signal_ids
+        ]
+        observations, observations_truncated = event_time_export_rows(
+            epoch_signals,
+            candles_by_ticker,
+            news_by_id,
+        )
+        epoch_records.append(
+            EvaluationEpochRecord(
+                epoch_id=stable_id(
+                    "eval_",
+                    f"{model_version}\x00{config_version}",
+                ),
+                model_version=model_version,
+                config_version=config_version,
+                evaluated_at=generated_at,
+                outcomes=tuple(epoch_outcomes),
+                observations=tuple(observations),
+                observations_truncated=observations_truncated,
+            )
+        )
+    if epoch_records:
+        await asyncio.gather(
+            *(repository.upsert_evaluation_epoch(epoch) for epoch in epoch_records)
+        )
+    stored_epochs = await repository.list_evaluation_epochs()
+    return outcomes, signals, candles_by_ticker, news_by_id, stored_epochs
 
 
 async def evaluation_material(
@@ -1217,6 +1286,7 @@ async def evaluation_material(
     list[SignalRecord],
     dict[str, list[dict[str, object]]],
     dict[str, NewsRecord],
+    list[EvaluationEpochRecord],
 ]:
     state = request.app.state
     repository: NewsRepository = state.news_repository
@@ -1264,21 +1334,52 @@ async def evaluation_material(
 
 
 @app.get("/v1/evals", tags=["Evals"])
-async def list_evals(request: Request) -> JSONResponse:
-    outcomes, _, _, _ = await evaluation_material(request)
+async def list_evals(
+    request: Request,
+    model_version: Annotated[
+        str | None,
+        Query(pattern=r"^[a-z0-9._-]{3,80}$"),
+    ] = None,
+) -> JSONResponse:
+    outcomes, _, _, _, epochs = await evaluation_material(request)
+    available_versions = [epoch.model_version for epoch in epochs]
+    selected_model_version = model_version
+    if selected_model_version is None:
+        selected_model_version = (
+            CURRENT_NEWS_MODEL_VERSION
+            if CURRENT_NEWS_MODEL_VERSION in available_versions
+            else available_versions[0]
+            if available_versions
+            else None
+        )
+    selected_outcomes = [
+        outcome
+        for outcome in outcomes
+        if selected_model_version is None
+        or outcome.get("model_version") == selected_model_version
+    ]
+    if selected_model_version and not selected_outcomes:
+        stored_epoch = next(
+            (epoch for epoch in epochs if epoch.model_version == selected_model_version),
+            None,
+        )
+        selected_outcomes = list(stored_epoch.outcomes) if stored_epoch else []
     return JSONResponse(
         content={
             "data": {
-                "summary": eval_summary(outcomes),
-                "breakdowns": eval_breakdowns(outcomes),
-                "relationships": eval_relationships(outcomes),
-                "quality_series": eval_quality_series(outcomes),
-                "outcomes": outcomes,
+                "summary": eval_summary(selected_outcomes),
+                "breakdowns": eval_breakdowns(selected_outcomes),
+                "relationships": eval_relationships(selected_outcomes),
+                "quality_series": eval_quality_series(selected_outcomes),
+                "outcomes": selected_outcomes,
             },
             "meta": {
                 "generated_at": utc_now(),
                 "refresh_after_seconds": 60,
-                "evaluation_window": "1h / 1d / 3d after the first tradable candle",
+                "primary_horizon": "4h",
+                "evaluation_window": "1h / 4h for product metrics; raw 1d / 3d retained",
+                "selected_model_version": selected_model_version,
+                "model_epochs": [epoch.as_meta_dict() for epoch in epochs],
                 "warning": (
                     "Prototype retrospective on the available MOEX window; "
                     "it is not a point-in-time calibrated backtest or proof of alpha."
@@ -1293,14 +1394,32 @@ async def export_evals(
     request: Request,
     format: Literal["csv", "json"] = "csv",
     dataset: Literal["outcomes", "timeseries"] = "outcomes",
+    model_version: Annotated[
+        str,
+        Query(pattern=r"^(all|[a-z0-9._-]{3,80})$"),
+    ] = "all",
 ) -> Response:
-    outcomes, signals, candles_by_ticker, news_by_id = await evaluation_material(request)
+    outcomes, signals, candles_by_ticker, news_by_id, epochs = await evaluation_material(request)
+    selected_epochs = [
+        epoch
+        for epoch in epochs
+        if model_version == "all" or epoch.model_version == model_version
+    ]
     if dataset == "timeseries":
-        rows, truncated = event_time_export_rows(
-            signals,
-            candles_by_ticker,
-            news_by_id,
-        )
+        if selected_epochs:
+            rows = [row for epoch in selected_epochs for row in epoch.observations]
+            truncated = any(epoch.observations_truncated for epoch in selected_epochs)
+        else:
+            selected_signals = [
+                signal
+                for signal in signals
+                if model_version == "all" or signal.model_version == model_version
+            ]
+            rows, truncated = event_time_export_rows(
+                selected_signals,
+                candles_by_ticker,
+                news_by_id,
+            )
         fieldnames = [
             "signal_id",
             "ticker",
@@ -1309,6 +1428,7 @@ async def export_evals(
             "score",
             "confidence",
             "model_version",
+            "config_version",
             "news_id",
             "news_source_id",
             "entry_at",
@@ -1325,7 +1445,17 @@ async def export_evals(
             "signed_return_pct",
         ]
     else:
-        rows = outcome_export_rows(outcomes)
+        selected_outcomes = (
+            [outcome for epoch in selected_epochs for outcome in epoch.outcomes]
+            if selected_epochs
+            else [
+                outcome
+                for outcome in outcomes
+                if model_version == "all"
+                or outcome.get("model_version") == model_version
+            ]
+        )
+        rows = outcome_export_rows(selected_outcomes)
         truncated = False
         fieldnames = [
             "signal_id",
@@ -1335,6 +1465,7 @@ async def export_evals(
             "score",
             "confidence",
             "model_version",
+            "config_version",
             "status",
             "news_id",
             "news_source_id",
@@ -1345,6 +1476,7 @@ async def export_evals(
             "entry_at",
             "entry_price",
             "return_1h_pct",
+            "return_4h_pct",
             "return_1d_pct",
             "return_3d_pct",
             "latest_price",
@@ -1367,6 +1499,7 @@ async def export_evals(
                     "rows": len(rows),
                     "truncated": truncated,
                     "generated_at": generated_at,
+                    "model_version": model_version,
                 },
             },
             headers=headers,
