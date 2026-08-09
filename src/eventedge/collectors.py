@@ -24,6 +24,24 @@ MAX_FEED_BYTES = 8_000_000
 MAX_CONTENT_LENGTH = 200_000
 RSS_CONTENT_TAG = "{http://purl.org/rss/1.0/modules/content/}encoded"
 LOGGER = logging.getLogger(__name__)
+HTML_VOID_TAGS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -43,6 +61,19 @@ class RssItem:
     url: str
     content: str
     categories: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TelegramChannelConfig:
+    source_id: str
+    channel: str
+    language: str = "ru"
+    max_items: int = 20
+    timeout_seconds: float = 15
+
+    @property
+    def url(self) -> str:
+        return f"https://t.me/s/{self.channel}"
 
 
 class _HtmlTextExtractor(HTMLParser):
@@ -137,17 +168,136 @@ def fetch_rss(url: str, timeout_seconds: float) -> bytes:
     return feed
 
 
-async def collect_rss_feed(
+class _TelegramChannelParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.items: list[RssItem] = []
+        self._message_depth = 0
+        self._text_depth = 0
+        self._external_id: str | None = None
+        self._published_at: datetime | None = None
+        self._url: str | None = None
+        self._text_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        classes = set((attributes.get("class") or "").split())
+        is_void = tag in HTML_VOID_TAGS
+
+        if not self._message_depth:
+            external_id = attributes.get("data-post")
+            if tag == "div" and "tgme_widget_message" in classes and external_id:
+                self._message_depth = 1
+                self._external_id = external_id
+                self._published_at = None
+                self._url = f"https://t.me/{external_id}"
+                self._text_parts = []
+            return
+
+        if not is_void:
+            self._message_depth += 1
+
+        if self._text_depth:
+            if not is_void:
+                self._text_depth += 1
+            if tag == "br":
+                self._text_parts.append("\n")
+        elif tag == "div" and "tgme_widget_message_text" in classes:
+            self._text_depth = 1
+
+        if tag == "time" and (published := attributes.get("datetime")):
+            try:
+                parsed = datetime.fromisoformat(published.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+            else:
+                if parsed.tzinfo is not None:
+                    self._published_at = parsed
+
+        if tag == "a" and "tgme_widget_message_date" in classes:
+            self._url = attributes.get("href") or self._url
+
+    def handle_startendtag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        if self._text_depth and tag == "br":
+            self._text_parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self._message_depth:
+            return
+        if self._text_depth:
+            self._text_depth -= 1
+        self._message_depth -= 1
+        if not self._message_depth:
+            self._finish_message()
+
+    def handle_data(self, data: str) -> None:
+        if self._text_depth:
+            self._text_parts.append(data)
+
+    def _finish_message(self) -> None:
+        content = "\n".join(
+            line.strip()
+            for line in "".join(self._text_parts).splitlines()
+            if line.strip()
+        )
+        if self._external_id and self._published_at and self._url and content:
+            title = content.splitlines()[0][:500]
+            self.items.append(
+                RssItem(
+                    external_id=self._external_id,
+                    published_at=self._published_at,
+                    title=title,
+                    url=self._url,
+                    content=content[:MAX_CONTENT_LENGTH],
+                    categories=(),
+                )
+            )
+        self._external_id = None
+        self._published_at = None
+        self._url = None
+        self._text_parts = []
+
+
+def parse_telegram_channel(page: bytes, *, max_items: int) -> list[RssItem]:
+    if len(page) > MAX_FEED_BYTES:
+        raise ValueError("Telegram channel page exceeds the configured size limit")
+    parser = _TelegramChannelParser()
+    parser.feed(page.decode("utf-8", errors="replace"))
+    parser.close()
+    return sorted(parser.items, key=lambda item: item.published_at, reverse=True)[:max_items]
+
+
+def fetch_telegram_channel(url: str, timeout_seconds: float) -> bytes:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "text/html,application/xhtml+xml",
+            "User-Agent": "EventEdge/0.1 (+https://github.com/IakovlevAn/eventedge)",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        page = response.read(MAX_FEED_BYTES + 1)
+    if len(page) > MAX_FEED_BYTES:
+        raise ValueError("Telegram channel page exceeds the configured size limit")
+    return page
+
+
+async def collect_news_items(
     repository: NewsRepository,
-    config: RssFeedConfig,
     *,
-    fetcher: Callable[[str, float], bytes] = fetch_rss,
+    source_id: str,
+    source_url: str,
+    language: str,
+    collector: str,
+    items: list[RssItem],
     item_filter: Callable[[RssItem], bool] | None = None,
     signal_filter: Callable[[RssItem], bool] | None = None,
     stop_after_replays: int | None = None,
 ) -> dict[str, int]:
-    feed = await asyncio.to_thread(fetcher, config.url, config.timeout_seconds)
-    items = parse_rss(feed, max_items=config.max_items)
     accepted = 0
     replayed = 0
     matched = 0
@@ -163,15 +313,14 @@ async def collect_rss_feed(
             signal_candidates += 1
         features = RuleBasedNewsExtractor().extract(
             NewsAnalysisInput(
-                source_id=config.source_id,
+                source_id=source_id,
                 title=item.title,
                 content=item.content,
-                language=config.language,
+                language=language,
             )
         )
-        source_metadata = {
-            "collector": "rss",
-            "feed_url": config.url,
+        source_metadata: dict[str, object] = {
+            "collector": collector,
             "categories": list(item.categories),
             "signal_candidate": generate_signals,
             "tickers": [
@@ -180,34 +329,38 @@ async def collect_rss_feed(
                 if instrument.relevance >= 0.6 and instrument.ticker != "MOEX"
             ],
         }
+        # Keep the existing RSS payload shape stable so a deployment does not
+        # re-ingest all known feed items merely because Telegram was added.
+        if collector == "rss":
+            source_metadata["feed_url"] = source_url
+        else:
+            source_metadata["channel_url"] = source_url
         hash_payload = {
-            "source_id": config.source_id,
+            "source_id": source_id,
             "external_id": item.external_id,
             "published_at": item.published_at.isoformat(),
             "title": item.title,
             "url": item.url,
             "content": item.content,
-            "language": config.language,
+            "language": language,
             "source_metadata": source_metadata,
         }
         payload_hash = canonical_payload_hash(hash_payload)
         document = NewsDocument(
-            source_id=config.source_id,
+            source_id=source_id,
             external_id=item.external_id,
             published_at=item.published_at,
-            # Publication time belongs to the source. Receipt time is when the
-            # item actually entered EventEdge and is needed for delivery SLOs.
             received_at=datetime.now(UTC),
             title=item.title,
             url=item.url,
             content=item.content,
-            language=config.language,
+            language=language,
             source_metadata=source_metadata,
             payload_hash=payload_hash,
         )
         idempotency_key = stable_id(
             "ing_",
-            f"{config.source_id}\x00{item.external_id}\x00{payload_hash}",
+            f"{source_id}\x00{item.external_id}\x00{payload_hash}",
         )
         result = await repository.ingest(
             idempotency_key,
@@ -233,6 +386,54 @@ async def collect_rss_feed(
         "accepted": accepted,
         "replayed": replayed,
     }
+
+
+async def collect_rss_feed(
+    repository: NewsRepository,
+    config: RssFeedConfig,
+    *,
+    fetcher: Callable[[str, float], bytes] = fetch_rss,
+    item_filter: Callable[[RssItem], bool] | None = None,
+    signal_filter: Callable[[RssItem], bool] | None = None,
+    stop_after_replays: int | None = None,
+) -> dict[str, int]:
+    feed = await asyncio.to_thread(fetcher, config.url, config.timeout_seconds)
+    items = parse_rss(feed, max_items=config.max_items)
+    return await collect_news_items(
+        repository,
+        source_id=config.source_id,
+        source_url=config.url,
+        language=config.language,
+        collector="rss",
+        items=items,
+        item_filter=item_filter,
+        signal_filter=signal_filter,
+        stop_after_replays=stop_after_replays,
+    )
+
+
+async def collect_telegram_channel(
+    repository: NewsRepository,
+    config: TelegramChannelConfig,
+    *,
+    fetcher: Callable[[str, float], bytes] = fetch_telegram_channel,
+    item_filter: Callable[[RssItem], bool] | None = None,
+    signal_filter: Callable[[RssItem], bool] | None = None,
+    stop_after_replays: int | None = None,
+) -> dict[str, int]:
+    page = await asyncio.to_thread(fetcher, config.url, config.timeout_seconds)
+    items = parse_telegram_channel(page, max_items=config.max_items)
+    return await collect_news_items(
+        repository,
+        source_id=config.source_id,
+        source_url=config.url,
+        language=config.language,
+        collector="telegram_public",
+        items=items,
+        item_filter=item_filter,
+        signal_filter=signal_filter,
+        stop_after_replays=stop_after_replays,
+    )
 
 
 CBR_PRESS_FEED = RssFeedConfig(
@@ -566,6 +767,21 @@ FAST_NEWS_FEEDS = (
     ),
 )
 
+TELEGRAM_CHANNELS = (
+    TelegramChannelConfig(
+        source_id="telegram_ak47pfl",
+        channel="AK47pfl",
+        max_items=20,
+        timeout_seconds=10,
+    ),
+    TelegramChannelConfig(
+        source_id="telegram_markettwits",
+        channel="markettwits",
+        max_items=20,
+        timeout_seconds=10,
+    ),
+)
+
 DISCOVERY_NEWS_FEEDS = tuple(
     config
     for config in MARKET_NEWS_FEEDS
@@ -637,11 +853,25 @@ async def collect_feed_group(
 
 async def collect_fast_news(repository: NewsRepository) -> dict[str, int]:
     """Refresh direct priority feeds every minute without discovery latency."""
-    return await collect_feed_group(
-        repository,
-        FAST_NEWS_FEEDS,
-        stop_after_replays=5,
+    results = await asyncio.gather(
+        collect_feed_group(
+            repository,
+            FAST_NEWS_FEEDS,
+            stop_after_replays=5,
+        ),
+        *(
+            collect_telegram_channel(
+                repository,
+                config,
+                item_filter=is_company_news_candidate,
+                signal_filter=is_market_signal_candidate,
+                stop_after_replays=5,
+            )
+            for config in TELEGRAM_CHANNELS
+        ),
+        return_exceptions=True,
     )
+    return aggregate_collection_results(results)
 
 
 async def collect_discovery_news(repository: NewsRepository) -> dict[str, int]:
@@ -687,6 +917,15 @@ async def collect_market_news(repository: NewsRepository) -> dict[str, int]:
                 signal_filter=collection_filters(config)[1],
             )
             for config in MARKET_NEWS_FEEDS
+        ),
+        *(
+            collect_telegram_channel(
+                repository,
+                config,
+                item_filter=is_company_news_candidate,
+                signal_filter=is_market_signal_candidate,
+            )
+            for config in TELEGRAM_CHANNELS
         ),
         collect_cbr_press(repository),
         collect_moex_news(repository),

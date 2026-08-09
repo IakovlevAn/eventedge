@@ -196,7 +196,14 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
         {
             "id": "fast",
             "interval_seconds": 60,
-            "source_ids": ["interfax", "tass", "rbc", "moex_news"],
+            "source_ids": [
+                "interfax",
+                "tass",
+                "rbc",
+                "moex_news",
+                "telegram_ak47pfl",
+                "telegram_markettwits",
+            ],
         },
         {
             "id": "discovery",

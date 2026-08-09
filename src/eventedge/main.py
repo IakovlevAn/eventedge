@@ -74,7 +74,14 @@ NEWS_COLLECTION_LANES = (
     {
         "id": "fast",
         "interval_seconds": 60,
-        "source_ids": ["interfax", "tass", "rbc", "moex_news"],
+        "source_ids": [
+            "interfax",
+            "tass",
+            "rbc",
+            "moex_news",
+            "telegram_ak47pfl",
+            "telegram_markettwits",
+        ],
     },
     {
         "id": "discovery",

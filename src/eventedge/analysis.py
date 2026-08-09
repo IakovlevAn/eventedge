@@ -385,6 +385,8 @@ SOURCE_QUALITY: dict[str, float] = {
     "rbc": 0.78,
     "google_news": 0.74,
     "market_news": 0.74,
+    "telegram_ak47pfl": 0.68,
+    "telegram_markettwits": 0.68,
 }
 
 CONTRIBUTION_LABELS = {
