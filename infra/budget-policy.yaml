@@ -14,10 +14,10 @@ runtime_caps:
   serverless_container:
     memory_mb: 1024
     cores: 1
-    concurrency: 2
+    concurrency: 8
     min_instances: 1
-    zone_instances_limit: 5
-    zone_requests_limit: 50
+    zone_instances_limit: 3
+    zone_requests_limit: 24
     execution_timeout_seconds: 180
   source_collection:
     max_telegram_channels: 18
@@ -25,6 +25,6 @@ runtime_caps:
     llm_analysis: signal_candidates_only
 notes:
   - The Yandex Cloud billing budget sends alerts but does not stop resource consumption.
-  - One provisioned instance removes API cold starts; up to four burst instances exist only under load.
+  - One provisioned instance serves a normal page load; up to two burst instances exist only under exceptional load.
   - At 8500 RUB, freeze resource increases and review the current-month forecast.
   - Automatic shutdown requires a separate explicitly approved runbook or trigger.
