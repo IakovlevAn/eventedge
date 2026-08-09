@@ -16,6 +16,12 @@ def test_gateway_template_exposes_web_app_and_assets() -> None:
 
     assert "/" in spec["paths"]
     assert "/assets/{asset}" in spec["paths"]
+    assert "/v1/events" in spec["paths"]
+    assert "/v1/sources" in spec["paths"]
+    assert "/v1/sources/telegram" in spec["paths"]
+    assert spec["paths"]["/v1/sources/telegram"]["post"]["parameters"][0]["name"] == (
+        "X-EventEdge-Admin-Key"
+    )
     assert rendered.count("container_id: container-id") == len(spec["paths"])
     assert rendered.count("service_account_id: gateway-sa-id") == len(spec["paths"])
     assert "__API_CONTAINER_ID__" not in rendered
