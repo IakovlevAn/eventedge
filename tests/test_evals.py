@@ -1,7 +1,9 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from eventedge.evals import (
     build_assessment,
+    deduplicate_eval_signals,
     eval_breakdowns,
     eval_quality_series,
     eval_relationships,
@@ -208,3 +210,25 @@ def test_eval_summary_separates_partial_results_from_pending_signals() -> None:
     assert summary["pending"] == 1
     assert summary["unavailable"] == 1
     assert summary["coverage_pct"] == 50.0
+
+
+def test_eval_counts_identical_decision_once_across_corroborating_news() -> None:
+    first = signal_record()
+    corroboration = replace(
+        first,
+        id="sig_corroboration",
+        news_id="news_corroboration",
+        created_at=first.created_at + timedelta(minutes=1),
+    )
+    different_decision = replace(
+        first,
+        id="sig_different",
+        news_id="news_different",
+        score=41.0,
+        created_at=first.created_at + timedelta(minutes=2),
+    )
+
+    result = deduplicate_eval_signals([first, corroboration, different_decision])
+
+    assert len(result) == 2
+    assert {signal.id for signal in result} == {"sig_corroboration", "sig_different"}
