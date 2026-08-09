@@ -169,3 +169,42 @@ def test_eval_analytics_and_exports_preserve_signal_outcomes() -> None:
     assert timeseries_rows[-1]["offset_minutes"] == 3 * 24 * 60
     assert timeseries_rows[-1]["signed_return_pct"] == 6.0
     assert truncated is False
+
+
+def test_eval_summary_separates_partial_results_from_pending_signals() -> None:
+    outcomes = [
+        {
+            "status": "evaluated",
+            "direction": "up",
+            "returns": {"1h": 0.4, "1d": 1.2, "3d": 2.1},
+            "verdict": True,
+        },
+        {
+            "status": "partial",
+            "direction": "down",
+            "returns": {"1h": -0.3, "1d": None, "3d": None},
+            "verdict": True,
+        },
+        {
+            "status": "partial",
+            "direction": "up",
+            "returns": {"1h": None, "1d": None, "3d": None},
+            "verdict": None,
+        },
+        {
+            "status": "unavailable",
+            "direction": "up",
+            "returns": {"1h": None, "1d": None, "3d": None},
+            "verdict": None,
+        },
+    ]
+
+    summary = eval_summary(outcomes)
+
+    assert summary["signals_total"] == 4
+    assert summary["evaluated"] == 2
+    assert summary["complete"] == 1
+    assert summary["partial"] == 1
+    assert summary["pending"] == 1
+    assert summary["unavailable"] == 1
+    assert summary["coverage_pct"] == 50.0

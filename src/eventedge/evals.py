@@ -463,7 +463,15 @@ def eval_summary(outcomes: list[dict[str, object]]) -> dict[str, object]:
     return {
         "signals_total": len(outcomes),
         "evaluated": len(decided),
-        "pending": sum(item.get("status") == "partial" for item in outcomes),
+        "complete": sum(item.get("status") == "evaluated" for item in outcomes),
+        "partial": sum(
+            item.get("status") == "partial" and item.get("verdict") is not None
+            for item in outcomes
+        ),
+        "pending": sum(
+            item.get("status") == "partial" and item.get("verdict") is None
+            for item in outcomes
+        ),
         "unavailable": sum(item.get("status") == "unavailable" for item in outcomes),
         "hit_rate_pct": metrics["hit_rate_pct"],
         "average_signed_return_pct": metrics["average_signed_return_pct"],

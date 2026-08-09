@@ -32,6 +32,7 @@ from eventedge.collectors import (
     is_moex_equity_title,
 )
 from eventedge.evals import (
+    ASSESSMENT_MODEL_VERSION,
     build_assessment,
     eval_breakdowns,
     eval_quality_series,
@@ -554,7 +555,14 @@ async def list_signals(
     return JSONResponse(
         content={
             "data": data,
-            "meta": {"limit": limit, "has_more": False, "next_cursor": None},
+            "meta": {
+                "limit": limit,
+                "has_more": False,
+                "next_cursor": None,
+                "model_scope": "news_event",
+                "final_assessment_endpoint": "/v1/assessments",
+                "final_assessment_model_version": ASSESSMENT_MODEL_VERSION,
+            },
         },
         headers={"ETag": etag},
     )
