@@ -152,13 +152,18 @@ jobs:
             if curl --fail --silent --show-error \
               --max-time 45 \
               "${EVENTEDGE_API_URL}/v1/evals" \
-              | jq -e '.data | has("summary") and has("demo_account") and has("outcomes")' >/dev/null; then
+              | jq -e '.data | has("summary") and has("breakdowns") and has("relationships") and has("quality_series") and has("outcomes")' >/dev/null; then
               break
             fi
             if [[ "${attempt}" == "6" ]]; then exit 1; fi
             sleep 5
           done
-          echo "Production assessment and eval routes are ready"
+          curl --fail --silent --show-error \
+            --max-time 45 \
+            "${EVENTEDGE_API_URL}/v1/evals/export?format=csv&dataset=outcomes" \
+            --output /tmp/eventedge-evals.csv
+          grep -q 'signal_id,ticker,signal_as_of' /tmp/eventedge-evals.csv
+          echo "Production assessment, eval and export routes are ready"
 
       - name: Smoke test web application
         shell: bash

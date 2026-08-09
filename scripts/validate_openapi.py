@@ -36,6 +36,7 @@ def main() -> None:
         "/v1/signals/{signal_id}",
         "/v1/assessments",
         "/v1/evals",
+        "/v1/evals/export",
         "/health/live",
         "/health/ready",
     }

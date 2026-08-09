@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import os
 import re
 import uuid
@@ -30,9 +32,13 @@ from eventedge.collectors import (
 )
 from eventedge.evals import (
     build_assessment,
-    demo_account,
+    eval_breakdowns,
+    eval_quality_series,
+    eval_relationships,
     eval_summary,
     evaluate_signal,
+    event_time_export_rows,
+    outcome_export_rows,
 )
 from eventedge.llm import analyzer_from_environment
 from eventedge.market import (
@@ -729,8 +735,14 @@ async def list_assessments(
     )
 
 
-@app.get("/v1/evals", tags=["Evals"])
-async def list_evals(request: Request) -> JSONResponse:
+async def evaluation_material(
+    request: Request,
+) -> tuple[
+    list[dict[str, object]],
+    list[SignalRecord],
+    dict[str, list[dict[str, object]]],
+    dict[str, NewsRecord],
+]:
     repository: NewsRepository = request.app.state.news_repository
     market_data_client: MoexMarketDataClient = request.app.state.market_data_client
     stored_signals, stored_news = await asyncio.gather(
@@ -767,13 +779,19 @@ async def list_evals(request: Request) -> JSONResponse:
         )
         for signal in signals
     ]
-    summary = eval_summary(outcomes)
-    account = demo_account(outcomes)
+    return outcomes, signals, candles_by_ticker, news_by_id
+
+
+@app.get("/v1/evals", tags=["Evals"])
+async def list_evals(request: Request) -> JSONResponse:
+    outcomes, _, _, _ = await evaluation_material(request)
     return JSONResponse(
         content={
             "data": {
-                "summary": summary,
-                "demo_account": account,
+                "summary": eval_summary(outcomes),
+                "breakdowns": eval_breakdowns(outcomes),
+                "relationships": eval_relationships(outcomes),
+                "quality_series": eval_quality_series(outcomes),
                 "outcomes": outcomes,
             },
             "meta": {
@@ -786,6 +804,102 @@ async def list_evals(request: Request) -> JSONResponse:
                 ),
             },
         }
+    )
+
+
+@app.get("/v1/evals/export", tags=["Evals"])
+async def export_evals(
+    request: Request,
+    format: Literal["csv", "json"] = "csv",
+    dataset: Literal["outcomes", "timeseries"] = "outcomes",
+) -> Response:
+    outcomes, signals, candles_by_ticker, news_by_id = await evaluation_material(request)
+    if dataset == "timeseries":
+        rows, truncated = event_time_export_rows(
+            signals,
+            candles_by_ticker,
+            news_by_id,
+        )
+        fieldnames = [
+            "signal_id",
+            "ticker",
+            "signal_as_of",
+            "direction",
+            "score",
+            "confidence",
+            "model_version",
+            "news_id",
+            "news_source_id",
+            "entry_at",
+            "entry_price",
+            "observation_at",
+            "offset_minutes",
+            "open",
+            "high",
+            "low",
+            "close",
+            "value_rub",
+            "volume_shares",
+            "return_pct",
+            "signed_return_pct",
+        ]
+    else:
+        rows = outcome_export_rows(outcomes)
+        truncated = False
+        fieldnames = [
+            "signal_id",
+            "ticker",
+            "signal_as_of",
+            "direction",
+            "score",
+            "confidence",
+            "model_version",
+            "status",
+            "news_id",
+            "news_source_id",
+            "news_url",
+            "entry_at",
+            "entry_price",
+            "return_1h_pct",
+            "return_1d_pct",
+            "return_3d_pct",
+            "latest_price",
+            "latest_return_pct",
+            "verdict",
+        ]
+
+    generated_at = utc_now()
+    filename = f"eventedge-{dataset}-{generated_at[:10]}.{format}"
+    headers = {
+        "Cache-Control": "no-store",
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    if format == "json":
+        return JSONResponse(
+            content={
+                "data": rows,
+                "meta": {
+                    "dataset": dataset,
+                    "rows": len(rows),
+                    "truncated": truncated,
+                    "generated_at": generated_at,
+                },
+            },
+            headers=headers,
+        )
+
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+    return Response(
+        content="\ufeff" + buffer.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            **headers,
+            "X-EventEdge-Rows": str(len(rows)),
+            "X-EventEdge-Truncated": str(truncated).lower(),
+        },
     )
 
 

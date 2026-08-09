@@ -57,16 +57,54 @@ paths:
   /v1/evals:
     get:
       tags: [Evals]
-      summary: Evaluate stored signals and run the deterministic demo account
+      summary: Evaluate stored signals and expose analytical quality slices
       operationId: listEvals
       security: []
       responses:
         '200':
-          description: Outcomes, aggregate metrics and demo-account trades.
+          description: Outcomes, aggregate metrics, breakdowns and relationships.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/EvalResponse'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
+  /v1/evals/export:
+    get:
+      tags: [Evals]
+      summary: Export outcomes or event-time observations for external analysis
+      operationId: exportEvals
+      security: []
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [csv, json]
+            default: csv
+        - name: dataset
+          in: query
+          description: Outcomes are one row per signal; timeseries is one row per candle.
+          schema:
+            type: string
+            enum: [outcomes, timeseries]
+            default: outcomes
+      responses:
+        '200':
+          description: Downloadable analytical dataset.
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            text/csv:
+              schema:
+                type: string
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
@@ -1044,7 +1082,7 @@ components:
         data:
           type: object
           additionalProperties: true
-          required: [summary, demo_account, outcomes]
+          required: [summary, breakdowns, relationships, quality_series, outcomes]
         meta:
           type: object
           additionalProperties: true

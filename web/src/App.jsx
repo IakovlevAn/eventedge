@@ -12,6 +12,7 @@ import {
   Clock3,
   Copy,
   Database,
+  Download,
   FileText,
   Filter,
   Info,
@@ -24,7 +25,6 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Terminal,
-  WalletCards,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -359,11 +359,6 @@ function formatPct(value, { sign = true } = {}) {
 function formatCompact(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
   return new Intl.NumberFormat("ru-RU", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value));
-}
-
-function formatCurrency(value) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
-  return `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(Number(value))} ₽`;
 }
 
 function formatScenario(scenario) {
@@ -1262,15 +1257,25 @@ function EvalsScreen() {
 
   if (status !== "ready") return <DataState error={status === "error" ? error : ""} onRetry={() => window.location.reload()} />;
 
-  const { summary, demo_account: account, outcomes } = payload.data;
+  const { summary, breakdowns, relationships, quality_series: qualitySeries, outcomes } = payload.data;
   const hitRate = summary.hit_rate_pct === null ? "—" : `${summary.hit_rate_pct}%`;
   const averageReturn = summary.average_signed_return_pct === null ? "—" : formatPct(summary.average_signed_return_pct);
+  const medianReturn = summary.median_signed_return_pct === null ? "—" : formatPct(summary.median_signed_return_pct);
+  const horizonLabels = { "1h": "1 час", "1d": "1 день", "3d": "3 дня" };
+  const directionLabels = { up: "Вверх", down: "Вниз", neutral: "Нейтрально" };
+  const latestQuality = qualitySeries.at(-1);
 
   return (
     <main className="screen section-screen evals-screen">
       <section className="page-hero evals-hero">
-        <div><span className="eyebrow"><Activity size={13} /> Проверка реальностью</span><h1>Evals: что произошло после сигнала</h1><p>Система сопоставляет сигнал с первой доступной свечой MOEX, проверяет движение через 1 час, 1 день и 3 дня и теми же правилами ведёт прозрачный демо‑счёт.</p></div>
-        <div className="eval-live"><i /><span><strong>Обновляется раз в минуту</strong><small>{formatRelative(payload.meta.generated_at)} · окно 10‑минутных свечей</small></span></div>
+        <div><span className="eyebrow"><Activity size={13} /> Проверка реальностью</span><h1>Evals: сигналы в цифрах</h1><p>Каждый сигнал сопоставляется с реальной ценой MOEX. Здесь видно, как меняется качество по горизонтам, направлениям, бумагам и уверенности.</p></div>
+        <div className="eval-hero-actions">
+          <div className="eval-live"><i /><span><strong>Обновляется раз в минуту</strong><small>{formatRelative(payload.meta.generated_at)} · 10‑минутные свечи</small></span></div>
+          <div className="eval-exports">
+            <a href={apiUrl("/v1/evals/export?format=csv&dataset=outcomes")} download><Download size={13} /> Outcomes CSV</a>
+            <a href={apiUrl("/v1/evals/export?format=csv&dataset=timeseries")} download><Download size={13} /> Time series CSV</a>
+          </div>
+        </div>
       </section>
 
       <section className="eval-warning"><ShieldCheck size={17} /><div><strong>Это технический eval, а не доказательство доходности</strong><span>Выборка пока мала и не является point‑in‑time калиброванным backtest. Результаты нужны, чтобы находить слабые места модели до использования капитала.</span></div></section>
@@ -1278,38 +1283,74 @@ function EvalsScreen() {
       <section className="eval-kpis">
         <article><span>Проверено сигналов</span><strong>{summary.evaluated}</strong><small>из {summary.signals_total} доступных в хранилище</small></article>
         <article><span>Попадание направления</span><strong>{hitRate}</strong><small>по самому длинному доступному горизонту</small></article>
-        <article><span>Средняя реакция</span><strong className={Number(summary.average_signed_return_pct) >= 0 ? "market-positive" : "market-negative"}>{averageReturn}</strong><small>доходность со знаком сигнала, до издержек</small></article>
+        <article><span>Средняя реакция</span><strong className={Number(summary.average_signed_return_pct) >= 0 ? "market-positive" : "market-negative"}>{averageReturn}</strong><small>медиана {medianReturn} · доходность со знаком сигнала</small></article>
         <article><span>Покрытие eval</span><strong>{summary.coverage_pct}%</strong><small>{summary.pending} ждут 3 дня · {summary.unavailable} вне окна</small></article>
       </section>
 
-      <section className="demo-account">
-        <header className="demo-account__header">
-          <div><span className="section-kicker"><WalletCards size={14} /> Демо‑счёт</span><h2>{formatCurrency(account.equity_rub)}</h2><p>Старт {formatCurrency(account.initial_balance_rub)} · только канонические news‑сигналы · без реальных заявок</p></div>
-          <div className={`demo-return ${account.net_return_pct >= 0 ? "is-positive" : "is-negative"}`}><span>Результат</span><strong>{formatPct(account.net_return_pct)}</strong><small>комиссии {formatCurrency(account.total_commission_rub)}</small></div>
-        </header>
-        <div className="demo-rules">
-          <span><strong>{account.rules.position_share_pct}%</strong> счёта на сигнал</span>
-          <span><strong>{account.rules.commission_per_side_pct}%</strong> комиссия за сторону</span>
-          <span><strong>{account.rules.slippage_per_side_pct}%</strong> проскальзывание</span>
-          <span><strong>{account.closed_trades}</strong> закрыто · {account.open_positions} открыто · {account.skipped_signals} пропущено</span>
+      <section className="eval-analysis-grid">
+        <article className="eval-analysis-card">
+          <div className="section-heading"><span><Clock3 size={14} /> По горизонтам</span><small>где сигнал работает лучше</small></div>
+          <div className="eval-metric-rows">
+            {breakdowns.by_horizon.map((item) => <div key={item.horizon}>
+              <strong>{horizonLabels[item.horizon]}</strong>
+              <span>{item.hit_rate_pct === null ? "—" : `${item.hit_rate_pct}%`}<small>hit rate</small></span>
+              <span className={Number(item.average_signed_return_pct) >= 0 ? "market-positive" : "market-negative"}>{formatPct(item.average_signed_return_pct)}<small>среднее</small></span>
+              <em>n={item.observations}</em>
+            </div>)}
+          </div>
+        </article>
+
+        <article className="eval-analysis-card">
+          <div className="section-heading"><span><CircleGauge size={14} /> Что связано с качеством</span><small>Pearson · не причинность</small></div>
+          <div className="relationship-list">
+            {relationships.map((item) => <div key={item.code}>
+              <span><strong>{item.label}</strong><small>{item.interpretation} · n={item.observations}</small></span>
+              <b>{item.value === null ? "r —" : `r ${item.value > 0 ? "+" : ""}${item.value.toFixed(2)}`}</b>
+            </div>)}
+          </div>
+          <p>Корреляция станет содержательной после накопления выборки. Сейчас «нет данных» лучше ложной точности.</p>
+        </article>
+
+        <article className="eval-analysis-card">
+          <div className="section-heading"><span><ArrowUpRight size={14} /> По направлениям</span><small>асимметрия модели</small></div>
+          <div className="eval-direction-grid">
+            {breakdowns.by_direction.map((item) => <div key={item.direction}>
+              <Direction direction={item.direction} />
+              <strong>{directionLabels[item.direction]}</strong>
+              <b>{item.hit_rate_pct === null ? "—" : `${item.hit_rate_pct}%`}</b>
+              <small>{item.observations} оценок · {formatPct(item.average_signed_return_pct)}</small>
+            </div>)}
+          </div>
+          <div className="confidence-strip">
+            {breakdowns.by_confidence.map((item) => <div key={item.bucket}><strong>{item.bucket}</strong><span>{item.hit_rate_pct === null ? "—" : `${item.hit_rate_pct}%`}</span><small>n={item.observations}</small></div>)}
+          </div>
+        </article>
+
+        <article className="eval-analysis-card">
+          <div className="section-heading"><span><BarChart3 size={14} /> Накопленное качество</span><small>{latestQuality ? `${latestQuality.evaluated_count} решённых сигналов` : "нет наблюдений"}</small></div>
+          <div className="quality-series">
+            {qualitySeries.slice(-16).map((point) => <div key={point.signal_id} title={`${point.ticker}: ${point.cumulative_hit_rate_pct}%`}>
+              <i style={{ height: `${Math.max(6, point.cumulative_hit_rate_pct)}%` }} />
+              <span>{point.ticker}</span>
+            </div>)}
+            {!qualitySeries.length && <p>Линия появится после первых сигналов с доступным outcome.</p>}
+          </div>
+          {latestQuality && <div className="quality-latest"><span>Текущий cumulative hit rate</span><strong>{latestQuality.cumulative_hit_rate_pct}%</strong><small>средний signed return {formatPct(latestQuality.cumulative_average_signed_return_pct)}</small></div>}
+        </article>
+      </section>
+
+      <section className="eval-ticker-card">
+        <div className="section-heading"><span><Database size={14} /> Разрез по бумагам</span><small>для поиска систематических ошибок</small></div>
+        <div className="ticker-eval-grid">
+          {breakdowns.by_ticker.slice(0, 12).map((item) => <div key={item.ticker}><strong>{item.ticker}</strong><span>{item.hit_rate_pct === null ? "—" : `${item.hit_rate_pct}%`}<small>hit rate</small></span><span>{formatPct(item.average_signed_return_pct)}<small>avg signed</small></span><em>n={item.observations}</em></div>)}
         </div>
-        <div className="eval-table-wrap">
-          <table className="eval-table demo-trades">
-            <thead><tr><th>Бумага</th><th>Сделка</th><th>Вход</th><th>Выход / mark</th><th>Издержки</th><th>Результат</th><th>Статус</th></tr></thead>
-            <tbody>
-              {account.trades.slice(0, 12).map((trade) => <tr key={`${trade.signal_id}-${trade.opened_at}`}>
-                <td><strong>{trade.ticker}</strong></td>
-                <td><span className={`trade-side trade-side--${trade.side}`}>{trade.side === "long" ? "LONG" : "SHORT"}</span></td>
-                <td>{formatPrice(trade.entry_price)}</td>
-                <td>{formatPrice(trade.exit_or_mark_price)}</td>
-                <td>{formatCurrency(trade.commission_rub)}</td>
-                <td className={trade.pnl_rub >= 0 ? "market-positive" : "market-negative"}><strong>{formatCurrency(trade.pnl_rub)}</strong><small>{formatPct(trade.return_pct)}</small></td>
-                <td><span className={`trade-status trade-status--${trade.status}`}>{trade.status === "closed" ? "Закрыта" : "Открыта"}</span></td>
-              </tr>)}
-            </tbody>
-          </table>
-          {!account.trades.length && <div className="empty-state"><WalletCards size={22} /><strong>Сделок пока нет</strong><span>Демо‑счёт открывает позиции только по направленным новостным сигналам.</span></div>}
-        </div>
+        {!breakdowns.by_ticker.length && <div className="empty-state"><Database size={22} /><strong>Данные ещё не накопились</strong><span>Разрезы появятся автоматически.</span></div>}
+      </section>
+
+      <section className="eval-export-note">
+        <FileText size={17} />
+        <div><strong>Данные готовы для внешнего анализа</strong><span>Outcomes — одна строка на сигнал. Time series — свечи от входа до +3 дней с offset, объёмом и signed return. Оба набора доступны в CSV и JSON через API.</span></div>
+        <a href={apiUrl("/v1/evals/export?format=json&dataset=outcomes")} target="_blank" rel="noreferrer">JSON <ArrowUpRight size={12} /></a>
       </section>
 
       <section className="outcomes-card">
@@ -1423,7 +1464,7 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
       </section>
 
       <section className="method-reality">
-        <div><ShieldCheck size={17} /><span><strong>Что работает сейчас</strong>Новостной baseline, пять не‑LLM факторов, live‑оценка 15 бумаг, outcomes и демо‑счёт с издержками.</span></div>
+        <div><ShieldCheck size={17} /><span><strong>Что работает сейчас</strong>Новостной baseline, пять не‑LLM факторов, live‑оценка 15 бумаг, outcomes, аналитические разрезы и выгрузки.</span></div>
         <div><Database size={17} /><span><strong>Граница текущей версии</strong>Отчётность пока извлекается из распознанных раскрытий; полноценный point‑in‑time фундаментальный датасет и калиброванный backtest ещё не готовы.</span></div>
         <button type="button" onClick={onApi}>Посмотреть API <ArrowUpRight size={13} /></button>
       </section>
@@ -1433,7 +1474,8 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
 
 const apiEndpoints = [
   { id: "assessments", method: "GET", path: "/v1/assessments", title: "Live‑оценки рынка", description: "Гибридная или quant‑оценка всех компаний с пятью не‑LLM факторами.", parameter: { name: "tickers", type: "string", description: "Опциональный список тикеров MOEX через запятую" } },
-  { id: "evals", method: "GET", path: "/v1/evals", title: "Outcomes и демо‑счёт", description: "Реакция цены через 1ч/1д/3д, метрики качества и демо‑портфель с издержками.", parameter: null },
+  { id: "evals", method: "GET", path: "/v1/evals", title: "Анализ качества сигналов", description: "Outcomes, горизонты, бумаги, confidence buckets, корреляции и cumulative quality.", parameter: null },
+  { id: "evals_export", method: "GET", path: "/v1/evals/export?format=csv&dataset=timeseries", title: "Выгрузка Evals", description: "CSV/JSON: одна строка на сигнал или event-time ряд свечей до +3 дней.", parameter: { name: "dataset", type: "string", description: "outcomes или timeseries; format — csv или json" } },
   { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Новостные сигналы", description: "Канонические сигналы, созданные существенными новостными событиями.", parameter: { name: "limit", type: "integer", description: "Количество записей, максимум 100" } },
   { id: "news", method: "GET", path: "/v1/news?limit=20", title: "Лента новостей", description: "Исходные публикации и сигналы, которые с ними связаны.", parameter: { name: "limit", type: "integer", description: "Количество публикаций, максимум 100" } },
   { id: "ticker", method: "GET", path: "/v1/signals?ticker=SBER&limit=1", title: "Сигнал компании", description: "Последний новостной сигнал по выбранному тикеру.", parameter: { name: "ticker", type: "string", description: "Тикер MOEX, например SBER" } },
@@ -1464,10 +1506,12 @@ function ApiScreen() {
 }` : endpoint.id === "evals" ? `{
   "data": {
     "summary": {"evaluated":12,"hit_rate_pct":58.3},
-    "demo_account": {"initial_balance_rub":1000000,"net_return_pct":1.24},
+    "breakdowns": {"by_horizon":[{"horizon":"3d","hit_rate_pct":58.3}]},
+    "relationships": [{"code":"signal_strength_vs_3d_return","value":0.21}],
     "outcomes": [{"ticker":"SBER","returns":{"1h":0.4,"1d":1.2,"3d":2.1},"verdict":true}]
   }
-}` : endpoint.id === "snapshot" ? `{
+}` : endpoint.id === "evals_export" ? `signal_id,ticker,signal_as_of,direction,score,confidence,observation_at,offset_minutes,return_pct
+sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,2026-08-08T08:00:00Z,60,0.42` : endpoint.id === "snapshot" ? `{
   "data": {
     "ticker": "SBER",
     "market": {

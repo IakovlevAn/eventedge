@@ -2,9 +2,13 @@ from datetime import UTC, datetime, timedelta
 
 from eventedge.evals import (
     build_assessment,
-    demo_account,
+    eval_breakdowns,
+    eval_quality_series,
+    eval_relationships,
     eval_summary,
     evaluate_signal,
+    event_time_export_rows,
+    outcome_export_rows,
     quant_factors,
 )
 from eventedge.storage import NewsRecord, SignalRecord
@@ -126,7 +130,7 @@ def test_hybrid_assessment_is_not_an_llm_only_signal() -> None:
     } == codes
 
 
-def test_eval_and_demo_account_include_costs() -> None:
+def test_eval_analytics_and_exports_preserve_signal_outcomes() -> None:
     entry = datetime(2026, 8, 3, 7, 10, tzinfo=UTC)
     candles = [
         {
@@ -144,11 +148,24 @@ def test_eval_and_demo_account_include_costs() -> None:
 
     outcome = evaluate_signal(signal_record(), candles, reporting_news())
     summary = eval_summary([outcome])
-    account = demo_account([outcome])
+    breakdowns = eval_breakdowns([outcome])
+    relationships = eval_relationships([outcome])
+    quality_series = eval_quality_series([outcome])
+    outcome_rows = outcome_export_rows([outcome])
+    timeseries_rows, truncated = event_time_export_rows(
+        [signal_record()],
+        {"SBER": candles},
+        {"news_report": reporting_news()},
+    )
 
     assert outcome["returns"] == {"1h": 1.0, "1d": 3.0, "3d": 6.0}
     assert outcome["verdict"] is True
     assert summary["hit_rate_pct"] == 100.0
-    assert account["closed_trades"] == 1
-    assert account["total_commission_rub"] > 0
-    assert 0 < account["net_return_pct"] < 0.6
+    assert summary["median_signed_return_pct"] == 6.0
+    assert breakdowns["by_horizon"][0]["hit_rate_pct"] == 100.0
+    assert relationships[0]["value"] is None
+    assert quality_series[-1]["cumulative_hit_rate_pct"] == 100.0
+    assert outcome_rows[0]["return_3d_pct"] == 6.0
+    assert timeseries_rows[-1]["offset_minutes"] == 3 * 24 * 60
+    assert timeseries_rows[-1]["signed_return_pct"] == 6.0
+    assert truncated is False
