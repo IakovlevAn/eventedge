@@ -24,6 +24,7 @@ jobs:
       DEPLOY_SHA: ${{ inputs.deploy_sha }}
       IMAGE_URL: cr.yandex/${{ vars.YC_REGISTRY_ID }}/eventedge-api:${{ inputs.deploy_sha }}
       YC_CONTAINER_ID: ${{ vars.YC_CONTAINER_ID }}
+      YC_WORKER_CONTAINER_ID: ${{ vars.YC_WORKER_CONTAINER_ID }}
       YC_GATEWAY_ID: ${{ vars.YC_GATEWAY_ID }}
       YC_GATEWAY_SERVICE_ACCOUNT_ID: ${{ vars.YC_GATEWAY_SERVICE_ACCOUNT_ID }}
       YC_FOLDER_ID: ${{ vars.YC_FOLDER_ID }}

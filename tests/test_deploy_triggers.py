@@ -3,6 +3,7 @@ from scripts.deploy_triggers import TIMER_SPECS, create_payload, update_payload
 ENVIRONMENT = {
     "YC_FOLDER_ID": "folder-id",
     "YC_CONTAINER_ID": "container-id",
+    "YC_WORKER_CONTAINER_ID": "worker-container-id",
     "YC_GATEWAY_SERVICE_ACCOUNT_ID": "gateway-sa-id",
 }
 
@@ -18,7 +19,7 @@ def test_fast_news_timer_runs_every_minute() -> None:
             "cronExpression": "* * ? * * *",
             "payload": "fast_news",
             "invokeContainerWithRetry": {
-                "containerId": "container-id",
+                "containerId": "worker-container-id",
                 "serviceAccountId": "gateway-sa-id",
                 "retrySettings": {
                     "retryAttempts": "3",

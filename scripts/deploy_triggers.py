@@ -69,7 +69,9 @@ def timer_rule(spec: TimerSpec, environment: Mapping[str, str]) -> dict[str, obj
             "cronExpression": spec.cron_expression,
             "payload": spec.payload,
             "invokeContainerWithRetry": {
-                "containerId": environment["YC_CONTAINER_ID"],
+                "containerId": environment.get(
+                    "YC_WORKER_CONTAINER_ID", environment["YC_CONTAINER_ID"]
+                ),
                 "serviceAccountId": environment["YC_GATEWAY_SERVICE_ACCOUNT_ID"],
                 "retrySettings": {
                     "retryAttempts": "3",
