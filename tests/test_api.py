@@ -470,7 +470,7 @@ def test_assessments_cover_companies_without_fresh_news_signal() -> None:
     assert response.json()["meta"]["market_biases"] == 2
 
 
-def test_evals_endpoint_exposes_outcomes_and_demo_account() -> None:
+def test_evals_endpoint_exposes_analysis_and_downloads() -> None:
     original = app.state.market_data_client
 
     class FakeMarketDataClient:
@@ -499,19 +499,34 @@ def test_evals_endpoint_exposes_outcomes_and_demo_account() -> None:
     app.state.market_data_client = FakeMarketDataClient()
     try:
         response = client.get("/v1/evals")
+        csv_export = client.get(
+            "/v1/evals/export",
+            params={"format": "csv", "dataset": "outcomes"},
+        )
+        timeseries_export = client.get(
+            "/v1/evals/export",
+            params={"format": "json", "dataset": "timeseries"},
+        )
     finally:
         app.state.market_data_client = original
 
     assert response.status_code == 200
-    assert set(response.json()["data"]) == {"summary", "demo_account", "outcomes"}
-    assert response.json()["data"]["demo_account"]["rules"] == {
-        "position_share_pct": 10.0,
-        "commission_per_side_pct": 0.05,
-        "slippage_per_side_pct": 0.05,
-        "exit_horizon": "3 calendar days",
-        "max_open_positions": 10,
+    assert set(response.json()["data"]) == {
+        "summary",
+        "breakdowns",
+        "relationships",
+        "quality_series",
+        "outcomes",
     }
+    assert len(response.json()["data"]["breakdowns"]["by_horizon"]) == 3
     assert "point-in-time" in response.json()["meta"]["warning"]
+    assert csv_export.status_code == 200
+    assert csv_export.headers["content-type"].startswith("text/csv")
+    assert "eventedge-outcomes" in csv_export.headers["content-disposition"]
+    assert "signal_id,ticker,signal_as_of" in csv_export.text
+    assert timeseries_export.status_code == 200
+    assert timeseries_export.json()["meta"]["dataset"] == "timeseries"
+    assert timeseries_export.json()["meta"]["truncated"] is False
 
 
 def test_instrument_snapshot_does_not_revive_hidden_exchange_noise() -> None:

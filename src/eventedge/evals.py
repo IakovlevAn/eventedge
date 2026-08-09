@@ -383,130 +383,318 @@ def evaluate_signal(
     }
 
 
+EVAL_HORIZONS = ("1h", "1d", "3d")
+
+
+def _return_at(item: dict[str, object], horizon: str) -> float | None:
+    returns = item.get("returns")
+    if not isinstance(returns, dict):
+        return None
+    return _number(returns.get(horizon))
+
+
+def _primary_return(item: dict[str, object]) -> float | None:
+    return next(
+        (
+            value
+            for horizon in reversed(EVAL_HORIZONS)
+            if (value := _return_at(item, horizon)) is not None
+        ),
+        None,
+    )
+
+
+def _signed_return(direction: object, value: float | None) -> float | None:
+    if value is None or direction not in {"up", "down"}:
+        return None
+    return value * (-1 if direction == "down" else 1)
+
+
+def _verdict(direction: object, value: float | None) -> bool | None:
+    if value is None:
+        return None
+    if direction == "neutral":
+        return abs(value) < 0.5
+    if direction == "up":
+        return value > 0
+    if direction == "down":
+        return value < 0
+    return None
+
+
+def _metric_slice(
+    items: list[dict[str, object]],
+    *,
+    horizon: str | None = None,
+) -> dict[str, object]:
+    values = [
+        (item, _return_at(item, horizon) if horizon else _primary_return(item))
+        for item in items
+    ]
+    evaluated = [(item, value) for item, value in values if value is not None]
+    verdicts = [
+        verdict
+        for item, value in evaluated
+        if (verdict := _verdict(item.get("direction"), value)) is not None
+    ]
+    signed = [
+        result
+        for item, value in evaluated
+        if (result := _signed_return(item.get("direction"), value)) is not None
+    ]
+    return {
+        "signals": len(items),
+        "observations": len(evaluated),
+        "hit_rate_pct": (
+            round(sum(verdicts) / len(verdicts) * 100, 1) if verdicts else None
+        ),
+        "average_signed_return_pct": (
+            round(statistics.mean(signed), 2) if signed else None
+        ),
+        "median_signed_return_pct": (
+            round(statistics.median(signed), 2) if signed else None
+        ),
+    }
+
+
 def eval_summary(outcomes: list[dict[str, object]]) -> dict[str, object]:
     decided = [item for item in outcomes if item.get("verdict") is not None]
-    signed_returns = []
-    for item in decided:
-        returns = item.get("returns")
-        if not isinstance(returns, dict):
-            continue
-        value = next(
-            (
-                returns.get(key)
-                for key in ("3d", "1d", "1h")
-                if returns.get(key) is not None
-            ),
-            None,
-        )
-        if isinstance(value, (int, float)):
-            sign = -1 if item["direction"] == "down" else 1
-            signed_returns.append(float(value) * sign)
+    metrics = _metric_slice(outcomes)
     return {
         "signals_total": len(outcomes),
         "evaluated": len(decided),
         "pending": sum(item.get("status") == "partial" for item in outcomes),
         "unavailable": sum(item.get("status") == "unavailable" for item in outcomes),
-        "hit_rate_pct": (
-            round(sum(bool(item["verdict"]) for item in decided) / len(decided) * 100, 1)
-            if decided
-            else None
-        ),
-        "average_signed_return_pct": (
-            round(statistics.mean(signed_returns), 2) if signed_returns else None
-        ),
+        "hit_rate_pct": metrics["hit_rate_pct"],
+        "average_signed_return_pct": metrics["average_signed_return_pct"],
+        "median_signed_return_pct": metrics["median_signed_return_pct"],
         "coverage_pct": round(len(decided) / len(outcomes) * 100, 1) if outcomes else 0.0,
     }
 
 
-def demo_account(
-    outcomes: list[dict[str, object]],
-    *,
-    initial_balance: float = 1_000_000.0,
-    position_share: float = 0.10,
-    commission_rate: float = 0.0005,
-    slippage_rate: float = 0.0005,
-) -> dict[str, object]:
-    trades = []
-    total_pnl = 0.0
-    total_commission = 0.0
-    notional = initial_balance * position_share
-    max_positions = max(1, math.floor(1 / position_share))
-    active_positions: dict[str, datetime] = {}
-    skipped_signals = 0
-    for outcome in sorted(outcomes, key=lambda item: str(item["as_of"])):
-        if outcome["direction"] == "neutral" or not outcome.get("entry"):
-            continue
-        entry = outcome["entry"]
-        assert isinstance(entry, dict)
-        opened_at = _parse_timestamp(str(entry["at"]))
-        active_positions = {
-            ticker: exit_at
-            for ticker, exit_at in active_positions.items()
-            if exit_at > opened_at
+def eval_breakdowns(outcomes: list[dict[str, object]]) -> dict[str, object]:
+    by_horizon = [
+        {"horizon": horizon, **_metric_slice(outcomes, horizon=horizon)}
+        for horizon in EVAL_HORIZONS
+    ]
+    by_direction = [
+        {
+            "direction": direction,
+            **_metric_slice([item for item in outcomes if item.get("direction") == direction]),
         }
-        if outcome["ticker"] in active_positions or len(active_positions) >= max_positions:
-            skipped_signals += 1
-            continue
-        raw_entry = _number(entry.get("price"))
-        returns = outcome.get("returns")
-        if raw_entry is None or not isinstance(returns, dict):
-            continue
-        closed = returns.get("3d") is not None
-        raw_exit = (
-            raw_entry * (1 + float(returns["3d"]) / 100)
-            if closed
-            else _number(outcome.get("latest_price"))
-        )
-        if raw_exit is None:
-            continue
-        active_positions[str(outcome["ticker"])] = (
-            opened_at + timedelta(days=3) if closed else datetime.max.replace(tzinfo=UTC)
-        )
-        side = "long" if outcome["direction"] == "up" else "short"
-        entry_exec = raw_entry * (1 + slippage_rate if side == "long" else 1 - slippage_rate)
-        exit_exec = (
-            raw_exit * (1 - slippage_rate if side == "long" else 1 + slippage_rate)
-            if closed
-            else raw_exit
-        )
-        quantity = notional / entry_exec
-        entry_commission = notional * commission_rate
-        exit_value = quantity * exit_exec
-        exit_commission = exit_value * commission_rate if closed else 0.0
-        gross = quantity * (exit_exec - entry_exec) * (1 if side == "long" else -1)
-        pnl = gross - entry_commission - exit_commission
-        total_pnl += pnl
-        total_commission += entry_commission + exit_commission
-        trades.append(
+        for direction in ("up", "down", "neutral")
+    ]
+    tickers = sorted({str(item["ticker"]) for item in outcomes})
+    by_ticker = sorted(
+        (
             {
-                "signal_id": outcome["signal_id"],
-                "ticker": outcome["ticker"],
-                "side": side,
-                "status": "closed" if closed else "open",
-                "opened_at": entry["at"],
-                "entry_price": round(entry_exec, 4),
-                "exit_or_mark_price": round(exit_exec, 4),
-                "notional_rub": round(notional, 2),
-                "commission_rub": round(entry_commission + exit_commission, 2),
-                "pnl_rub": round(pnl, 2),
-                "return_pct": round(pnl / notional * 100, 2),
+                "ticker": ticker,
+                **_metric_slice([item for item in outcomes if item.get("ticker") == ticker]),
+            }
+            for ticker in tickers
+        ),
+        key=lambda item: (-int(item["signals"]), str(item["ticker"])),
+    )
+    confidence_ranges = (
+        ("<60%", 0.0, 0.6),
+        ("60–70%", 0.6, 0.7),
+        ("70–80%", 0.7, 0.8),
+        ("≥80%", 0.8, 1.01),
+    )
+    by_confidence = []
+    for label, low, high in confidence_ranges:
+        bucket = [
+            item
+            for item in outcomes
+            if (confidence := _number(item.get("confidence"))) is not None
+            and low <= confidence < high
+        ]
+        by_confidence.append({"bucket": label, **_metric_slice(bucket)})
+    return {
+        "by_horizon": by_horizon,
+        "by_direction": by_direction,
+        "by_ticker": by_ticker,
+        "by_confidence": by_confidence,
+    }
+
+
+def _correlation(pairs: list[tuple[float, float]]) -> float | None:
+    if len(pairs) < 3:
+        return None
+    left = [pair[0] for pair in pairs]
+    right = [pair[1] for pair in pairs]
+    if len(set(left)) < 2 or len(set(right)) < 2:
+        return None
+    return round(statistics.correlation(left, right), 3)
+
+
+def _correlation_interpretation(value: float | None, observations: int) -> str:
+    if value is None or observations < 8:
+        return "недостаточно данных"
+    strength = abs(value)
+    if strength < 0.2:
+        return "слабая связь"
+    if strength < 0.5:
+        return "умеренная связь"
+    return "сильная связь"
+
+
+def eval_relationships(outcomes: list[dict[str, object]]) -> list[dict[str, object]]:
+    strength_pairs = []
+    confidence_pairs = []
+    for item in outcomes:
+        value = _return_at(item, "3d")
+        signed = _signed_return(item.get("direction"), value)
+        score = _number(item.get("score"))
+        confidence = _number(item.get("confidence"))
+        if signed is not None and score is not None:
+            strength_pairs.append((abs(score), signed))
+        verdict = _verdict(item.get("direction"), value)
+        if verdict is not None and confidence is not None:
+            confidence_pairs.append((confidence, float(verdict)))
+
+    definitions = (
+        (
+            "signal_strength_vs_3d_return",
+            "Сила сигнала ↔ результат 3д",
+            strength_pairs,
+        ),
+        (
+            "confidence_vs_3d_hit",
+            "Уверенность ↔ попадание 3д",
+            confidence_pairs,
+        ),
+    )
+    result = []
+    for code, label, pairs in definitions:
+        value = _correlation(pairs)
+        result.append(
+            {
+                "code": code,
+                "label": label,
+                "method": "pearson",
+                "value": value,
+                "observations": len(pairs),
+                "interpretation": _correlation_interpretation(value, len(pairs)),
             }
         )
-    equity = initial_balance + total_pnl
-    return {
-        "initial_balance_rub": initial_balance,
-        "equity_rub": round(equity, 2),
-        "net_return_pct": round((equity / initial_balance - 1) * 100, 2),
-        "total_commission_rub": round(total_commission, 2),
-        "open_positions": sum(trade["status"] == "open" for trade in trades),
-        "closed_trades": sum(trade["status"] == "closed" for trade in trades),
-        "skipped_signals": skipped_signals,
-        "rules": {
-            "position_share_pct": position_share * 100,
-            "commission_per_side_pct": commission_rate * 100,
-            "slippage_per_side_pct": slippage_rate * 100,
-            "exit_horizon": "3 calendar days",
-            "max_open_positions": max_positions,
-        },
-        "trades": list(reversed(trades)),
-    }
+    return result
+
+
+def eval_quality_series(outcomes: list[dict[str, object]]) -> list[dict[str, object]]:
+    evaluated = sorted(
+        (item for item in outcomes if item.get("verdict") is not None),
+        key=lambda item: str(item["as_of"]),
+    )
+    points = []
+    hits: list[bool] = []
+    signed_returns: list[float] = []
+    for item in evaluated:
+        hits.append(bool(item["verdict"]))
+        signed = _signed_return(item.get("direction"), _primary_return(item))
+        if signed is not None:
+            signed_returns.append(signed)
+        points.append(
+            {
+                "as_of": item["as_of"],
+                "signal_id": item["signal_id"],
+                "ticker": item["ticker"],
+                "evaluated_count": len(hits),
+                "cumulative_hit_rate_pct": round(sum(hits) / len(hits) * 100, 1),
+                "cumulative_average_signed_return_pct": (
+                    round(statistics.mean(signed_returns), 2) if signed_returns else None
+                ),
+            }
+        )
+    return points
+
+
+def outcome_export_rows(outcomes: list[dict[str, object]]) -> list[dict[str, object]]:
+    rows = []
+    for item in outcomes:
+        entry = item.get("entry") if isinstance(item.get("entry"), dict) else {}
+        news = item.get("news") if isinstance(item.get("news"), dict) else {}
+        rows.append(
+            {
+                "signal_id": item["signal_id"],
+                "ticker": item["ticker"],
+                "signal_as_of": item["as_of"],
+                "direction": item["direction"],
+                "score": item["score"],
+                "confidence": item["confidence"],
+                "model_version": item["model_version"],
+                "status": item["status"],
+                "news_id": news.get("id"),
+                "news_source_id": news.get("source_id"),
+                "news_url": news.get("url"),
+                "entry_at": entry.get("at"),
+                "entry_price": entry.get("price"),
+                "return_1h_pct": _return_at(item, "1h"),
+                "return_1d_pct": _return_at(item, "1d"),
+                "return_3d_pct": _return_at(item, "3d"),
+                "latest_price": item.get("latest_price"),
+                "latest_return_pct": item.get("latest_return_pct"),
+                "verdict": item.get("verdict"),
+            }
+        )
+    return rows
+
+
+def event_time_export_rows(
+    signals: list[SignalRecord],
+    candles_by_ticker: dict[str, list[dict[str, object]]],
+    news_by_id: dict[str, NewsRecord],
+    *,
+    max_rows: int = 5000,
+) -> tuple[list[dict[str, object]], bool]:
+    rows = []
+    for signal in signals:
+        candles = sorted(
+            (
+                (_parse_timestamp(str(item["begin"])), item)
+                for item in candles_by_ticker.get(signal.ticker, [])
+                if item.get("begin") and _number(item.get("open")) is not None
+            ),
+            key=lambda pair: pair[0],
+        )
+        entry = next((pair for pair in candles if pair[0] >= signal.as_of), None)
+        if entry is None or entry[0] - signal.as_of > timedelta(days=3):
+            continue
+        entry_at, entry_row = entry
+        entry_price = _number(entry_row.get("open"))
+        if entry_price is None:
+            continue
+        news = news_by_id.get(signal.news_id)
+        for observed_at, candle in candles:
+            if observed_at < entry_at or observed_at > entry_at + timedelta(days=3):
+                continue
+            close = _number(candle.get("close"))
+            raw_return = round((close / entry_price - 1) * 100, 4) if close is not None else None
+            rows.append(
+                {
+                    "signal_id": signal.id,
+                    "ticker": signal.ticker,
+                    "signal_as_of": to_rfc3339(signal.as_of),
+                    "direction": signal.direction,
+                    "score": signal.score,
+                    "confidence": signal.confidence,
+                    "model_version": signal.model_version,
+                    "news_id": signal.news_id,
+                    "news_source_id": news.source_id if news else None,
+                    "entry_at": to_rfc3339(entry_at),
+                    "entry_price": round(entry_price, 4),
+                    "observation_at": to_rfc3339(observed_at),
+                    "offset_minutes": int((observed_at - entry_at).total_seconds() / 60),
+                    "open": _number(candle.get("open")),
+                    "high": _number(candle.get("high")),
+                    "low": _number(candle.get("low")),
+                    "close": close,
+                    "value_rub": _number(candle.get("value_rub")),
+                    "volume_shares": _number(candle.get("volume_shares")),
+                    "return_pct": raw_return,
+                    "signed_return_pct": _signed_return(signal.direction, raw_return),
+                }
+            )
+            if len(rows) >= max_rows:
+                return rows, True
+    return rows, False

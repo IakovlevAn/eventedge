@@ -1,3 +1,7 @@
+from pathlib import Path
+
+import yaml
+
 from scripts.deploy_serverless import build_payload, masked
 
 
@@ -15,10 +19,11 @@ def test_deployment_payload_has_budget_caps() -> None:
     )
 
     assert payload["resources"] == {
-        "memory": "268435456",
+        "memory": "536870912",
         "cores": "1",
         "coreFraction": "100",
     }
+    assert payload["concurrency"] == "4"
     assert payload["provisionPolicy"] == {"minInstances": "0"}
     assert payload["executionTimeout"] == "60s"
     assert payload["scalingPolicy"] == {
@@ -39,3 +44,25 @@ def test_deployment_payload_has_budget_caps() -> None:
 
 def test_api_error_masker_hides_tokens() -> None:
     assert masked("failed t1_secret-value") == "failed ***"
+
+
+def test_budget_policy_matches_deployment_caps() -> None:
+    policy = yaml.safe_load(Path("infra/budget-policy.yaml").read_text(encoding="utf-8"))
+    runtime = policy["runtime_caps"]["serverless_container"]
+
+    assert policy["currency"] == "RUB"
+    assert policy["monthly_budget"] == 10_000
+    assert policy["notifications"]["thresholds_percent"] == [50, 80, 95]
+    assert policy["enforcement"] == {
+        "billing_budget": "notification_only",
+        "automatic_shutdown": False,
+    }
+    assert runtime == {
+        "memory_mb": 512,
+        "cores": 1,
+        "concurrency": 4,
+        "min_instances": 0,
+        "zone_instances_limit": 1,
+        "zone_requests_limit": 50,
+        "execution_timeout_seconds": 60,
+    }

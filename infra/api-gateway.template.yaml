@@ -150,12 +150,22 @@ paths:
         type: serverless_containers
         container_id: __API_CONTAINER_ID__
         service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /v1/evals/export:
+    get:
+      operationId: exportEvals
+      responses:
+        '200':
+          description: CSV or JSON dataset for external analysis.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
   /v1/evals:
     get:
       operationId: listEvals
       responses:
         '200':
-          description: Signal outcomes, evaluation metrics and demo account.
+          description: Signal outcomes, aggregate metrics and analytical slices.
       x-yc-apigateway-integration:
         type: serverless_containers
         container_id: __API_CONTAINER_ID__

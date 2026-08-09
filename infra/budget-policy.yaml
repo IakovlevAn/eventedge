@@ -1,0 +1,23 @@
+version: 1
+currency: RUB
+period: monthly
+monthly_budget: 10000
+notifications:
+  thresholds_percent: [50, 80, 95]
+  recipients:
+    - cloud_owner
+enforcement:
+  billing_budget: notification_only
+  automatic_shutdown: false
+runtime_caps:
+  serverless_container:
+    memory_mb: 512
+    cores: 1
+    concurrency: 4
+    min_instances: 0
+    zone_instances_limit: 1
+    zone_requests_limit: 50
+    execution_timeout_seconds: 60
+notes:
+  - The Yandex Cloud billing budget sends alerts but does not stop resource consumption.
+  - Automatic shutdown requires a separate explicitly approved runbook or trigger.
