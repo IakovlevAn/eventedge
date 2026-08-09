@@ -254,6 +254,30 @@ paths:
         type: serverless_containers
         container_id: __API_CONTAINER_ID__
         service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /v1/admin/signals/reprocess:
+    post:
+      operationId: reprocessSignalCandidates
+      parameters:
+        - name: X-EventEdge-Admin-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Stored signal candidates reprocessed in a capped batch.
+        '401':
+          description: Invalid admin key.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
   /v1/instruments/snapshots:
     get:
       operationId: listInstrumentSnapshots

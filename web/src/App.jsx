@@ -401,6 +401,18 @@ function formatTime(timestamp) {
   return new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(new Date(timestamp));
 }
 
+function formatPublicationTime(timestamp, withDate = true) {
+  if (!timestamp) return "время не указано";
+  return new Intl.DateTimeFormat("ru-RU", withDate
+    ? { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }
+    : { hour: "2-digit", minute: "2-digit" }).format(new Date(timestamp));
+}
+
+function deliveryLagMinutes(publishedAt, receivedAt) {
+  if (!publishedAt || !receivedAt) return null;
+  return Math.max(0, Math.round((new Date(receivedAt) - new Date(publishedAt)) / 60000));
+}
+
 function horizonLabel(horizon) {
   const units = horizon.unit === "calendar_days" ? "дн." : horizon.unit === "trading_days" ? "торг. дн." : "ч";
   return `${horizon.value} ${units}`;
@@ -482,6 +494,8 @@ function newsFromApi(item, signalsById, sourceNames = new Map()) {
     sourceId: item.source_id,
     time: formatTime(item.published_at),
     publishedAt: item.published_at,
+    receivedAt: item.received_at,
+    deliveryLagMinutes: deliveryLagMinutes(item.published_at, item.received_at),
     processedAt: item.created_at,
     tag: signal ? related.status === "active" ? "Активный сигнал" : "Исторический сигнал" : "Без сигнала",
     title: item.title,
@@ -544,7 +558,7 @@ function groupNewsEvents(items) {
       groups.push({
         ...item,
         sourceCount: 1,
-        sources: [{ id: item.sourceId, name: item.source, url: item.url, publishedAt: item.publishedAt }],
+        sources: [{ id: item.sourceId, name: item.source, url: item.url, publishedAt: item.publishedAt, receivedAt: item.receivedAt }],
         corroborations: [],
       });
       return;
@@ -558,7 +572,7 @@ function groupNewsEvents(items) {
     group.tickers = [...new Set([...(group.tickers || []), ...(item.tickers || [])])];
     group.corroborations.push(item);
     if (!group.sources.some((source) => source.name === item.source && source.url === item.url)) {
-      group.sources.push({ id: item.sourceId, name: item.source, url: item.url, publishedAt: item.publishedAt });
+      group.sources.push({ id: item.sourceId, name: item.source, url: item.url, publishedAt: item.publishedAt, receivedAt: item.receivedAt });
       group.sourceCount = group.sources.length;
     }
   });
@@ -667,6 +681,17 @@ function PriceChart({ dailySeries = [], intradaySeries = [], intradayStatus = "i
   const nearestCandleIndex = (timestamp) => candles.reduce((bestIndex, candle, index) => (
     Math.abs(new Date(candle.begin).getTime() - timestamp) < Math.abs(new Date(candles[bestIndex].begin).getTime() - timestamp) ? index : bestIndex
   ), 0);
+  const xForTimestamp = (timestamp) => {
+    if (timestamp <= startTime) return 0;
+    if (timestamp >= endTime) return plotWidth;
+    const rightIndex = candles.findIndex((candle) => new Date(candle.begin).getTime() >= timestamp);
+    if (rightIndex <= 0) return 0;
+    const leftIndex = rightIndex - 1;
+    const leftTime = new Date(candles[leftIndex].begin).getTime();
+    const rightTime = new Date(candles[rightIndex].begin).getTime();
+    const ratio = rightTime === leftTime ? 0 : (timestamp - leftTime) / (rightTime - leftTime);
+    return xForIndex(leftIndex) + (xForIndex(rightIndex) - xForIndex(leftIndex)) * ratio;
+  };
   const groupedEvents = events
     .filter((event) => {
       const publishedAt = new Date(event.publishedAt).getTime();
@@ -693,7 +718,7 @@ function PriceChart({ dailySeries = [], intradaySeries = [], intradayStatus = "i
         strongest,
         impact,
         newsCount,
-        x: xForIndex(cluster.candleIndex),
+        x: xForTimestamp(new Date(strongest.publishedAt).getTime()),
         y: Math.max(plotTop + 15, yForPrice(candles[cluster.candleIndex].high) - 21),
         radius: 7 + impact * 0.055 + Math.min(sortedEvents.length - 1, 3),
         direction: strongest.signal?.direction || "neutral",
@@ -783,11 +808,11 @@ function PriceChart({ dailySeries = [], intradaySeries = [], intradayStatus = "i
               key={cluster.key}
               role="button"
               tabIndex="0"
-              aria-label={`Открыть ${cluster.newsCount} ${cluster.newsCount === 1 ? "новость" : "новости"}. Самая сильная: ${cluster.strongest.title}`}
+              aria-label={`Публикация ${formatPublicationTime(cluster.strongest.publishedAt)}. Открыть ${cluster.newsCount} ${cluster.newsCount === 1 ? "новость" : "новости"}. Самая сильная: ${cluster.strongest.title}`}
               onClick={(clickEvent) => { clickEvent.stopPropagation(); setSelectedClusterKey(cluster.key); setSelectedEventId(cluster.strongest.id); }}
               onKeyDown={(keyboardEvent) => { if (keyboardEvent.key === "Enter" || keyboardEvent.key === " ") { setSelectedClusterKey(cluster.key); setSelectedEventId(cluster.strongest.id); } }}
             >
-              <title>{cluster.newsCount > 1 ? `${cluster.newsCount} новости. Максимальный вес: ${cluster.strongest.signal ? formatScore(cluster.strongest.signal.score) : "фон"}` : cluster.strongest.title}</title>
+              <title>{`Опубликовано источником ${formatPublicationTime(cluster.strongest.publishedAt)}. ${cluster.newsCount > 1 ? `${cluster.newsCount} новости. Максимальный вес: ${cluster.strongest.signal ? formatScore(cluster.strongest.signal.score) : "фон"}` : cluster.strongest.title}`}</title>
               <line x1={cluster.x} y1={cluster.y + cluster.radius} x2={cluster.x} y2={Math.min(plotBottom, cluster.y + cluster.radius + 15)} />
               <circle cx={cluster.x} cy={cluster.y} r={cluster.radius} />
               {cluster.newsCount > 1 && <text x={cluster.x} y={cluster.y + 2.7} textAnchor="middle">{cluster.newsCount}</text>}
@@ -798,14 +823,14 @@ function PriceChart({ dailySeries = [], intradaySeries = [], intradayStatus = "i
       </div>
       <div className="chart-period-summary"><span>За период <strong className={periodChange >= 0 ? "market-positive" : "market-negative"}>{formatPct(periodChange)}</strong></span><span><strong>{eventClusters.reduce((sum, cluster) => sum + cluster.newsCount, 0)}</strong> новостей в <strong>{eventClusters.length}</strong> точках</span><span>Наведи на график или используй ← →</span></div>
       {selectedCluster && <div className="chart-event-cluster">
-        <header><span>{selectedCluster.newsCount > 1 ? `${selectedCluster.newsCount} новости на одной свече` : "Новость на свече"}</span><small>Сверху — самая весомая</small></header>
+        <header><span>{selectedCluster.newsCount > 1 ? `${selectedCluster.newsCount} новости рядом со свечой` : "Публикация новости"}</span><small>Точка на графике = время публикации источником</small></header>
         {selectedCluster.events.map((item, index) => <button type="button" className={`chart-event-detail chart-event-detail--${item.signal?.direction || "neutral"} ${item.id === selectedEvent?.id ? "is-active" : ""}`} key={item.id} onClick={() => { setSelectedEventId(item.id); onOpen?.(item); }}>
           <i />
-          <div><span>{index === 0 ? "Главная · формирует сигнал" : item.signal ? "Подтверждает" : "Фон"} · {item.source}{item.signal ? ` · ${formatScore(item.signal.score)} п.` : ""}</span><strong>{item.title}</strong></div>
+          <div><span>{index === 0 ? "Главная · формирует сигнал" : item.signal ? "Подтверждает" : "Фон"} · {item.source}{item.signal ? ` · ${formatScore(item.signal.score)} п.` : ""}</span><strong>{item.title}</strong><small className="chart-event-detail__time">Опубликовано {formatPublicationTime(item.publishedAt)}{item.deliveryLagMinutes === null ? "" : ` · EventEdge получил через ${item.deliveryLagMinutes} мин`}</small></div>
           <span className="chart-event-detail__open">Читать <ArrowUpRight size={12} /></span>
         </button>)}
       </div>}
-      <div className="chart-legend"><span><i className="legend-price" /> Цена</span><span><i className="legend-volume" /> Объём</span><span><i className="legend-event" /> Новости: зелёный — позитив, красный — негатив, серый — фон; размер — вес</span></div>
+      <div className="chart-legend"><span><i className="legend-price" /> Цена</span><span><i className="legend-volume" /> Объём</span><span><i className="legend-event" /> Точка = время публикации источником; цвет — эффект, размер — вес</span></div>
     </div>
   );
 }
@@ -1251,11 +1276,14 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState("all");
   const [sourceId, setSourceId] = useState("all");
-  const [signalOnly, setSignalOnly] = useState(false);
+  const [signalState, setSignalState] = useState("all");
+  const [direction, setDirection] = useState("all");
+  const [period, setPeriod] = useState("7d");
+  const [sortMode, setSortMode] = useState("newest");
   const [visibleCount, setVisibleCount] = useState(18);
 
   useEffect(() => setTicker(initialTicker || "all"), [initialTicker]);
-  useEffect(() => setVisibleCount(18), [ticker, query, scope, sourceId, signalOnly]);
+  useEffect(() => setVisibleCount(18), [ticker, query, scope, sourceId, signalState, direction, period, sortMode]);
 
   const sources = useMemo(() => {
     const result = new Map();
@@ -1263,17 +1291,36 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
     return [...result.entries()].sort((left, right) => left[1].localeCompare(right[1], "ru"));
   }, [allNews]);
 
+  const companies = useMemo(() => {
+    const tickers = new Set();
+    allNews.forEach((item) => (item.tickers || []).forEach((itemTicker) => tickers.add(itemTicker)));
+    signals.forEach((signal) => tickers.add(signal.ticker));
+    return [...tickers]
+      .map((itemTicker) => ({ ticker: itemTicker, company: companyMeta[itemTicker]?.[0] || itemTicker }))
+      .sort((left, right) => left.company.localeCompare(right.company, "ru"));
+  }, [allNews, signals]);
+
   const items = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("ru-RU");
+    const periodDays = { "1d": 1, "3d": 3, "7d": 7, "30d": 30 }[period];
+    const cutoff = periodDays ? Date.now() - periodDays * 86400000 : null;
     return allNews.filter((item) => {
       const matchesTicker = ticker === "all" || item.tickers?.includes(ticker);
       const matchesScope = scope === "all" || item.event?.scope === scope;
       const matchesSource = sourceId === "all" || item.sources?.some((source) => source.id === sourceId) || item.sourceId === sourceId;
-      const matchesSignal = !signalOnly || Boolean(item.signal);
+      const matchesSignal = signalState === "all" || (signalState === "signal" ? Boolean(item.signal) : !item.signal);
+      const matchesDirection = direction === "all" || item.signal?.direction === direction;
+      const matchesPeriod = cutoff === null || new Date(item.publishedAt).getTime() >= cutoff;
       const haystack = `${item.title} ${item.content} ${item.source} ${(item.tickers || []).join(" ")} ${(item.event?.sectors || []).join(" ")} ${item.signal?.company || item.companySignal?.company || ""}`.toLocaleLowerCase("ru-RU");
-      return matchesTicker && matchesScope && matchesSource && matchesSignal && (!normalized || haystack.includes(normalized));
+      return matchesTicker && matchesScope && matchesSource && matchesSignal && matchesDirection && matchesPeriod && (!normalized || haystack.includes(normalized));
+    }).sort((left, right) => {
+      if (sortMode === "impact") {
+        const impact = Math.abs(right.signal?.score || 0) - Math.abs(left.signal?.score || 0);
+        if (impact) return impact;
+      }
+      return new Date(right.publishedAt) - new Date(left.publishedAt);
     });
-  }, [allNews, ticker, query, scope, sourceId, signalOnly]);
+  }, [allNews, ticker, query, scope, sourceId, signalState, direction, period, sortMode]);
 
   const scopeCounts = useMemo(() => allNews.reduce((result, item) => {
     const key = item.event?.scope || "market";
@@ -1281,6 +1328,12 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
     return result;
   }, {}), [allNews]);
   const visibleItems = items.slice(0, visibleCount);
+  const activeFilterCount = [ticker, scope, sourceId, signalState, direction, period, sortMode]
+    .filter((value, index) => value !== ["all", "all", "all", "all", "all", "7d", "newest"][index]).length + (query ? 1 : 0);
+  const resetFilters = () => {
+    setTicker("all"); setScope("all"); setSourceId("all"); setSignalState("all");
+    setDirection("all"); setPeriod("7d"); setSortMode("newest"); setQuery("");
+  };
 
   return (
     <main className="screen section-screen news-screen">
@@ -1290,35 +1343,36 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
       </section>
 
       <section className="event-scope-overview">
-        {["market", "sector", "company"].map((key) => {
-          const meta = eventScopeMeta[key];
+        {[{ key: "all", label: "Все новости", Icon: Layers3 }, ...["market", "sector", "company"].map((key) => ({ key, ...eventScopeMeta[key] }))].map((meta) => {
+          const key = meta.key;
           const Icon = meta.Icon;
-          return <button type="button" key={key} className={scope === key ? "is-active" : ""} onClick={() => setScope(scope === key ? "all" : key)}><Icon size={15} /><span><strong>{meta.label}</strong><small>{scopeCounts[key] || 0} событий</small></span></button>;
+          const count = key === "all" ? allNews.length : scopeCounts[key] || 0;
+          return <button type="button" key={key} className={scope === key ? "is-active" : ""} onClick={() => setScope(key)}><Icon size={15} /><span><strong>{meta.label}</strong><small>{count} публикаций</small></span></button>;
         })}
       </section>
 
       <section className="news-controlbar">
-        <div className="scope-tabs" aria-label="Масштаб события">
-          <button type="button" className={scope === "all" ? "is-active" : ""} onClick={() => setScope("all")}>Все события</button>
-          {Object.entries(eventScopeMeta).map(([key, meta]) => <button type="button" key={key} className={scope === key ? "is-active" : ""} onClick={() => setScope(key)}>{meta.label}<span>{scopeCounts[key] || 0}</span></button>)}
-        </div>
-        <div className="event-selects">
-          <label><span>Компания</span><select value={ticker} onChange={(event) => setTicker(event.target.value)}><option value="all">Все бумаги</option>{signals.map((signal) => <option value={signal.ticker} key={signal.ticker}>{signal.ticker} · {signal.company}</option>)}</select><ChevronDown size={13} /></label>
+        <div className="event-selects event-selects--news">
+          <label><span>Компания</span><select value={ticker} onChange={(event) => setTicker(event.target.value)}><option value="all">Все бумаги</option>{companies.map((item) => <option value={item.ticker} key={item.ticker}>{item.ticker} · {item.company}</option>)}</select><ChevronDown size={13} /></label>
           <label><span>Источник</span><select value={sourceId} onChange={(event) => setSourceId(event.target.value)}><option value="all">Все источники</option>{sources.map(([id, name]) => <option value={id} key={id}>{name}</option>)}</select><ChevronDown size={13} /></label>
-          <button type="button" className={`signal-filter ${signalOnly ? "is-active" : ""}`} onClick={() => setSignalOnly((value) => !value)}><CircleGauge size={14} /> Только с сигналом</button>
+          <label><span>Период</span><select value={period} onChange={(event) => setPeriod(event.target.value)}><option value="1d">24 часа</option><option value="3d">3 дня</option><option value="7d">7 дней</option><option value="30d">30 дней</option><option value="all">Всё время</option></select><ChevronDown size={13} /></label>
+          <label><span>Сигнал</span><select value={signalState} onChange={(event) => setSignalState(event.target.value)}><option value="all">Все</option><option value="signal">Есть сигнал</option><option value="context">Только контекст</option></select><ChevronDown size={13} /></label>
+          <label><span>Направление</span><select value={direction} onChange={(event) => setDirection(event.target.value)}><option value="all">Любое</option><option value="up">Вверх</option><option value="neutral">Нейтрально</option><option value="down">Вниз</option></select><ChevronDown size={13} /></label>
+          <label><span>Сортировка</span><select value={sortMode} onChange={(event) => setSortMode(event.target.value)}><option value="newest">Сначала новые</option><option value="impact">Сначала весомые</option></select><ChevronDown size={13} /></label>
+          {activeFilterCount > 0 && <button type="button" className="signal-filter is-active" onClick={resetFilters}><X size={13} /> Сбросить · {activeFilterCount}</button>}
         </div>
       </section>
 
       <div className="pipeline-status"><span><i /> Быстрый сбор работает</span><strong>Приоритетные источники проверяются каждую минуту</strong><small>{newsMeta.last_ingested_at ? `Последняя новая запись ${formatRelative(newsMeta.last_ingested_at)} · цель доставки до ${Math.round((newsMeta.delivery_target_seconds || 120) / 60)} мин` : "Ожидаем первую публикацию"}</small></div>
       <section className="news-feed">
-        <div className="feed-heading"><span>{items.length} событий</span><small>{newsMeta.sources?.length || sources.length} источников · повторные публикации объединяются</small></div>
+        <div className="feed-heading"><span>{items.length} из {allNews.length} публикаций</span><small>{newsMeta.sources?.length || sources.length} источников · повторы одного события объединяются</small></div>
         {visibleItems.map((item) => {
           const scopeMeta = eventScopeMeta[item.event?.scope || "market"];
           const ScopeIcon = scopeMeta.Icon;
           return (
           <button type="button" className={`feed-item event-feed-item event-feed-item--${item.event?.scope || "market"}`} key={item.id} onClick={() => onReadNews(item)}>
             {item.signal || item.companySignal ? <CompanyMark signal={item.signal || item.companySignal} /> : <span className="company-mark"><Newspaper size={17} /></span>}
-            <div className="feed-copy"><div><span className={`event-scope event-scope--${item.event?.scope || "market"}`}><ScopeIcon size={10} /> {scopeMeta.label}</span><span>{item.source}</span>{item.sourceCount > 1 && <i className="source-count">{item.sourceCount} источника</i>}<time>{item.time}</time></div><h2>{item.title}</h2><p>{item.content}</p><footer>{item.event?.sectors?.map((sector) => <span className="event-sector" key={sector}>{sector}</span>)}{item.signal ? <><strong>{item.signal.ticker}</strong><Direction direction={item.signal.direction} /><span>{formatScore(item.signal.score)} п.</span></> : <span className="context-only">Контекст · без торгового сигнала</span>}</footer></div>
+            <div className="feed-copy"><div><span className={`event-scope event-scope--${item.event?.scope || "market"}`}><ScopeIcon size={10} /> {scopeMeta.label}</span><span>{item.source}</span>{item.sourceCount > 1 && <i className="source-count">{item.sourceCount} источника</i>}<time>Опубликовано {formatPublicationTime(item.publishedAt)}</time></div><h2>{item.title}</h2><p>{item.content}</p><footer>{item.event?.sectors?.map((sector) => <span className="event-sector" key={sector}>{sector}</span>)}{item.signal ? <><strong>{item.signal.ticker}</strong><Direction direction={item.signal.direction} /><span>{formatScore(item.signal.score)} п.</span></> : <span className="context-only">Контекст · без торгового сигнала</span>}</footer></div>
             <BookOpen size={17} />
           </button>
         );})}
@@ -1786,7 +1840,7 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,2026-08-08T08:00:00Z,60,0.42` : en
       "score": 42.7,
       "confidence": 0.76,
       "horizon": {"value": 3, "unit": "calendar_days"},
-      "model_version": "news-baseline-0.1.1"
+      "model_version": "news-baseline-0.2.0"
     }
   ],
   "meta": {
@@ -1862,7 +1916,7 @@ function NewsReader({ item, onClose }) {
       <button className="overlay-dismiss" type="button" aria-label="Закрыть новость" onClick={onClose} />
       <article className="reader-dialog" role="dialog" aria-modal="true" aria-label="Просмотр новости">
         <header><div>{companySignal ? <CompanyMark signal={companySignal} /> : <span className="company-mark"><Newspaper size={17} /></span>}<span><strong>{companySignal?.ticker || "Новость"}</strong><small>{companySignal ? `${companySignal.company} · ` : ""}{item.source}</small></span></div><button type="button" onClick={onClose} aria-label="Закрыть"><X size={18} /></button></header>
-        <div className="reader-meta"><span>{scopeMeta.label}{item.event?.sectors?.length ? ` · ${item.event.sectors.join(", ")}` : ""}</span><time><Clock3 size={12} /> {new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" }).format(new Date(item.publishedAt))}</time></div>
+        <div className="reader-meta"><span>{scopeMeta.label}{item.event?.sectors?.length ? ` · ${item.event.sectors.join(", ")}` : ""}</span><time><Clock3 size={12} /> Опубликовано источником {formatPublicationTime(item.publishedAt)}</time>{item.receivedAt && <time>EventEdge получил {formatPublicationTime(item.receivedAt)}{item.deliveryLagMinutes === null ? "" : ` · лаг ${item.deliveryLagMinutes} мин`}</time>}</div>
         <h1>{item.title}</h1>
         <div className="reader-body"><p>{item.content}</p>{signal ? <p>EventEdge связал публикацию с {signal.ticker} и алгоритмически рассчитал на горизонте {signal.horizon} оценку <strong>{formatScore(signal.score)} пункта</strong>.</p> : <p>Событие сохранено как <strong>{scopeMeta.label.toLocaleLowerCase("ru-RU")}</strong>-контекст. Торговый сигнал по конкретной бумаге из него пока не рассчитан.</p>}</div>
         {item.sources?.length > 1 && <section className="reader-sources"><span>Подтверждающие публикации</span>{item.sources.map((source) => <a href={source.url} target="_blank" rel="noreferrer" key={`${source.name}-${source.url}`}>{source.name}<ArrowUpRight size={11} /></a>)}</section>}
@@ -1956,7 +2010,9 @@ export default function App() {
           if (!assessmentResponse.ok) throw new Error("Live assessments unavailable");
           const assessmentPayload = await assessmentResponse.json();
           const nextSignals = assessmentPayload.data.map(assessmentFromApi);
-          setSignals(nextSignals.map((item) => ({ ...item, evidence: evidenceByTicker.get(item.ticker)?.slice(0, 8) || [] })));
+          const assessedTickers = new Set(nextSignals.map((item) => item.ticker));
+          const newsOnlySignals = allSignals.filter((item) => !assessedTickers.has(item.ticker));
+          setSignals([...nextSignals, ...newsOnlySignals].map((item) => ({ ...item, evidence: evidenceByTicker.get(item.ticker)?.slice(0, 8) || [] })));
           setAssessmentMeta(assessmentPayload.meta || { directed: 0, market_biases: 0, news_backed: 0 });
           setMarketUpdatedAt(new Date().toISOString());
           setMarketStatus(assessmentPayload.data.length ? "ready" : "error");

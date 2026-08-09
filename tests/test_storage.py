@@ -13,10 +13,12 @@ from eventedge.storage import (
     VALIDATED_QUERIES,
     MemoryNewsRepository,
     NewsDocument,
+    NewsRecord,
     YdbNewsRepository,
     deduplicate_signals,
     filter_signals,
     migrate_ydb_schema,
+    normalize_signal_freshness,
     signal_from_row,
     stable_id,
 )
@@ -43,7 +45,7 @@ def test_legacy_signal_copies_are_collapsed() -> None:
             evidence_refs="[]",
             expires_at=datetime(2026, 8, 11, 10),
             invalidation_conditions="[]",
-            model_version="news-baseline-0.1.1",
+            model_version="news-baseline-0.2.0",
             config_version=1,
             created_at=datetime(2026, 8, 8, 10),
         )
@@ -144,6 +146,96 @@ def test_retroactive_news_creates_historical_not_active_signal() -> None:
     asyncio.run(scenario())
 
 
+def test_delayed_discovery_does_not_revive_old_publication() -> None:
+    async def scenario() -> None:
+        repository = MemoryNewsRepository()
+        document = NewsDocument(
+            source_id="google_news",
+            external_id="delayed-1",
+            published_at=datetime(2026, 8, 1, 10, tzinfo=UTC),
+            received_at=datetime(2026, 8, 9, 10, tzinfo=UTC),
+            title="Сбербанк опубликовал отчётность",
+            url="https://example.com/delayed-1",
+            content="Чистая прибыль выросла на 15% и превысила ожидания.",
+            language="ru",
+            source_metadata={},
+            payload_hash="delayed-payload-hash",
+        )
+        await repository.ingest("delayed-key", document)
+
+        active = await repository.list_signals(
+            ticker="SBER",
+            directions=None,
+            status="active",
+            min_confidence=None,
+            limit=10,
+        )
+        expired = await repository.list_signals(
+            ticker="SBER",
+            directions=None,
+            status="expired",
+            min_confidence=None,
+            limit=10,
+        )
+
+        assert active == []
+        assert len(expired) == 1
+        assert expired[0].as_of == document.received_at
+        assert expired[0].expires_at == datetime(2026, 8, 4, 10, tzinfo=UTC)
+
+    asyncio.run(scenario())
+
+
+def test_legacy_signal_freshness_is_reanchored_to_publication() -> None:
+    signal = signal_from_row(
+        SimpleNamespace(
+            signal_id="sig_legacy",
+            news_id="news_legacy",
+            ticker="SBER",
+            as_of=datetime(2026, 8, 9, 10),
+            data_cutoff_at=datetime(2026, 8, 9, 10),
+            status="active",
+            direction="up",
+            action="consider_buy",
+            horizon_value=3,
+            horizon_unit="calendar_days",
+            score=25.0,
+            strength=0.25,
+            confidence=0.75,
+            summary="Legacy",
+            factor_contributions="[]",
+            evidence_refs="[]",
+            expires_at=datetime(2026, 8, 12, 10),
+            invalidation_conditions="[]",
+            model_version="news-baseline-0.1.1",
+            config_version=1,
+            created_at=datetime(2026, 8, 9, 10),
+        )
+    )
+    news = NewsRecord(
+        id="news_legacy",
+        source_id="google_news",
+        external_id="legacy",
+        published_at=datetime(2026, 8, 1, 10, tzinfo=UTC),
+        received_at=datetime(2026, 8, 9, 10, tzinfo=UTC),
+        title="Сбербанк опубликовал отчётность",
+        url="https://example.com/legacy",
+        content="Чистая прибыль выросла.",
+        language="ru",
+        source_metadata={},
+        created_at=datetime(2026, 8, 9, 10, tzinfo=UTC),
+    )
+
+    normalized = normalize_signal_freshness(
+        [signal],
+        {news.id: news},
+        now=datetime(2026, 8, 10, tzinfo=UTC),
+    )
+
+    assert normalized[0].status == "expired"
+    assert normalized[0].expires_at == datetime(2026, 8, 4, 10, tzinfo=UTC)
+
+
 def test_cbr_context_news_does_not_create_direct_company_signal() -> None:
     async def scenario() -> None:
         repository = MemoryNewsRepository()
@@ -203,7 +295,7 @@ def test_ydb_naive_timestamps_are_normalized_before_expiry_filter() -> None:
         evidence_refs="[]",
         expires_at=datetime(2026, 8, 4, 10),
         invalidation_conditions="[]",
-        model_version="news-baseline-0.1.1",
+        model_version="news-baseline-0.2.0",
         config_version=1,
         created_at=naive,
     )

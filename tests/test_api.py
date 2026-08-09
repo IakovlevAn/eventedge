@@ -1,7 +1,11 @@
+import asyncio
+from datetime import UTC, datetime
+
 import pytest
 from fastapi.testclient import TestClient
 
 from eventedge.main import app
+from eventedge.storage import MemoryNewsRepository, NewsDocument
 
 client = TestClient(app)
 
@@ -74,6 +78,52 @@ def test_source_registry_and_protected_telegram_addition(
     assert created.json()["data"]["source_id"] == "telegram_eventedge_test_one"
     assert created.json()["data"]["managed"] is True
     assert created.json()["data"]["role"] == "Тестовый источник событий российского рынка."
+
+
+def test_admin_reprocesses_one_explicit_stored_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EVENTEDGE_ADMIN_KEY", "test-admin-key")
+    original_repository = app.state.news_repository
+    app.state.news_repository = MemoryNewsRepository()
+    try:
+        with TestClient(app) as isolated_client:
+            repository = app.state.news_repository
+            document = NewsDocument(
+                source_id="interfax",
+                external_id="reprocess-sber-1",
+                published_at=datetime(2026, 8, 9, 10, tzinfo=UTC),
+                received_at=datetime(2026, 8, 9, 10, 1, tzinfo=UTC),
+                title="Сбербанк рекомендовал дивиденды за полугодие",
+                url="https://example.com/reprocess-sber-1",
+                content="Совет директоров рекомендовал выплатить 20 рублей на акцию.",
+                language="ru",
+                source_metadata={"signal_candidate": False, "tickers": []},
+                payload_hash="reprocess-original-payload",
+            )
+            asyncio.run(
+                repository.ingest(
+                    "reprocess-original-key",
+                    document,
+                    generate_signals=False,
+                )
+            )
+            stored = asyncio.run(repository.list_news(source_id="interfax", limit=10))[0]
+
+            response = isolated_client.post(
+                "/v1/admin/signals/reprocess",
+                json={"limit": 1, "news_ids": [stored.id]},
+                headers={"X-EventEdge-Admin-Key": "test-admin-key"},
+            )
+    finally:
+        app.state.news_repository = original_repository
+        app.state.evaluation_material_cache = None
+
+    assert response.status_code == 200
+    assert response.json()["meta"]["completed"] == 1
+    assert response.json()["meta"]["model_version"] == "news-baseline-0.2.0"
+    assert response.json()["data"][0]["news_id"] == stored.id
+    assert response.json()["data"][0]["result_ref"].startswith("sig_")
 
 
 def test_timer_event_dispatches_private_collector() -> None:
@@ -213,7 +263,7 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
     assert signal.json()["data"]["ticker"] == "SBER"
     assert signal.json()["data"]["direction"] == "up"
     assert signal.json()["data"]["action"] == "consider_buy"
-    assert signal.json()["data"]["model_version"] == "news-baseline-0.1.1"
+    assert signal.json()["data"]["model_version"] == "news-baseline-0.2.0"
     assert len(signal.json()["data"]["factor_contributions"]) == 5
 
     listed = client.get("/v1/signals", params={"ticker": "SBER", "direction": "up"})

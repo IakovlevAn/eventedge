@@ -4,6 +4,8 @@ import re
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 
+from eventedge.analysis import NewsAnalysisInput, RuleBasedNewsExtractor
+
 TICKER_SECTORS = {
     "SBER": "Финансы",
     "VTBR": "Финансы",
@@ -20,6 +22,54 @@ TICKER_SECTORS = {
     "ALRS": "Металлы",
     "YDEX": "Технологии",
     "MGNT": "Ритейл",
+    "AFLT": "Транспорт",
+    "AFKS": "Холдинги",
+    "AKRN": "Химия",
+    "ASTR": "Технологии",
+    "BANE": "Нефть и газ",
+    "BELU": "Потребительский сектор",
+    "BSPB": "Финансы",
+    "CBOM": "Финансы",
+    "DELI": "Транспорт",
+    "DOMRF": "Финансы",
+    "ENPG": "Металлы",
+    "FEES": "Электроэнергетика",
+    "FIXP": "Ритейл",
+    "FLOT": "Транспорт",
+    "HEAD": "Технологии",
+    "HYDR": "Электроэнергетика",
+    "IRAO": "Электроэнергетика",
+    "KMAZ": "Промышленность",
+    "LEAS": "Финансы",
+    "LSRG": "Недвижимость",
+    "MAGN": "Металлы",
+    "MDMG": "Здравоохранение",
+    "MTSS": "Телеком",
+    "MVID": "Ритейл",
+    "NLMK": "Металлы",
+    "NMTP": "Транспорт",
+    "OGKB": "Электроэнергетика",
+    "OZON": "Ритейл",
+    "PHOR": "Химия",
+    "PIKK": "Недвижимость",
+    "POSI": "Технологии",
+    "RENI": "Финансы",
+    "RTKM": "Телеком",
+    "RUAL": "Металлы",
+    "SELG": "Металлы",
+    "SGZH": "Лесная промышленность",
+    "SMLT": "Недвижимость",
+    "SNGS": "Нефть и газ",
+    "SOFL": "Технологии",
+    "TGKA": "Электроэнергетика",
+    "TRNFP": "Нефть и газ",
+    "UGLD": "Металлы",
+    "UNAC": "Промышленность",
+    "UPRO": "Электроэнергетика",
+    "VKCO": "Технологии",
+    "VSMO": "Металлы",
+    "WUSH": "Транспорт",
+    "X5": "Ритейл",
 }
 
 SECTOR_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -105,10 +155,23 @@ def classify_news_event(
         str(signal.get("ticker", "")).upper() for signal in related_signals if signal.get("ticker")
     ]
     metadata_tickers = source_metadata.get("tickers", [])
+    title_features = RuleBasedNewsExtractor().extract(
+        NewsAnalysisInput(
+            source_id="event_projection",
+            title=title,
+            content=title,
+            language="ru",
+        )
+    )
+    title_tickers = {instrument.ticker for instrument in title_features.instruments}
     tickers = list(
         dict.fromkeys(
             [
-                *(str(ticker).upper() for ticker in metadata_tickers if ticker),
+                *(
+                    str(ticker).upper()
+                    for ticker in metadata_tickers
+                    if ticker and str(ticker).upper() in title_tickers
+                ),
                 *signal_tickers,
             ]
         )
