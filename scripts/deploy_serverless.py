@@ -57,8 +57,8 @@ def build_payload(
         "concurrency": "1" if is_worker else "8",
         "provisionPolicy": {"minInstances": "0" if is_worker else "1"},
         "scalingPolicy": {
-            "zoneInstancesLimit": "2" if is_worker else "3",
-            "zoneRequestsLimit": "2" if is_worker else "24",
+            "zoneInstancesLimit": "2" if is_worker else "1",
+            "zoneRequestsLimit": "2" if is_worker else "8",
         },
         "runtime": {"http": {}},
     }
