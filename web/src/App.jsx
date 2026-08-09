@@ -1505,6 +1505,7 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
   const [showSourceForm, setShowSourceForm] = useState(false);
   const [channel, setChannel] = useState("");
   const [channelName, setChannelName] = useState("");
+  const [channelDescription, setChannelDescription] = useState("");
   const [adminKey, setAdminKey] = useState("");
   const [sourceFormStatus, setSourceFormStatus] = useState("idle");
   const [sourceFormMessage, setSourceFormMessage] = useState("");
@@ -1551,12 +1552,17 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
       const response = await fetch(apiUrl("/v1/sources/telegram"), {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-EventEdge-Admin-Key": adminKey },
-        body: JSON.stringify({ channel, display_name: channelName || undefined }),
+        body: JSON.stringify({
+          channel,
+          display_name: channelName || undefined,
+          description: channelDescription || undefined,
+        }),
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || payload.title || "Не удалось добавить канал.");
       setChannel("");
       setChannelName("");
+      setChannelDescription("");
       setAdminKey("");
       setSourceFormStatus("saved");
       setSourceFormMessage("Канал добавлен. Первый опрос — в течение минуты.");
@@ -1634,9 +1640,10 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
       <section className="source-method">
         <div className="section-heading"><span><Database size={15} /> Источники и их роль</span><button type="button" onClick={() => setShowSourceForm((value) => !value)}><Plus size={13} /> Добавить Telegram</button></div>
         {showSourceForm && <form className="telegram-source-form" onSubmit={addTelegramSource}>
-          <div><strong>Новый публичный Telegram-канал</strong><span>EventEdge читает публичную web-ленту без бота. Лимит — {sourceRegistry?.meta?.telegram_limit || 12} каналов, опрос раз в минуту.</span></div>
+          <div><strong>Новый публичный Telegram-канал</strong><span>EventEdge читает публичную web-ленту без бота. Лимит — {sourceRegistry?.meta?.telegram_limit || 18} каналов, опрос раз в минуту.</span></div>
           <label><span>Канал</span><input required pattern="@?[A-Za-z0-9_]{3,48}" value={channel} onChange={(event) => setChannel(event.target.value)} placeholder="@channel_name" /></label>
           <label><span>Название</span><input value={channelName} onChange={(event) => setChannelName(event.target.value)} placeholder="Как показывать в EventEdge" /></label>
+          <label className="source-description-field"><span>Описание</span><input minLength="8" maxLength="280" value={channelDescription} onChange={(event) => setChannelDescription(event.target.value)} placeholder="Что публикует источник и зачем он нужен" /></label>
           <label><span>Админ-ключ</span><input required type="password" autoComplete="off" value={adminKey} onChange={(event) => setAdminKey(event.target.value)} placeholder="Не сохраняется в браузере" /></label>
           <button type="submit" disabled={sourceFormStatus === "saving"}>{sourceFormStatus === "saving" ? "Добавляем…" : "Добавить канал"}</button>
           {sourceFormMessage && <p className={`source-form-message is-${sourceFormStatus}`}>{sourceFormMessage}</p>}
@@ -1743,7 +1750,7 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,2026-08-08T08:00:00Z,60,0.42` : en
   "data": [
     {"source_id":"telegram_bcs_express","name":"БКС Экспресс","kind":"Telegram","count":12,"freshness":"цель ≤ 2 мин"}
   ],
-  "meta": {"telegram_active":6,"telegram_limit":12,"poll_interval_seconds":60}
+  "meta": {"telegram_active":6,"telegram_limit":18,"poll_interval_seconds":60}
 }` : endpoint.id === "source_create" ? `{
   "data": {"source_id":"telegram_example","channel":"example","enabled":true,"managed":true}
 }` : endpoint.id === "events" ? `{
@@ -1815,7 +1822,7 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,2026-08-08T08:00:00Z,60,0.42` : en
     ? `curl -s -X POST '${baseUrl}${endpoint.path}' \\
   -H 'Content-Type: application/json' \\
   -H 'X-EventEdge-Admin-Key: <ADMIN_KEY>' \\
-  -d '{"channel":"example_channel","display_name":"Example"}'`
+  -d '{"channel":"example_channel","display_name":"Example","description":"Оперативные новости российского рынка"}'`
     : `curl -s '${baseUrl}${endpoint.path}' \\
   -H 'Accept: application/json'`;
 

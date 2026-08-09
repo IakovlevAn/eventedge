@@ -185,6 +185,10 @@ paths:
                   type: string
                   minLength: 2
                   maxLength: 80
+                description:
+                  type: string
+                  minLength: 8
+                  maxLength: 280
       responses:
         '201':
           description: Telegram source persisted in YDB.

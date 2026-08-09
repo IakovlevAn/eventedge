@@ -163,6 +163,7 @@ class TelegramSourceRecord:
     source_id: str
     channel: str
     display_name: str
+    description: str
     enabled: bool
     created_at: datetime
 
@@ -177,6 +178,8 @@ class TelegramSourceRecord:
             "managed": True,
             "quality": 65,
             "freshness": "цель ≤ 2 мин",
+            "description": self.description,
+            "role": self.description,
             "created_at": to_rfc3339(self.created_at),
         }
 
@@ -770,6 +773,13 @@ class YdbNewsRepository:
                 ),
             },
         )
+        await self._require_pool().execute_with_retries(
+            UPSERT_TELEGRAM_SOURCE_METADATA_QUERY,
+            {
+                "$source_id": source.source_id,
+                "$description": source.description,
+            },
+        )
         return source
 
     def _require_pool(self) -> ydb.aio.QuerySessionPool:
@@ -895,6 +905,7 @@ def telegram_source_from_row(row: object) -> TelegramSourceRecord:
         source_id=row.source_id,
         channel=row.channel,
         display_name=row.display_name,
+        description=getattr(row, "description", None) or "Пользовательский Telegram-канал",
         enabled=row.enabled,
         created_at=ensure_utc(row.created_at),
     )
@@ -987,6 +998,13 @@ SCHEMA_STATEMENTS = (
         PRIMARY KEY (`source_id`)
     );
     """,
+    """
+    CREATE TABLE IF NOT EXISTS `telegram_source_metadata` (
+        `source_id` Utf8 NOT NULL,
+        `description` Utf8 NOT NULL,
+        PRIMARY KEY (`source_id`)
+    );
+    """,
 )
 
 SCHEMA_TABLE_NAMES = (
@@ -996,6 +1014,7 @@ SCHEMA_TABLE_NAMES = (
     "jobs",
     "ingestion_requests",
     "telegram_sources",
+    "telegram_source_metadata",
 )
 
 SCHEMA_RATE_LIMIT_MESSAGE = "Request exceeded a limit on the number of schema operations"
@@ -1263,9 +1282,17 @@ WHERE signal_id = $signal_id;
 """
 
 SELECT_TELEGRAM_SOURCES_QUERY = """
-SELECT source_id, channel, display_name, enabled, created_at
-FROM `telegram_sources`
-ORDER BY created_at ASC, source_id ASC;
+SELECT
+    sources.source_id AS source_id,
+    sources.channel AS channel,
+    sources.display_name AS display_name,
+    metadata.description AS description,
+    sources.enabled AS enabled,
+    sources.created_at AS created_at
+FROM `telegram_sources` AS sources
+LEFT JOIN `telegram_source_metadata` AS metadata
+ON sources.source_id = metadata.source_id
+ORDER BY sources.created_at ASC, sources.source_id ASC;
 """
 
 UPSERT_TELEGRAM_SOURCE_QUERY = """
@@ -1282,6 +1309,17 @@ UPSERT INTO `telegram_sources` (
 );
 """
 
+UPSERT_TELEGRAM_SOURCE_METADATA_QUERY = """
+DECLARE $source_id AS Utf8;
+DECLARE $description AS Utf8;
+
+UPSERT INTO `telegram_source_metadata` (
+    source_id, description
+) VALUES (
+    $source_id, $description
+);
+"""
+
 VALIDATED_QUERIES = (
     SELECT_REQUEST_QUERY,
     INSERT_REQUEST_QUERY,
@@ -1293,4 +1331,5 @@ VALIDATED_QUERIES = (
     SELECT_SIGNAL_QUERY,
     SELECT_TELEGRAM_SOURCES_QUERY,
     UPSERT_TELEGRAM_SOURCE_QUERY,
+    UPSERT_TELEGRAM_SOURCE_METADATA_QUERY,
 )

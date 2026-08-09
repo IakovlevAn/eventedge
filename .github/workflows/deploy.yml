@@ -193,7 +193,7 @@ jobs:
             if curl --fail --silent --show-error \
               --max-time 30 \
               "${EVENTEDGE_API_URL}/v1/sources" \
-              | jq -e '.meta.telegram_limit == 12 and (.data | length) > 0' >/dev/null \
+              | jq -e '.meta.telegram_limit == 18 and (.data | length) > 0' >/dev/null \
               && curl --fail --silent --show-error \
                 --max-time 30 \
                 "${EVENTEDGE_API_URL}/v1/events?limit=1" \

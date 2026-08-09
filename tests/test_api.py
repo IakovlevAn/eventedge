@@ -43,7 +43,7 @@ def test_source_registry_and_protected_telegram_addition(
     registry = client.get("/v1/sources")
 
     assert registry.status_code == 200
-    assert registry.json()["meta"]["telegram_limit"] == 12
+    assert registry.json()["meta"]["telegram_limit"] == 18
     assert registry.json()["meta"]["telegram_active"] >= 6
     assert any(source["source_id"] == "telegram_bcs_express" for source in registry.json()["data"])
 
@@ -66,12 +66,14 @@ def test_source_registry_and_protected_telegram_addition(
         json={
             "channel": "eventedge_test_one",
             "display_name": "EventEdge test",
+            "description": "Тестовый источник событий российского рынка.",
         },
         headers={"X-EventEdge-Admin-Key": "test-admin-key"},
     )
     assert created.status_code == 201
     assert created.json()["data"]["source_id"] == "telegram_eventedge_test_one"
     assert created.json()["data"]["managed"] is True
+    assert created.json()["data"]["role"] == "Тестовый источник событий российского рынка."
 
 
 def test_timer_event_dispatches_private_collector() -> None:
