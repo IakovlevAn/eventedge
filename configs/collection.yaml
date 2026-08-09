@@ -1,0 +1,34 @@
+# Collection metadata and Yandex Cloud timer settings.
+lanes:
+  fast:
+    interval_seconds: 60
+    source_ids:
+      - interfax
+      - tass
+      - rbc
+      - moex_news
+      - telegram_ak47pfl
+      - telegram_markettwits
+    trigger_name: eventedge-fast-news
+    description: Priority market news every minute
+    cron_expression: "* * ? * * *"
+    payload: fast_news
+
+  discovery:
+    interval_seconds: 300
+    source_ids:
+      - google_news
+      - market_background
+    trigger_name: eventedge-discovery-news
+    description: Broad market news discovery every five minutes
+    cron_expression: "0/5 * ? * * *"
+    payload: discovery_news
+
+  slow:
+    interval_seconds: 900
+    source_ids:
+      - cbr_press
+    trigger_name: eventedge-slow-news
+    description: Macro context refresh every fifteen minutes
+    cron_expression: "0/15 * ? * * *"
+    payload: slow_news

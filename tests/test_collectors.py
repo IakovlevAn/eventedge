@@ -9,7 +9,9 @@ import eventedge.collectors as collectors_module
 from eventedge.collectors import (
     RssFeedConfig,
     RssItem,
+    TelegramChannelConfig,
     collect_rss_feed,
+    collect_telegram_channel,
     google_news_search_url,
     is_cbr_market_news,
     is_company_news_candidate,
@@ -19,6 +21,7 @@ from eventedge.collectors import (
     is_moex_equity_title,
     is_watched_company_news,
     parse_rss,
+    parse_telegram_channel,
 )
 from eventedge.storage import MemoryNewsRepository
 
@@ -47,6 +50,31 @@ RSS_FIXTURE = """<?xml version="1.0" encoding="utf-8"?>
 </rss>
 """.encode()
 
+TELEGRAM_FIXTURE = """
+<section class="tgme_channel_history js-message_history">
+  <div class="tgme_widget_message_wrap">
+    <div class="tgme_widget_message js-widget_message" data-post="AK47pfl/21664">
+      <div class="tgme_widget_message_text js-message_text">
+        Старый пост<br/>Без упоминания компании
+      </div>
+      <a class="tgme_widget_message_date" href="https://t.me/AK47pfl/21664">
+        <time datetime="2026-08-08T07:00:00+00:00">07:00</time>
+      </a>
+    </div>
+  </div>
+  <div class="tgme_widget_message_wrap">
+    <div class="tgme_widget_message js-widget_message" data-post="AK47pfl/21665">
+      <div class="tgme_widget_message_text js-message_text">
+        Сбербанк увеличил прибыль<br/><b>Выручка выросла на 12%.</b>
+      </div>
+      <a class="tgme_widget_message_date" href="https://t.me/AK47pfl/21665">
+        <time datetime="2026-08-08T08:13:59+00:00">08:13</time>
+      </a>
+    </div>
+  </div>
+</section>
+""".encode()
+
 
 def test_rss_parser_extracts_clean_text_and_metadata() -> None:
     items = parse_rss(RSS_FIXTURE, max_items=10)
@@ -56,6 +84,36 @@ def test_rss_parser_extracts_clean_text_and_metadata() -> None:
     assert items[0].content == "Ставка сохранена на уровне 12%."
     assert items[0].published_at.isoformat() == "2026-08-07T13:30:00+03:00"
     assert items[0].categories == ("Денежно-кредитная политика",)
+
+
+def test_telegram_parser_extracts_posts_in_reverse_chronological_order() -> None:
+    items = parse_telegram_channel(TELEGRAM_FIXTURE, max_items=10)
+
+    assert len(items) == 2
+    assert items[0].external_id == "AK47pfl/21665"
+    assert items[0].title == "Сбербанк увеличил прибыль"
+    assert items[0].content == "Сбербанк увеличил прибыль\nВыручка выросла на 12%."
+    assert items[0].url == "https://t.me/AK47pfl/21665"
+    assert items[0].published_at.isoformat() == "2026-08-08T08:13:59+00:00"
+
+
+def test_telegram_collection_is_idempotent_and_marks_source_metadata() -> None:
+    repository = MemoryNewsRepository()
+    config = TelegramChannelConfig(source_id="telegram_ak47pfl", channel="AK47pfl")
+
+    async def scenario() -> tuple[dict[str, int], dict[str, int], dict[str, object]]:
+        fetcher = lambda url, timeout: TELEGRAM_FIXTURE  # noqa: E731
+        first = await collect_telegram_channel(repository, config, fetcher=fetcher)
+        second = await collect_telegram_channel(repository, config, fetcher=fetcher)
+        news = await repository.list_news(source_id="telegram_ak47pfl", limit=10)
+        return first, second, dict(news[0].source_metadata)
+
+    first, second, metadata = asyncio.run(scenario())
+
+    assert first["accepted"] == 2
+    assert second["replayed"] == 2
+    assert metadata["collector"] == "telegram_public"
+    assert metadata["channel_url"] == "https://t.me/s/AK47pfl"
 
 
 def test_rss_collection_is_idempotent() -> None:
@@ -292,13 +350,18 @@ def test_composite_collector_isolates_a_failed_feed(
 
     monkeypatch.setattr(collectors_module, "collect_rss_feed", flaky_collect)
 
+    async def telegram_collect(*args: object, **kwargs: object) -> dict[str, int]:
+        return {"fetched": 1, "matched": 1, "accepted": 1, "replayed": 0}
+
+    monkeypatch.setattr(collectors_module, "collect_telegram_channel", telegram_collect)
+
     result = asyncio.run(collectors_module.collect_market_news(repository))
 
     assert result == {
-        "fetched": 6,
-        "matched": 6,
+        "fetched": 8,
+        "matched": 8,
         "signal_candidates": 0,
-        "accepted": 6,
+        "accepted": 8,
         "replayed": 0,
         "failed": 7,
     }
@@ -309,6 +372,7 @@ def test_fast_collector_uses_only_direct_feeds_and_isolates_failures(
 ) -> None:
     repository = MemoryNewsRepository()
     called: list[tuple[str, int | None]] = []
+    telegram_called: list[tuple[str, int | None]] = []
 
     async def fake_collect(
         repository: object,
@@ -322,6 +386,20 @@ def test_fast_collector_uses_only_direct_feeds_and_isolates_failures(
 
     monkeypatch.setattr(collectors_module, "collect_rss_feed", fake_collect)
 
+    async def fake_telegram_collect(
+        repository: object,
+        config: TelegramChannelConfig,
+        **kwargs: object,
+    ) -> dict[str, int]:
+        telegram_called.append((config.source_id, kwargs.get("stop_after_replays")))
+        return {"fetched": 1, "matched": 1, "accepted": 1, "replayed": 0}
+
+    monkeypatch.setattr(
+        collectors_module,
+        "collect_telegram_channel",
+        fake_telegram_collect,
+    )
+
     result = asyncio.run(collectors_module.collect_fast_news(repository))
 
     assert called == [
@@ -330,11 +408,15 @@ def test_fast_collector_uses_only_direct_feeds_and_isolates_failures(
         ("rbc", 5),
         ("moex_news", 5),
     ]
+    assert telegram_called == [
+        ("telegram_ak47pfl", 5),
+        ("telegram_markettwits", 5),
+    ]
     assert result == {
-        "fetched": 3,
-        "matched": 3,
+        "fetched": 5,
+        "matched": 5,
         "signal_candidates": 0,
-        "accepted": 3,
+        "accepted": 5,
         "replayed": 0,
         "failed": 1,
     }

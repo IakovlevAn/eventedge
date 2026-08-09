@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.116,<1",
+    "pyyaml>=6.0.2,<7",
     "requests>=2.34,<3",
     "uvicorn[standard]>=0.35,<1",
     "ydb>=3.30,<4",
@@ -20,7 +21,6 @@ dev = [
     "httpx>=0.28,<1",
     "openapi-spec-validator>=0.7.2,<1",
     "pytest>=8.4,<10",
-    "pyyaml>=6.0.2,<7",
     "ruff>=0.12,<1",
 ]
 

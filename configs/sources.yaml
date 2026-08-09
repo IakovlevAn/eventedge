@@ -1,0 +1,30 @@
+# Values in this file override the dataclass defaults in
+# src/eventedge/configs/sources.py. Omitted fields keep their defaults.
+cbr_press:
+  max_items: 10
+  timeout_seconds: 15
+
+moex_news:
+  max_items: 1000
+  timeout_seconds: 20
+
+market_news_feeds:
+  interfax:
+    max_items: 50
+    timeout_seconds: 15
+  tass:
+    max_items: 100
+    timeout_seconds: 15
+  rbc:
+    max_items: 50
+    timeout_seconds: 15
+
+telegram_channels:
+  telegram_ak47pfl:
+    channel: AK47pfl
+    max_items: 20
+    timeout_seconds: 10
+  telegram_markettwits:
+    channel: markettwits
+    max_items: 20
+    timeout_seconds: 10

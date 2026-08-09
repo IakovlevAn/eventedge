@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
@@ -13,6 +12,14 @@ from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 
 from eventedge.analysis import EventType, NewsAnalysisInput, RuleBasedNewsExtractor
+from eventedge.configs.sources import (
+    RssFeedConfig,
+    TelegramChannelConfig,
+    load_source_config,
+)
+from eventedge.configs.sources import (
+    google_news_search_url as configured_google_news_search_url,
+)
 from eventedge.storage import (
     NewsDocument,
     NewsRepository,
@@ -24,15 +31,24 @@ MAX_FEED_BYTES = 8_000_000
 MAX_CONTENT_LENGTH = 200_000
 RSS_CONTENT_TAG = "{http://purl.org/rss/1.0/modules/content/}encoded"
 LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class RssFeedConfig:
-    source_id: str
-    url: str
-    language: str = "ru"
-    max_items: int = 20
-    timeout_seconds: float = 15
+HTML_VOID_TAGS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -43,7 +59,6 @@ class RssItem:
     url: str
     content: str
     categories: tuple[str, ...]
-
 
 class _HtmlTextExtractor(HTMLParser):
     def __init__(self) -> None:
@@ -71,6 +86,11 @@ def plain_text(html: str) -> str:
     text = re.sub(r"\s+", " ", " ".join(parser.parts)).strip()
     text = re.sub(r"\s+([,.;:!?%)\]»])", r"\1", text)
     return re.sub(r"([(\[«])\s+", r"\1", text)
+
+
+def google_news_search_url(query: str) -> str:
+    """Keep the existing collector helper API while its configuration moves out."""
+    return configured_google_news_search_url(query)
 
 
 def parse_rss(feed: bytes, *, max_items: int) -> list[RssItem]:
@@ -137,17 +157,136 @@ def fetch_rss(url: str, timeout_seconds: float) -> bytes:
     return feed
 
 
-async def collect_rss_feed(
+class _TelegramChannelParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.items: list[RssItem] = []
+        self._message_depth = 0
+        self._text_depth = 0
+        self._external_id: str | None = None
+        self._published_at: datetime | None = None
+        self._url: str | None = None
+        self._text_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        classes = set((attributes.get("class") or "").split())
+        is_void = tag in HTML_VOID_TAGS
+
+        if not self._message_depth:
+            external_id = attributes.get("data-post")
+            if tag == "div" and "tgme_widget_message" in classes and external_id:
+                self._message_depth = 1
+                self._external_id = external_id
+                self._published_at = None
+                self._url = f"https://t.me/{external_id}"
+                self._text_parts = []
+            return
+
+        if not is_void:
+            self._message_depth += 1
+
+        if self._text_depth:
+            if not is_void:
+                self._text_depth += 1
+            if tag == "br":
+                self._text_parts.append("\n")
+        elif tag == "div" and "tgme_widget_message_text" in classes:
+            self._text_depth = 1
+
+        if tag == "time" and (published := attributes.get("datetime")):
+            try:
+                parsed = datetime.fromisoformat(published.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+            else:
+                if parsed.tzinfo is not None:
+                    self._published_at = parsed
+
+        if tag == "a" and "tgme_widget_message_date" in classes:
+            self._url = attributes.get("href") or self._url
+
+    def handle_startendtag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        if self._text_depth and tag == "br":
+            self._text_parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self._message_depth:
+            return
+        if self._text_depth:
+            self._text_depth -= 1
+        self._message_depth -= 1
+        if not self._message_depth:
+            self._finish_message()
+
+    def handle_data(self, data: str) -> None:
+        if self._text_depth:
+            self._text_parts.append(data)
+
+    def _finish_message(self) -> None:
+        content = "\n".join(
+            line.strip()
+            for line in "".join(self._text_parts).splitlines()
+            if line.strip()
+        )
+        if self._external_id and self._published_at and self._url and content:
+            title = content.splitlines()[0][:500]
+            self.items.append(
+                RssItem(
+                    external_id=self._external_id,
+                    published_at=self._published_at,
+                    title=title,
+                    url=self._url,
+                    content=content[:MAX_CONTENT_LENGTH],
+                    categories=(),
+                )
+            )
+        self._external_id = None
+        self._published_at = None
+        self._url = None
+        self._text_parts = []
+
+
+def parse_telegram_channel(page: bytes, *, max_items: int) -> list[RssItem]:
+    if len(page) > MAX_FEED_BYTES:
+        raise ValueError("Telegram channel page exceeds the configured size limit")
+    parser = _TelegramChannelParser()
+    parser.feed(page.decode("utf-8", errors="replace"))
+    parser.close()
+    return sorted(parser.items, key=lambda item: item.published_at, reverse=True)[:max_items]
+
+
+def fetch_telegram_channel(url: str, timeout_seconds: float) -> bytes:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "text/html,application/xhtml+xml",
+            "User-Agent": "EventEdge/0.1 (+https://github.com/IakovlevAn/eventedge)",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        page = response.read(MAX_FEED_BYTES + 1)
+    if len(page) > MAX_FEED_BYTES:
+        raise ValueError("Telegram channel page exceeds the configured size limit")
+    return page
+
+
+async def collect_news_items(
     repository: NewsRepository,
-    config: RssFeedConfig,
     *,
-    fetcher: Callable[[str, float], bytes] = fetch_rss,
+    source_id: str,
+    source_url: str,
+    language: str,
+    collector: str,
+    items: list[RssItem],
     item_filter: Callable[[RssItem], bool] | None = None,
     signal_filter: Callable[[RssItem], bool] | None = None,
     stop_after_replays: int | None = None,
 ) -> dict[str, int]:
-    feed = await asyncio.to_thread(fetcher, config.url, config.timeout_seconds)
-    items = parse_rss(feed, max_items=config.max_items)
     accepted = 0
     replayed = 0
     matched = 0
@@ -163,15 +302,14 @@ async def collect_rss_feed(
             signal_candidates += 1
         features = RuleBasedNewsExtractor().extract(
             NewsAnalysisInput(
-                source_id=config.source_id,
+                source_id=source_id,
                 title=item.title,
                 content=item.content,
-                language=config.language,
+                language=language,
             )
         )
-        source_metadata = {
-            "collector": "rss",
-            "feed_url": config.url,
+        source_metadata: dict[str, object] = {
+            "collector": collector,
             "categories": list(item.categories),
             "signal_candidate": generate_signals,
             "tickers": [
@@ -180,34 +318,38 @@ async def collect_rss_feed(
                 if instrument.relevance >= 0.6 and instrument.ticker != "MOEX"
             ],
         }
+        # Keep the existing RSS payload shape stable so a deployment does not
+        # re-ingest all known feed items merely because Telegram was added.
+        if collector == "rss":
+            source_metadata["feed_url"] = source_url
+        else:
+            source_metadata["channel_url"] = source_url
         hash_payload = {
-            "source_id": config.source_id,
+            "source_id": source_id,
             "external_id": item.external_id,
             "published_at": item.published_at.isoformat(),
             "title": item.title,
             "url": item.url,
             "content": item.content,
-            "language": config.language,
+            "language": language,
             "source_metadata": source_metadata,
         }
         payload_hash = canonical_payload_hash(hash_payload)
         document = NewsDocument(
-            source_id=config.source_id,
+            source_id=source_id,
             external_id=item.external_id,
             published_at=item.published_at,
-            # Publication time belongs to the source. Receipt time is when the
-            # item actually entered EventEdge and is needed for delivery SLOs.
             received_at=datetime.now(UTC),
             title=item.title,
             url=item.url,
             content=item.content,
-            language=config.language,
+            language=language,
             source_metadata=source_metadata,
             payload_hash=payload_hash,
         )
         idempotency_key = stable_id(
             "ing_",
-            f"{config.source_id}\x00{item.external_id}\x00{payload_hash}",
+            f"{source_id}\x00{item.external_id}\x00{payload_hash}",
         )
         result = await repository.ingest(
             idempotency_key,
@@ -235,11 +377,56 @@ async def collect_rss_feed(
     }
 
 
-CBR_PRESS_FEED = RssFeedConfig(
-    source_id="cbr_press",
-    url="https://www.cbr.ru/rss/RssPress",
-    max_items=10,
-)
+async def collect_rss_feed(
+    repository: NewsRepository,
+    config: RssFeedConfig,
+    *,
+    fetcher: Callable[[str, float], bytes] = fetch_rss,
+    item_filter: Callable[[RssItem], bool] | None = None,
+    signal_filter: Callable[[RssItem], bool] | None = None,
+    stop_after_replays: int | None = None,
+) -> dict[str, int]:
+    feed = await asyncio.to_thread(fetcher, config.url, config.timeout_seconds)
+    items = parse_rss(feed, max_items=config.max_items)
+    return await collect_news_items(
+        repository,
+        source_id=config.source_id,
+        source_url=config.url,
+        language=config.language,
+        collector="rss",
+        items=items,
+        item_filter=item_filter,
+        signal_filter=signal_filter,
+        stop_after_replays=stop_after_replays,
+    )
+
+
+async def collect_telegram_channel(
+    repository: NewsRepository,
+    config: TelegramChannelConfig,
+    *,
+    fetcher: Callable[[str, float], bytes] = fetch_telegram_channel,
+    item_filter: Callable[[RssItem], bool] | None = None,
+    signal_filter: Callable[[RssItem], bool] | None = None,
+    stop_after_replays: int | None = None,
+) -> dict[str, int]:
+    page = await asyncio.to_thread(fetcher, config.url, config.timeout_seconds)
+    items = parse_telegram_channel(page, max_items=config.max_items)
+    return await collect_news_items(
+        repository,
+        source_id=config.source_id,
+        source_url=config.url,
+        language=config.language,
+        collector="telegram_public",
+        items=items,
+        item_filter=item_filter,
+        signal_filter=signal_filter,
+        stop_after_replays=stop_after_replays,
+    )
+
+
+SOURCE_CONFIG = load_source_config()
+CBR_PRESS_FEED = SOURCE_CONFIG.cbr_press
 
 CBR_MARKET_MARKERS = (
     "ключевая ставка",
@@ -271,12 +458,7 @@ async def collect_cbr_press(repository: NewsRepository) -> dict[str, int]:
     )
 
 
-MOEX_NEWS_FEED = RssFeedConfig(
-    source_id="moex_news",
-    url="https://www.moex.com/export/news.aspx?cat=100",
-    max_items=1000,
-    timeout_seconds=20,
-)
+MOEX_NEWS_FEED = SOURCE_CONFIG.moex_news
 
 MOEX_NON_EQUITY_TITLE_MARKERS = (
     "облигац",
@@ -490,87 +672,10 @@ def is_google_market_background_candidate(item: RssItem) -> bool:
     )
 
 
-def google_news_search_url(query: str) -> str:
-    return "https://news.google.com/rss/search?" + urllib.parse.urlencode(
-        {"q": f"({query}) when:30d", "hl": "ru", "gl": "RU", "ceid": "RU:ru"}
-    )
-
-
-MARKET_NEWS_FEEDS = (
-    RssFeedConfig(
-        source_id="google_news",
-        url=google_news_search_url("Сбербанк OR ВТБ"),
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="google_news",
-        url=google_news_search_url("Газпром OR Новатэк"),
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="google_news",
-        url=google_news_search_url("Лукойл OR Роснефть"),
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="google_news",
-        url=google_news_search_url("Татнефть OR Газпром нефть"),
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="google_news",
-        url=google_news_search_url("Яндекс OR Магнит"),
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="google_news",
-        url=google_news_search_url("Норникель OR Полюс"),
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="google_news",
-        url=google_news_search_url("Северсталь OR АЛРОСА OR Московская биржа"),
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="market_background",
-        url=google_news_search_url(
-            '"российский рынок" OR "ключевая ставка" OR рубль OR Brent OR санкции'
-        ),
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="interfax",
-        url="https://www.interfax.ru/rss",
-        max_items=50,
-    ),
-    RssFeedConfig(
-        source_id="tass",
-        url="https://tass.ru/rss/v2.xml",
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="rbc",
-        url="https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
-        max_items=50,
-    ),
-)
-
-FAST_NEWS_FEEDS = (
-    *(config for config in MARKET_NEWS_FEEDS if config.source_id in {"interfax", "tass", "rbc"}),
-    RssFeedConfig(
-        source_id=MOEX_NEWS_FEED.source_id,
-        url=MOEX_NEWS_FEED.url,
-        max_items=100,
-        timeout_seconds=10,
-    ),
-)
-
-DISCOVERY_NEWS_FEEDS = tuple(
-    config
-    for config in MARKET_NEWS_FEEDS
-    if config.source_id in {"google_news", "market_background"}
-)
+MARKET_NEWS_FEEDS = SOURCE_CONFIG.market_news_feeds
+FAST_NEWS_FEEDS = SOURCE_CONFIG.fast_news_feeds
+TELEGRAM_CHANNELS = SOURCE_CONFIG.telegram_channels
+DISCOVERY_NEWS_FEEDS = SOURCE_CONFIG.discovery_news_feeds
 
 
 def collection_filters(
@@ -637,11 +742,25 @@ async def collect_feed_group(
 
 async def collect_fast_news(repository: NewsRepository) -> dict[str, int]:
     """Refresh direct priority feeds every minute without discovery latency."""
-    return await collect_feed_group(
-        repository,
-        FAST_NEWS_FEEDS,
-        stop_after_replays=5,
+    results = await asyncio.gather(
+        collect_feed_group(
+            repository,
+            FAST_NEWS_FEEDS,
+            stop_after_replays=5,
+        ),
+        *(
+            collect_telegram_channel(
+                repository,
+                config,
+                item_filter=is_company_news_candidate,
+                signal_filter=is_market_signal_candidate,
+                stop_after_replays=5,
+            )
+            for config in TELEGRAM_CHANNELS
+        ),
+        return_exceptions=True,
     )
+    return aggregate_collection_results(results)
 
 
 async def collect_discovery_news(repository: NewsRepository) -> dict[str, int]:
@@ -687,6 +806,15 @@ async def collect_market_news(repository: NewsRepository) -> dict[str, int]:
                 signal_filter=collection_filters(config)[1],
             )
             for config in MARKET_NEWS_FEEDS
+        ),
+        *(
+            collect_telegram_channel(
+                repository,
+                config,
+                item_filter=is_company_news_candidate,
+                signal_filter=is_market_signal_candidate,
+            )
+            for config in TELEGRAM_CHANNELS
         ),
         collect_cbr_press(repository),
         collect_moex_news(repository),

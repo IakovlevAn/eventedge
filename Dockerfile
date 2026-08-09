@@ -21,6 +21,7 @@ RUN groupadd --system eventedge && useradd --system --gid eventedge eventedge
 
 COPY pyproject.toml ./
 COPY README.md ./
+COPY configs ./configs
 COPY src ./src
 COPY --from=web-builder /src/eventedge/static ./src/eventedge/static
 
