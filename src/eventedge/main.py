@@ -4,6 +4,7 @@ import asyncio
 import csv
 import hmac
 import io
+import logging
 import os
 import re
 import time
@@ -90,7 +91,7 @@ NEWS_COLLECTION_INTERVAL_SECONDS = next(
 NEWS_CLIENT_REFRESH_INTERVAL_SECONDS = 30
 NEWS_DELIVERY_TARGET_SECONDS = 120
 EVALUATION_CACHE_TTL_SECONDS = 60
-CONTENT_SNAPSHOT_TTL_SECONDS = 15 if os.environ.get("APP_ENV") == "prod" else 0
+CONTENT_SNAPSHOT_TTL_SECONDS = 60 if os.environ.get("APP_ENV") == "prod" else 0
 RECENT_REPOSITORY_SUCCESS_TTL_SECONDS = 120 if os.environ.get("APP_ENV") == "prod" else 0
 MAX_TELEGRAM_CHANNELS = 18
 DEFAULT_ASSESSMENT_TICKERS = (
@@ -115,6 +116,7 @@ DEFAULT_ASSESSMENT_TICKERS = (
     "OZON",
     "X5",
 )
+logger = logging.getLogger(__name__)
 
 
 def latest_model_signal_per_news(signals: list[SignalRecord]) -> list[SignalRecord]:
@@ -221,6 +223,8 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     repository: NewsRepository = application.state.news_repository
     await repository.start()
     application.state.repository_last_success_at = time.monotonic()
+    if CONTENT_SNAPSHOT_TTL_SECONDS > 0:
+        await refresh_content_snapshot(application)
     try:
         yield
     finally:
@@ -242,6 +246,7 @@ app.state.evaluation_material_inflight = None
 app.state.evaluation_material_lock = asyncio.Lock()
 app.state.content_snapshot_cache = None
 app.state.content_snapshot_lock = asyncio.Lock()
+app.state.content_snapshot_inflight = None
 app.state.repository_last_success_at = None
 app.state.collectors = {
     "cbr_press": collect_cbr_press,
@@ -278,11 +283,13 @@ def hidden_news_ids(items: list[NewsRecord]) -> set[str]:
     }
 
 
-async def load_content_snapshot(request: Request) -> tuple[list[NewsRecord], list[SignalRecord]]:
-    """Coalesce the repeated YDB reads used by the public market endpoints."""
-    repository: NewsRepository = request.app.state.news_repository
+async def refresh_content_snapshot(
+    application: FastAPI,
+) -> tuple[list[NewsRecord], list[SignalRecord]]:
+    """Refresh the shared market snapshot once for all public endpoints."""
+    repository: NewsRepository = application.state.news_repository
     now = time.monotonic()
-    cached = request.app.state.content_snapshot_cache
+    cached = application.state.content_snapshot_cache
     if (
         CONTENT_SNAPSHOT_TTL_SECONDS > 0
         and cached is not None
@@ -291,9 +298,9 @@ async def load_content_snapshot(request: Request) -> tuple[list[NewsRecord], lis
     ):
         return cached["news"], cached["signals"]
 
-    async with request.app.state.content_snapshot_lock:
+    async with application.state.content_snapshot_lock:
         now = time.monotonic()
-        cached = request.app.state.content_snapshot_cache
+        cached = application.state.content_snapshot_cache
         if (
             CONTENT_SNAPSHOT_TTL_SECONDS > 0
             and cached is not None
@@ -311,18 +318,52 @@ async def load_content_snapshot(request: Request) -> tuple[list[NewsRecord], lis
                 limit=1000,
             ),
         )
-        request.app.state.repository_last_success_at = time.monotonic()
+        completed_at = time.monotonic()
+        application.state.repository_last_success_at = completed_at
         if CONTENT_SNAPSHOT_TTL_SECONDS > 0:
-            request.app.state.content_snapshot_cache = {
+            application.state.content_snapshot_cache = {
                 "repository": repository,
-                "expires_at": now + CONTENT_SNAPSHOT_TTL_SECONDS,
+                "expires_at": completed_at + CONTENT_SNAPSHOT_TTL_SECONDS,
                 "news": news,
                 "signals": signals,
             }
         return news, signals
 
 
+async def refresh_content_snapshot_in_background(application: FastAPI) -> None:
+    current_task = asyncio.current_task()
+    try:
+        await refresh_content_snapshot(application)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Background content snapshot refresh failed")
+    finally:
+        if application.state.content_snapshot_inflight is current_task:
+            application.state.content_snapshot_inflight = None
+
+
+async def load_content_snapshot(request: Request) -> tuple[list[NewsRecord], list[SignalRecord]]:
+    """Serve a stale snapshot immediately while one background refresh runs."""
+    repository: NewsRepository = request.app.state.news_repository
+    now = time.monotonic()
+    cached = request.app.state.content_snapshot_cache
+    if cached is not None and cached["repository"] is repository:
+        if cached["expires_at"] <= now:
+            inflight = request.app.state.content_snapshot_inflight
+            if inflight is None or inflight.done():
+                request.app.state.content_snapshot_inflight = asyncio.create_task(
+                    refresh_content_snapshot_in_background(request.app)
+                )
+        return cached["news"], cached["signals"]
+    return await refresh_content_snapshot(request.app)
+
+
 def invalidate_content_snapshot(request: Request) -> None:
+    inflight = request.app.state.content_snapshot_inflight
+    if inflight is not None and not inflight.done():
+        inflight.cancel()
+    request.app.state.content_snapshot_inflight = None
     request.app.state.content_snapshot_cache = None
 
 

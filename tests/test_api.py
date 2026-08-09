@@ -1,6 +1,8 @@
 import asyncio
 import time
+from contextlib import suppress
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -56,6 +58,48 @@ def test_readiness_reuses_recent_repository_success(
 
     assert response.status_code == 200
     ready.assert_not_awaited()
+
+
+def test_expired_content_snapshot_is_served_while_refresh_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "CONTENT_SNAPSHOT_TTL_SECONDS", 60)
+
+    async def scenario() -> tuple[list[object], list[object], AsyncMock, AsyncMock]:
+        news = [object()]
+        signals = [object()]
+        list_news = AsyncMock()
+        list_signals = AsyncMock()
+        repository = SimpleNamespace(list_news=list_news, list_signals=list_signals)
+        application = SimpleNamespace(
+            state=SimpleNamespace(
+                news_repository=repository,
+                content_snapshot_cache={
+                    "repository": repository,
+                    "expires_at": time.monotonic() - 1,
+                    "news": news,
+                    "signals": signals,
+                },
+                content_snapshot_lock=asyncio.Lock(),
+                content_snapshot_inflight=None,
+                repository_last_success_at=None,
+            )
+        )
+
+        result = await main_module.load_content_snapshot(SimpleNamespace(app=application))
+        refresh = application.state.content_snapshot_inflight
+        assert refresh is not None
+        refresh.cancel()
+        with suppress(asyncio.CancelledError):
+            await refresh
+        return (*result, list_news, list_signals)
+
+    news, signals, list_news, list_signals = asyncio.run(scenario())
+
+    assert len(news) == 1
+    assert len(signals) == 1
+    list_news.assert_not_awaited()
+    list_signals.assert_not_awaited()
 
 
 def test_source_registry_and_protected_telegram_addition(

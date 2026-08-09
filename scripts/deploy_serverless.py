@@ -54,10 +54,10 @@ def build_payload(
             "imageUrl": environment["IMAGE_URL"],
             "environment": runtime_environment,
         },
-        "concurrency": "1" if is_worker else "8",
-        "provisionPolicy": {"minInstances": "0" if is_worker else "1"},
+        "concurrency": "1" if is_worker else "4",
+        "provisionPolicy": {"minInstances": "0" if is_worker else "2"},
         "scalingPolicy": {
-            "zoneInstancesLimit": "2" if is_worker else "1",
+            "zoneInstancesLimit": "2",
             "zoneRequestsLimit": "2" if is_worker else "8",
         },
         "runtime": {"http": {}},
