@@ -9,6 +9,7 @@ from ydb.query.base import QueryExecMode
 
 from eventedge.storage import (
     SCHEMA_STATEMENTS,
+    SCHEMA_TABLE_NAMES,
     VALIDATED_QUERIES,
     MemoryNewsRepository,
     NewsDocument,
@@ -294,12 +295,18 @@ def test_ydb_schema_migration_retries_rate_limit_and_closes_runtime(
     class FakeDriver:
         def __init__(self, config: ydb.DriverConfig) -> None:
             events.append("driver.init")
+            self.scheme_client = FakeSchemeClient()
 
         async def wait(self, *, timeout: int, fail_fast: bool) -> None:
             events.append(f"driver.wait:{timeout}:{fail_fast}")
 
         async def stop(self, *, timeout: int) -> None:
             events.append(f"driver.stop:{timeout}")
+
+    class FakeSchemeClient:
+        async def list_directory(self, path: str) -> SimpleNamespace:
+            events.append(f"scheme.list:{path}")
+            return SimpleNamespace(children=[])
 
     class FakePool:
         def __init__(self, driver: FakeDriver, *, size: int) -> None:
@@ -338,7 +345,61 @@ def test_ydb_schema_migration_retries_rate_limit_and_closes_runtime(
     assert events == [
         "driver.init",
         "driver.wait:15:True",
+        "scheme.list:/local",
         "pool.init:1",
         "pool.stop",
+        "driver.stop:5",
+    ]
+
+
+def test_ydb_schema_migration_skips_existing_tables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class ExistingTable:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def is_any_table(self) -> bool:
+            return True
+
+    class FakeSchemeClient:
+        async def list_directory(self, path: str) -> SimpleNamespace:
+            events.append(f"scheme.list:{path}")
+            return SimpleNamespace(
+                children=[ExistingTable(name) for name in SCHEMA_TABLE_NAMES]
+            )
+
+    class FakeDriver:
+        def __init__(self, config: ydb.DriverConfig) -> None:
+            events.append("driver.init")
+            self.scheme_client = FakeSchemeClient()
+
+        async def wait(self, *, timeout: int, fail_fast: bool) -> None:
+            events.append(f"driver.wait:{timeout}:{fail_fast}")
+
+        async def stop(self, *, timeout: int) -> None:
+            events.append(f"driver.stop:{timeout}")
+
+    class UnexpectedPool:
+        def __init__(self, driver: FakeDriver, *, size: int) -> None:
+            raise AssertionError("No query pool should be created for an up-to-date schema")
+
+    monkeypatch.setattr(ydb.aio, "Driver", FakeDriver)
+    monkeypatch.setattr(ydb.aio, "QuerySessionPool", UnexpectedPool)
+
+    asyncio.run(
+        migrate_ydb_schema(
+            endpoint="grpcs://localhost:2135",
+            database="/local",
+            credentials=ydb.AnonymousCredentials(),
+        )
+    )
+
+    assert events == [
+        "driver.init",
+        "driver.wait:15:True",
+        "scheme.list:/local",
         "driver.stop:5",
     ]

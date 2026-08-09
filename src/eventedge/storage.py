@@ -930,6 +930,14 @@ SCHEMA_STATEMENTS = (
     """,
 )
 
+SCHEMA_TABLE_NAMES = (
+    "news_items",
+    "feature_sets",
+    "signals",
+    "jobs",
+    "ingestion_requests",
+)
+
 SCHEMA_RATE_LIMIT_MESSAGE = "Request exceeded a limit on the number of schema operations"
 
 
@@ -955,8 +963,26 @@ async def migrate_ydb_schema(
     pool: ydb.aio.QuerySessionPool | None = None
     try:
         await driver.wait(timeout=15, fail_fast=True)
+        directory = await driver.scheme_client.list_directory(database)
+        existing_tables = {
+            entry.name for entry in directory.children if entry.is_any_table()
+        }
+        missing_statements = [
+            (table_name, statement)
+            for table_name, statement in zip(
+                SCHEMA_TABLE_NAMES,
+                SCHEMA_STATEMENTS,
+                strict=True,
+            )
+            if table_name not in existing_tables
+        ]
+        if not missing_statements:
+            LOGGER.info("YDB schema is up to date; no DDL operations are required")
+            return
+
         pool = ydb.aio.QuerySessionPool(driver, size=1)
-        for statement in SCHEMA_STATEMENTS:
+        for table_name, statement in missing_statements:
+            LOGGER.info("Creating missing YDB table %s", table_name)
             await _execute_schema_statement_with_backoff(
                 pool,
                 statement,
