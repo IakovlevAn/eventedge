@@ -15,6 +15,7 @@ from eventedge.storage import (
     YdbNewsRepository,
     deduplicate_signals,
     filter_signals,
+    migrate_ydb_schema,
     signal_from_row,
     stable_id,
 )
@@ -277,8 +278,67 @@ def test_ydb_runtime_is_created_inside_running_event_loop(
         "driver.init",
         "driver.wait:15:True",
         "pool.init:2",
-        *("schema" for _ in SCHEMA_STATEMENTS),
         *("explain" for _ in VALIDATED_QUERIES),
+        "pool.stop",
+        "driver.stop:5",
+    ]
+
+
+def test_ydb_schema_migration_retries_rate_limit_and_closes_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    executed: list[str] = []
+    delays: list[float] = []
+
+    class FakeDriver:
+        def __init__(self, config: ydb.DriverConfig) -> None:
+            events.append("driver.init")
+
+        async def wait(self, *, timeout: int, fail_fast: bool) -> None:
+            events.append(f"driver.wait:{timeout}:{fail_fast}")
+
+        async def stop(self, *, timeout: int) -> None:
+            events.append(f"driver.stop:{timeout}")
+
+    class FakePool:
+        def __init__(self, driver: FakeDriver, *, size: int) -> None:
+            events.append(f"pool.init:{size}")
+
+        async def execute_with_retries(self, statement: str) -> list[object]:
+            if not executed:
+                executed.append(statement)
+                raise RuntimeError(
+                    "Request exceeded a limit on the number of schema operations, "
+                    "try again later"
+                )
+            executed.append(statement)
+            return []
+
+        async def stop(self) -> None:
+            events.append("pool.stop")
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(ydb.aio, "Driver", FakeDriver)
+    monkeypatch.setattr(ydb.aio, "QuerySessionPool", FakePool)
+
+    asyncio.run(
+        migrate_ydb_schema(
+            endpoint="grpcs://localhost:2135",
+            database="/local",
+            credentials=ydb.AnonymousCredentials(),
+            sleep=fake_sleep,
+        )
+    )
+
+    assert executed == [SCHEMA_STATEMENTS[0], *SCHEMA_STATEMENTS]
+    assert delays == [1.0]
+    assert events == [
+        "driver.init",
+        "driver.wait:15:True",
+        "pool.init:1",
         "pool.stop",
         "driver.stop:5",
     ]

@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Iterable, Mapping
+import logging
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -19,6 +20,7 @@ from eventedge.analysis import (
 from eventedge.llm import NewsAnalyzer, RuleBasedNewsAnalyzer
 
 CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+LOGGER = logging.getLogger(__name__)
 
 
 class IdempotencyConflictError(Exception):
@@ -513,8 +515,6 @@ class YdbNewsRepository:
             self._driver = ydb.aio.Driver(config)
             await self._driver.wait(timeout=15, fail_fast=True)
             self._pool = ydb.aio.QuerySessionPool(self._driver, size=2)
-            for statement in SCHEMA_STATEMENTS:
-                await self._pool.execute_with_retries(statement)
             for query in VALIDATED_QUERIES:
                 await self._pool.execute_with_retries(
                     query,
@@ -929,6 +929,73 @@ SCHEMA_STATEMENTS = (
     );
     """,
 )
+
+SCHEMA_RATE_LIMIT_MESSAGE = "Request exceeded a limit on the number of schema operations"
+
+
+async def migrate_ydb_schema(
+    *,
+    endpoint: str,
+    database: str,
+    credentials: ydb.Credentials,
+    max_attempts: int = 6,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Apply YDB DDL once during deployment, outside serverless startup."""
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+
+    config = ydb.DriverConfig(
+        endpoint=endpoint,
+        database=database,
+        credentials=credentials,
+        root_certificates=ydb.load_ydb_root_certificate(),
+    )
+    driver = ydb.aio.Driver(config)
+    pool: ydb.aio.QuerySessionPool | None = None
+    try:
+        await driver.wait(timeout=15, fail_fast=True)
+        pool = ydb.aio.QuerySessionPool(driver, size=1)
+        for statement in SCHEMA_STATEMENTS:
+            await _execute_schema_statement_with_backoff(
+                pool,
+                statement,
+                max_attempts=max_attempts,
+                sleep=sleep,
+            )
+    finally:
+        if pool is not None:
+            try:
+                await pool.stop()
+            finally:
+                await driver.stop(timeout=5)
+        else:
+            await driver.stop(timeout=5)
+
+
+async def _execute_schema_statement_with_backoff(
+    pool: ydb.aio.QuerySessionPool,
+    statement: str,
+    *,
+    max_attempts: int,
+    sleep: Callable[[float], Awaitable[None]],
+) -> None:
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await pool.execute_with_retries(statement)
+            return
+        except Exception as exc:
+            if SCHEMA_RATE_LIMIT_MESSAGE not in str(exc) or attempt == max_attempts:
+                raise
+            delay = float(2 ** (attempt - 1))
+            LOGGER.warning(
+                "YDB schema operation was rate-limited; retrying in %.0f seconds "
+                "(attempt %d/%d)",
+                delay,
+                attempt + 1,
+                max_attempts,
+            )
+            await sleep(delay)
 
 SELECT_REQUEST_QUERY = """
 DECLARE $idempotency_key AS Utf8;
