@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
@@ -13,6 +12,14 @@ from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 
 from eventedge.analysis import EventType, NewsAnalysisInput, RuleBasedNewsExtractor
+from eventedge.configs.sources import (
+    RssFeedConfig,
+    TelegramChannelConfig,
+    load_source_config,
+)
+from eventedge.configs.sources import (
+    google_news_search_url as configured_google_news_search_url,
+)
 from eventedge.storage import (
     NewsDocument,
     NewsRepository,
@@ -45,15 +52,6 @@ HTML_VOID_TAGS = frozenset(
 
 
 @dataclass(frozen=True)
-class RssFeedConfig:
-    source_id: str
-    url: str
-    language: str = "ru"
-    max_items: int = 20
-    timeout_seconds: float = 15
-
-
-@dataclass(frozen=True)
 class RssItem:
     external_id: str
     published_at: datetime
@@ -61,20 +59,6 @@ class RssItem:
     url: str
     content: str
     categories: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class TelegramChannelConfig:
-    source_id: str
-    channel: str
-    language: str = "ru"
-    max_items: int = 20
-    timeout_seconds: float = 15
-
-    @property
-    def url(self) -> str:
-        return f"https://t.me/s/{self.channel}"
-
 
 class _HtmlTextExtractor(HTMLParser):
     def __init__(self) -> None:
@@ -102,6 +86,11 @@ def plain_text(html: str) -> str:
     text = re.sub(r"\s+", " ", " ".join(parser.parts)).strip()
     text = re.sub(r"\s+([,.;:!?%)\]»])", r"\1", text)
     return re.sub(r"([(\[«])\s+", r"\1", text)
+
+
+def google_news_search_url(query: str) -> str:
+    """Keep the existing collector helper API while its configuration moves out."""
+    return configured_google_news_search_url(query)
 
 
 def parse_rss(feed: bytes, *, max_items: int) -> list[RssItem]:
@@ -436,11 +425,8 @@ async def collect_telegram_channel(
     )
 
 
-CBR_PRESS_FEED = RssFeedConfig(
-    source_id="cbr_press",
-    url="https://www.cbr.ru/rss/RssPress",
-    max_items=10,
-)
+SOURCE_CONFIG = load_source_config()
+CBR_PRESS_FEED = SOURCE_CONFIG.cbr_press
 
 CBR_MARKET_MARKERS = (
     "ключевая ставка",
@@ -472,12 +458,7 @@ async def collect_cbr_press(repository: NewsRepository) -> dict[str, int]:
     )
 
 
-MOEX_NEWS_FEED = RssFeedConfig(
-    source_id="moex_news",
-    url="https://www.moex.com/export/news.aspx?cat=100",
-    max_items=1000,
-    timeout_seconds=20,
-)
+MOEX_NEWS_FEED = SOURCE_CONFIG.moex_news
 
 MOEX_NON_EQUITY_TITLE_MARKERS = (
     "облигац",
@@ -691,102 +672,10 @@ def is_google_market_background_candidate(item: RssItem) -> bool:
     )
 
 
-def google_news_search_url(query: str) -> str:
-    return "https://news.google.com/rss/search?" + urllib.parse.urlencode(
-        {"q": f"({query}) when:30d", "hl": "ru", "gl": "RU", "ceid": "RU:ru"}
-    )
-
-
-MARKET_NEWS_FEEDS = (
-    RssFeedConfig(
-        source_id="google_news",
-        url=google_news_search_url("Сбербанк OR ВТБ"),
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="google_news",
-        url=google_news_search_url("Газпром OR Новатэк"),
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="google_news",
-        url=google_news_search_url("Лукойл OR Роснефть"),
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="google_news",
-        url=google_news_search_url("Татнефть OR Газпром нефть"),
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="google_news",
-        url=google_news_search_url("Яндекс OR Магнит"),
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="google_news",
-        url=google_news_search_url("Норникель OR Полюс"),
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="google_news",
-        url=google_news_search_url("Северсталь OR АЛРОСА OR Московская биржа"),
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="market_background",
-        url=google_news_search_url(
-            '"российский рынок" OR "ключевая ставка" OR рубль OR Brent OR санкции'
-        ),
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="interfax",
-        url="https://www.interfax.ru/rss",
-        max_items=50,
-    ),
-    RssFeedConfig(
-        source_id="tass",
-        url="https://tass.ru/rss/v2.xml",
-        max_items=100,
-    ),
-    RssFeedConfig(
-        source_id="rbc",
-        url="https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
-        max_items=50,
-    ),
-)
-
-FAST_NEWS_FEEDS = (
-    *(config for config in MARKET_NEWS_FEEDS if config.source_id in {"interfax", "tass", "rbc"}),
-    RssFeedConfig(
-        source_id=MOEX_NEWS_FEED.source_id,
-        url=MOEX_NEWS_FEED.url,
-        max_items=100,
-        timeout_seconds=10,
-    ),
-)
-
-TELEGRAM_CHANNELS = (
-    TelegramChannelConfig(
-        source_id="telegram_ak47pfl",
-        channel="AK47pfl",
-        max_items=20,
-        timeout_seconds=10,
-    ),
-    TelegramChannelConfig(
-        source_id="telegram_markettwits",
-        channel="markettwits",
-        max_items=20,
-        timeout_seconds=10,
-    ),
-)
-
-DISCOVERY_NEWS_FEEDS = tuple(
-    config
-    for config in MARKET_NEWS_FEEDS
-    if config.source_id in {"google_news", "market_background"}
-)
+MARKET_NEWS_FEEDS = SOURCE_CONFIG.market_news_feeds
+FAST_NEWS_FEEDS = SOURCE_CONFIG.fast_news_feeds
+TELEGRAM_CHANNELS = SOURCE_CONFIG.telegram_channels
+DISCOVERY_NEWS_FEEDS = SOURCE_CONFIG.discovery_news_feeds
 
 
 def collection_filters(

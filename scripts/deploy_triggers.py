@@ -9,6 +9,7 @@ import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from eventedge.configs.collection import load_collection_config
 from scripts.deploy_serverless import masked
 
 TRIGGERS_URL = "https://serverless-triggers.api.cloud.yandex.net/triggers/v1/triggers"
@@ -24,25 +25,14 @@ class TimerSpec:
     payload: str
 
 
-TIMER_SPECS = (
+TIMER_SPECS = tuple(
     TimerSpec(
-        name="eventedge-fast-news",
-        description="Priority market news every minute",
-        cron_expression="* * ? * * *",
-        payload="fast_news",
-    ),
-    TimerSpec(
-        name="eventedge-discovery-news",
-        description="Broad market news discovery every five minutes",
-        cron_expression="0/5 * ? * * *",
-        payload="discovery_news",
-    ),
-    TimerSpec(
-        name="eventedge-slow-news",
-        description="Macro context refresh every fifteen minutes",
-        cron_expression="0/15 * ? * * *",
-        payload="slow_news",
-    ),
+        name=lane.trigger_name,
+        description=lane.description,
+        cron_expression=lane.cron_expression,
+        payload=lane.payload,
+    )
+    for lane in load_collection_config().lanes
 )
 
 

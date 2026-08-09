@@ -31,6 +31,7 @@ from eventedge.collectors import (
     collect_slow_news,
     is_moex_equity_title,
 )
+from eventedge.configs.collection import load_collection_config
 from eventedge.evals import (
     ASSESSMENT_MODEL_VERSION,
     build_assessment,
@@ -66,34 +67,14 @@ REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 SIGNAL_ID_PATTERN = re.compile(r"^sig_[0-9A-HJKMNP-TV-Z]{26}$")
 JOB_ID_PATTERN = re.compile(r"^job_[0-9A-HJKMNP-TV-Z]{26}$")
 PUBLIC_HIDDEN_SOURCE_IDS = frozenset({"eventedge_smoke"})
-NEWS_COLLECTION_INTERVAL_SECONDS = 60
+COLLECTION_CONFIG = load_collection_config()
+NEWS_COLLECTION_LANES = tuple(lane.as_api_dict() for lane in COLLECTION_CONFIG.lanes)
+NEWS_COLLECTION_INTERVAL_SECONDS = next(
+    lane.interval_seconds for lane in COLLECTION_CONFIG.lanes if lane.id == "fast"
+)
 NEWS_CLIENT_REFRESH_INTERVAL_SECONDS = 30
 NEWS_DELIVERY_TARGET_SECONDS = 120
 EVALUATION_CACHE_TTL_SECONDS = 60
-NEWS_COLLECTION_LANES = (
-    {
-        "id": "fast",
-        "interval_seconds": 60,
-        "source_ids": [
-            "interfax",
-            "tass",
-            "rbc",
-            "moex_news",
-            "telegram_ak47pfl",
-            "telegram_markettwits",
-        ],
-    },
-    {
-        "id": "discovery",
-        "interval_seconds": 300,
-        "source_ids": ["google_news", "market_background"],
-    },
-    {
-        "id": "slow",
-        "interval_seconds": 900,
-        "source_ids": ["cbr_press"],
-    },
-)
 
 
 class NewsIngestRequest(BaseModel):

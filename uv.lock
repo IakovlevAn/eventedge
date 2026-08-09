@@ -227,6 +227,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "pyyaml" },
     { name = "requests" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "ydb" },
@@ -237,13 +238,13 @@ dev = [
     { name = "httpx" },
     { name = "openapi-spec-validator" },
     { name = "pytest" },
-    { name = "pyyaml" },
     { name = "ruff" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.116,<1" },
+    { name = "pyyaml", specifier = ">=6.0.2,<7" },
     { name = "requests", specifier = ">=2.34,<3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.35,<1" },
     { name = "ydb", specifier = ">=3.30,<4" },
@@ -254,7 +255,6 @@ dev = [
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "openapi-spec-validator", specifier = ">=0.7.2,<1" },
     { name = "pytest", specifier = ">=8.4,<10" },
-    { name = "pyyaml", specifier = ">=6.0.2,<7" },
     { name = "ruff", specifier = ">=0.12,<1" },
 ]
 

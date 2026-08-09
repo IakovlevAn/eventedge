@@ -6,6 +6,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from eventedge.configs.scoring import load_scoring_config
+
 
 class EventType(StrEnum):
     FINANCIAL_RESULTS = "financial_results"
@@ -374,20 +376,8 @@ class RuleBasedNewsExtractor:
         )
 
 
-SOURCE_QUALITY: dict[str, float] = {
-    "company": 0.95,
-    "cbr_press": 0.95,
-    "moex": 0.95,
-    "moex_news": 0.95,
-    "interfax": 0.90,
-    "reuters": 0.90,
-    "tass": 0.82,
-    "rbc": 0.78,
-    "google_news": 0.74,
-    "market_news": 0.74,
-    "telegram_ak47pfl": 0.68,
-    "telegram_markettwits": 0.68,
-}
+SCORING_CONFIG = load_scoring_config()
+SOURCE_QUALITY = SCORING_CONFIG.source_quality
 
 CONTRIBUTION_LABELS = {
     "semantic_effect": "Текстовый эффект события",
@@ -415,7 +405,7 @@ def score_features(
     )
     effective_polarity = features.polarity if is_directional else 0.0
     sign = 1.0 if effective_polarity > 0 else -1.0 if effective_polarity < 0 else 0.0
-    source_quality = SOURCE_QUALITY.get(source_id, 0.65)
+    source_quality = SOURCE_QUALITY.get(source_id, SCORING_CONFIG.default_source_quality)
     fact_coverage = min(len(features.facts) / 3, 1.0)
     signals: list[BaselineSignal] = []
 

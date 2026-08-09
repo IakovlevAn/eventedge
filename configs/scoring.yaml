@@ -1,0 +1,15 @@
+# Source quality participates in both signal score and confidence.
+default_source_quality: 0.65
+source_quality:
+  company: 0.95
+  cbr_press: 0.95
+  moex: 0.95
+  moex_news: 0.95
+  interfax: 0.90
+  reuters: 0.90
+  tass: 0.82
+  rbc: 0.78
+  google_news: 0.74
+  market_news: 0.74
+  telegram_ak47pfl: 0.68
+  telegram_markettwits: 0.68
