@@ -690,6 +690,12 @@ kbd {
   background: #202228;
 }
 
+.sort-menu {
+  right: 0;
+  left: auto;
+  width: 190px;
+}
+
 .terminal-actions {
   display: flex;
   align-items: center;
@@ -4870,6 +4876,7 @@ button.chart-event-detail.is-active {
 .eval-verdict.is-hit { color: var(--green); border-color: rgba(95, 201, 149, 0.23); background: rgba(95, 201, 149, 0.045); }
 .eval-verdict.is-miss { color: var(--red); border-color: rgba(222, 116, 133, 0.23); background: rgba(222, 116, 133, 0.045); }
 .eval-verdict.is-pending { color: #aaa3c6; border-color: rgba(170, 163, 198, 0.22); background: rgba(170, 163, 198, 0.045); }
+.eval-verdict.is-unavailable { color: #6f7681; border-color: rgba(111, 118, 129, 0.22); background: rgba(111, 118, 129, 0.04); }
 
 .outcome-signal { display: flex; min-width: 122px; align-items: center; gap: 7px; }
 .outcome-signal small { margin: 0 !important; }

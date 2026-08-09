@@ -16,7 +16,7 @@ MOEX_ISS_BASE_URL = "https://iss.moex.com/iss"
 MOSCOW_TIMEZONE = ZoneInfo("Europe/Moscow")
 DEFAULT_TIMEOUT_SECONDS = 10.0
 MAX_DAILY_CANDLES = 66
-MAX_INTRADAY_CANDLES = 500
+MAX_INTRADAY_CANDLES = 1500
 
 
 class InstrumentNotFoundError(LookupError):

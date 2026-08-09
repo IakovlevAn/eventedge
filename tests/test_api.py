@@ -108,7 +108,14 @@ def test_signal_list_has_contract_shape_and_etag() -> None:
     assert response.status_code == 200
     assert response.json() == {
         "data": [],
-        "meta": {"limit": 10, "has_more": False, "next_cursor": None},
+        "meta": {
+            "limit": 10,
+            "has_more": False,
+            "next_cursor": None,
+            "model_scope": "news_event",
+            "final_assessment_endpoint": "/v1/assessments",
+            "final_assessment_model_version": "hybrid-market-0.1.0",
+        },
     }
     assert response.headers["ETag"].startswith('"')
 

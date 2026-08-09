@@ -871,11 +871,19 @@ function AppHeader({ view, signals, onNavigate, onSelect, onOpenNews }) {
   );
 }
 
+const signalSortOptions = [
+  ["priority", "По силе сигнала"],
+  ["confidence", "По уверенности"],
+  ["freshness", "Сначала свежие"],
+  ["ticker", "По тикеру"],
+];
+
 function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt, onSelect, onOpenNews, onMethodology, onReadNews }) {
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
-  const [sortByConfidence, setSortByConfidence] = useState(false);
+  const [sortMode, setSortMode] = useState("priority");
+  const [sortOpen, setSortOpen] = useState(false);
 
   const companyCards = useMemo(() => {
     const activeTickers = new Set(signals.map((signal) => signal.ticker));
@@ -905,10 +913,22 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
       return matchesFilter && matchesQuery;
     });
     return [...result].sort((a, b) => {
-      if (sortByConfidence) return b.confidence - a.confidence;
-      return Number(b.available !== false) - Number(a.available !== false);
+      const availabilityOrder = Number(b.available !== false) - Number(a.available !== false);
+      if (availabilityOrder) return availabilityOrder;
+      const tickerOrder = a.ticker.localeCompare(b.ticker, "ru-RU");
+      if (sortMode === "ticker") return tickerOrder;
+      if (sortMode === "freshness") {
+        const freshnessOrder = (Date.parse(b.as_of || "") || 0) - (Date.parse(a.as_of || "") || 0);
+        return freshnessOrder || tickerOrder;
+      }
+      const confidenceOrder = Number(b.confidence || 0) - Number(a.confidence || 0);
+      const strengthOrder = Math.abs(Number(b.score || 0)) - Math.abs(Number(a.score || 0));
+      if (sortMode === "confidence") return confidenceOrder || strengthOrder || tickerOrder;
+      return strengthOrder || confidenceOrder || tickerOrder;
     });
-  }, [companyCards, filter, query, sortByConfidence]);
+  }, [companyCards, filter, query, sortMode]);
+
+  const activeSortLabel = signalSortOptions.find(([value]) => value === sortMode)?.[1] || "Сортировка";
 
   return (
     <main className="screen screen--signals">
@@ -917,7 +937,7 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
           <div className="terminal-title">
             <div><span className="workspace-kicker">Live intelligence</span><h1>Компании в фокусе</h1></div>
             <div className="filter-wrap">
-              <button type="button" className={`text-button ${filter !== "all" ? "is-active" : ""}`} onClick={() => setFilterOpen((value) => !value)}>
+              <button type="button" className={`text-button ${filter !== "all" ? "is-active" : ""}`} onClick={() => { setFilterOpen((value) => !value); setSortOpen(false); }}>
                 <Filter size={14} />
                 {filter === "all" ? "Добавить фильтр" : directionMeta[filter].label}
                 <ChevronDown size={12} />
@@ -946,10 +966,23 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
               <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Тикер или компания" aria-label="Найти сигнал" />
               {query && <button type="button" onClick={() => setQuery("")} aria-label="Очистить поиск"><X size={13} /></button>}
             </label>
-            <button className={`sort-button ${sortByConfidence ? "is-active" : ""}`} type="button" aria-label="Сортировать по уверенности" onClick={() => setSortByConfidence((value) => !value)}>
-              <SlidersHorizontal size={15} />
-              <span>{sortByConfidence ? "По уверенности" : "Сортировка"}</span>
-            </button>
+            <div className="filter-wrap sort-wrap">
+              <button className={`sort-button ${sortOpen || sortMode !== "priority" ? "is-active" : ""}`} type="button" aria-label="Выбрать сортировку" aria-expanded={sortOpen} onClick={() => { setSortOpen((value) => !value); setFilterOpen(false); }}>
+                <SlidersHorizontal size={15} />
+                <span>{activeSortLabel}</span>
+                <ChevronDown size={12} />
+              </button>
+              {sortOpen && (
+                <div className="filter-menu sort-menu">
+                  {signalSortOptions.map(([value, label]) => (
+                    <button key={value} type="button" className={sortMode === value ? "is-active" : ""} onClick={() => { setSortMode(value); setSortOpen(false); }}>
+                      {label}
+                      {sortMode === value && <Check size={13} />}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -1284,7 +1317,7 @@ function EvalsScreen() {
         <article><span>Проверено сигналов</span><strong>{summary.evaluated}</strong><small>из {summary.signals_total} доступных в хранилище</small></article>
         <article><span>Попадание направления</span><strong>{hitRate}</strong><small>по самому длинному доступному горизонту</small></article>
         <article><span>Средняя реакция</span><strong className={Number(summary.average_signed_return_pct) >= 0 ? "market-positive" : "market-negative"}>{averageReturn}</strong><small>медиана {medianReturn} · доходность со знаком сигнала</small></article>
-        <article><span>Покрытие eval</span><strong>{summary.coverage_pct}%</strong><small>{summary.pending} ждут 3 дня · {summary.unavailable} вне окна</small></article>
+        <article><span>Покрытие eval</span><strong>{summary.coverage_pct}%</strong><small>{summary.pending} ждут первый outcome · {summary.partial || 0} оценены частично · {summary.unavailable} вне окна</small></article>
       </section>
 
       <section className="eval-analysis-grid">
@@ -1359,15 +1392,26 @@ function EvalsScreen() {
           <table className="eval-table outcomes-table">
             <thead><tr><th>Сигнал</th><th>Новость</th><th>1 час</th><th>1 день</th><th>3 дня</th><th>Вердикт</th></tr></thead>
             <tbody>
-              {outcomes.slice(0, 30).map((outcome) => <tr key={outcome.signal_id}>
-                <td><div className="outcome-signal"><strong>{outcome.ticker}</strong><Direction direction={outcome.direction} /><small>{formatScore(outcome.score)} п.</small></div></td>
-                <td>{outcome.news ? <a href={outcome.news.url} target="_blank" rel="noreferrer"><span>{outcome.news.source_id}</span><strong>{outcome.news.title}</strong></a> : <span>Источник недоступен</span>}</td>
-                {["1h", "1d", "3d"].map((period) => {
-                  const value = outcome.returns?.[period];
-                  return <td key={period} className={value === null || value === undefined ? "" : Number(value) >= 0 ? "market-positive" : "market-negative"}>{formatPct(value)}</td>;
-                })}
-                <td>{outcome.verdict === null ? <span className="eval-verdict is-pending">Ждём данные</span> : outcome.verdict ? <span className="eval-verdict is-hit"><Check size={11} /> Попал</span> : <span className="eval-verdict is-miss"><X size={11} /> Не попал</span>}</td>
-              </tr>)}
+              {outcomes.slice(0, 30).map((outcome) => {
+                const observedHorizon = ["3d", "1d", "1h"].find((period) => outcome.returns?.[period] !== null && outcome.returns?.[period] !== undefined);
+                const observedLabel = observedHorizon ? horizonLabels[observedHorizon] : null;
+                const verdict = outcome.status === "unavailable"
+                  ? <span className="eval-verdict is-unavailable">Нет истории</span>
+                  : outcome.verdict === null
+                    ? <span className="eval-verdict is-pending">Ждём 1 час</span>
+                    : outcome.verdict
+                      ? <span className="eval-verdict is-hit"><Check size={11} /> {outcome.status === "partial" ? `Пока попал · ${observedLabel}` : "Попал"}</span>
+                      : <span className="eval-verdict is-miss"><X size={11} /> {outcome.status === "partial" ? `Пока не попал · ${observedLabel}` : "Не попал"}</span>;
+                return <tr key={outcome.signal_id}>
+                  <td><div className="outcome-signal"><strong>{outcome.ticker}</strong><Direction direction={outcome.direction} /><small>{formatScore(outcome.score)} п.</small></div></td>
+                  <td>{outcome.news ? <a href={outcome.news.url} target="_blank" rel="noreferrer"><span>{outcome.news.source_id}</span><strong>{outcome.news.title}</strong></a> : <span>Источник недоступен</span>}</td>
+                  {["1h", "1d", "3d"].map((period) => {
+                    const value = outcome.returns?.[period];
+                    return <td key={period} className={value === null || value === undefined ? "" : Number(value) >= 0 ? "market-positive" : "market-negative"}>{formatPct(value)}</td>;
+                  })}
+                  <td>{verdict}</td>
+                </tr>;
+              })}
             </tbody>
           </table>
         </div>
@@ -1476,7 +1520,7 @@ const apiEndpoints = [
   { id: "assessments", method: "GET", path: "/v1/assessments", title: "Live‑оценки рынка", description: "Гибридная или quant‑оценка всех компаний с пятью не‑LLM факторами.", parameter: { name: "tickers", type: "string", description: "Опциональный список тикеров MOEX через запятую" } },
   { id: "evals", method: "GET", path: "/v1/evals", title: "Анализ качества сигналов", description: "Outcomes, горизонты, бумаги, confidence buckets, корреляции и cumulative quality.", parameter: null },
   { id: "evals_export", method: "GET", path: "/v1/evals/export?format=csv&dataset=timeseries", title: "Выгрузка Evals", description: "CSV/JSON: одна строка на сигнал или event-time ряд свечей до +3 дней.", parameter: { name: "dataset", type: "string", description: "outcomes или timeseries; format — csv или json" } },
-  { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Новостные сигналы", description: "Канонические сигналы, созданные существенными новостными событиями.", parameter: { name: "limit", type: "integer", description: "Количество записей, максимум 100" } },
+  { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Семантические news‑сигналы", description: "Новостный слой: событие, направление и вес из semantic‑модели. Финальная оценка hybrid-market-0.1.0, включающая рыночные факторы, возвращается через /v1/assessments.", parameter: { name: "limit", type: "integer", description: "Количество записей, максимум 100" } },
   { id: "news", method: "GET", path: "/v1/news?limit=20", title: "Лента новостей", description: "Исходные публикации и сигналы, которые с ними связаны.", parameter: { name: "limit", type: "integer", description: "Количество публикаций, максимум 100" } },
   { id: "ticker", method: "GET", path: "/v1/signals?ticker=SBER&limit=1", title: "Сигнал компании", description: "Последний новостной сигнал по выбранному тикеру.", parameter: { name: "ticker", type: "string", description: "Тикер MOEX, например SBER" } },
   { id: "snapshot", method: "GET", path: "/v1/instruments/SBER/snapshot", title: "Рыночный snapshot", description: "Цена, объём, волатильность, дневные свечи MOEX и сценарный диапазон.", parameter: null },
@@ -1570,7 +1614,14 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,2026-08-08T08:00:00Z,60,0.42` : en
       "model_version": "news-baseline-0.1.1"
     }
   ],
-  "meta": {"limit": 20, "has_more": false, "next_cursor": null}
+  "meta": {
+    "limit": 20,
+    "has_more": false,
+    "next_cursor": null,
+    "model_scope": "news_event",
+    "final_assessment_endpoint": "/v1/assessments",
+    "final_assessment_model_version": "hybrid-market-0.1.0"
+  }
 }`;
 
   const checkApi = async () => {

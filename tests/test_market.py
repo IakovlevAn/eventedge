@@ -3,10 +3,15 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
-from eventedge.market import MAX_DAILY_CANDLES, MoexMarketDataClient, scenario_range
+from eventedge.market import (
+    MAX_DAILY_CANDLES,
+    MAX_INTRADAY_CANDLES,
+    MoexMarketDataClient,
+    scenario_range,
+)
 
 
 def fake_moex_request(url: str, params: dict[str, object]) -> dict[str, Any]:
@@ -119,6 +124,47 @@ def test_intraday_candles_keep_moscow_time_and_interval() -> None:
     assert result["interval_minutes"] == 10
     assert result["candles"][0]["begin"] == "2026-08-07T07:00:00Z"
     assert result["candles"][-1]["close"] == 100.5
+
+
+def test_intraday_candles_keep_full_eval_window_across_pages() -> None:
+    starts: list[int] = []
+    first_candle = datetime(2026, 7, 27, 10)
+    all_rows = []
+    for index in range(1200):
+        begin = first_candle + timedelta(minutes=index * 10)
+        close = 100 + index / 100
+        all_rows.append(
+            [
+                begin.strftime("%Y-%m-%d %H:%M:%S"),
+                close - 0.1,
+                close,
+                close + 0.2,
+                close - 0.2,
+                10_000_000 + index,
+                100_000 + index,
+            ]
+        )
+
+    def paged_request(url: str, params: dict[str, object]) -> dict[str, Any]:
+        assert url.endswith("/candles.json")
+        start = int(params["start"])
+        starts.append(start)
+        return {
+            "candles": {
+                "columns": ["begin", "open", "close", "high", "low", "value", "volume"],
+                "data": all_rows[start : start + 500],
+            }
+        }
+
+    client = MoexMarketDataClient(requester=paged_request)
+
+    result = asyncio.run(client.candles("SBER", interval=10, lookback_days=14))
+
+    assert starts == [0, 500, 1000]
+    assert len(result["candles"]) == 1200
+    assert len(result["candles"]) <= MAX_INTRADAY_CANDLES
+    assert result["candles"][0]["close"] == 100.0
+    assert result["candles"][-1]["close"] == 111.99
 
 
 def test_identical_concurrent_snapshots_share_one_load() -> None:
