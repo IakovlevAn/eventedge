@@ -19,6 +19,7 @@ def test_production_smoke_retries_cold_evals_and_checks_new_routes() -> None:
     workflow = (repository_root / ".github/workflows/deploy.yml").read_text()
 
     assert workflow.count("for attempt in {1..6}; do") >= 5
+    assert ".meta.requested == 20 and .meta.returned == 20" in workflow
     assert "Smoke test source registry and market events" in workflow
     assert '"${EVENTEDGE_API_URL}/v1/sources"' in workflow
     assert '"${EVENTEDGE_API_URL}/v1/events?limit=1"' in workflow
