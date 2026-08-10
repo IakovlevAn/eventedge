@@ -20,6 +20,7 @@ class EventType(StrEnum):
     MANAGEMENT = "management"
     PARTNERSHIP = "partnership"
     PRODUCT = "product"
+    GOVERNMENT_SUPPORT = "government_support"
     MACRO = "macro"
     OTHER = "other"
 
@@ -40,6 +41,8 @@ class SignalAction(StrEnum):
     CONSIDER_BUY = "consider_buy"
     NO_ACTION = "no_action"
     REVIEW_POSITION = "review_position"
+    RISK_ON = "risk_on"
+    RISK_OFF = "risk_off"
 
 
 class NewsAnalysisInput(BaseModel):
@@ -239,6 +242,11 @@ EVENT_RULES: tuple[tuple[EventType, tuple[str, ...], float], ...] = (
     ),
     (EventType.DIVIDEND, ("дивиденд", "выплат акционер", "реестр акционер"), 0.85),
     (
+        EventType.GOVERNMENT_SUPPORT,
+        ("господдерж", "субсиди", "выделени", "меры поддержки"),
+        0.72,
+    ),
+    (
         EventType.REGULATION,
         (
             "регулятор",
@@ -294,6 +302,8 @@ POSITIVE_TERMS = (
     "подтвердил прогноз",
     "возобновил",
     "получил лицензи",
+    "поддержк",
+    "субсиди",
 )
 
 NEGATIVE_TERMS = (

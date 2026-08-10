@@ -89,7 +89,40 @@ SECTOR_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Нефть и газ", ("нефт", "газ", "brent", "опек", "нпз", "топлив")),
     ("Металлы", ("металл", "золото", "никел", "сталь", "алмаз")),
     ("Технологии", ("it-сектор", "технологическ", "интернет-компан")),
+    (
+        "Сельское хозяйство",
+        ("сельхоз", "агропром", "зерн", "урожа", "удобрени", "аграрн"),
+    ),
+    (
+        "Транспорт и логистика",
+        ("железнодорож", "ж/д", "перевоз", "транспортн", "портов", "судоход"),
+    ),
+    ("Электроэнергетика", ("электроэнерг", "электросет", "генераци", "энергосистем")),
 )
+
+MARKET_SIGNAL_CODE = "RUEQ"
+MARKET_SIGNAL_TARGET = {
+    "type": "market",
+    "id": "RU_EQUITIES",
+    "label": "Российский рынок",
+}
+SECTOR_SIGNAL_TARGETS = {
+    "Ритейл и логистика": ("RURETAIL", "RETAIL_LOGISTICS"),
+    "Финансы": ("RUFIN", "FINANCIALS"),
+    "Нефть и газ": ("RUOILGAS", "OIL_GAS"),
+    "Металлы": ("RUMETALS", "METALS"),
+    "Технологии": ("RUTECH", "TECHNOLOGY"),
+    "Сельское хозяйство": ("RUAGRI", "AGRICULTURE"),
+    "Транспорт и логистика": ("RUTRANS", "TRANSPORT_LOGISTICS"),
+    "Электроэнергетика": ("RUPOWER", "POWER"),
+}
+CONTEXT_SIGNAL_TARGETS = {
+    MARKET_SIGNAL_CODE: MARKET_SIGNAL_TARGET,
+    **{
+        code: {"type": "sector", "id": target_id, "label": label}
+        for label, (code, target_id) in SECTOR_SIGNAL_TARGETS.items()
+    },
+}
 
 MARKET_MARKERS = (
     "ключевая ставка",
@@ -152,7 +185,10 @@ def classify_news_event(
 ) -> dict[str, object]:
     """Project one news item into a stable, explainable market-event scope."""
     signal_tickers = [
-        str(signal.get("ticker", "")).upper() for signal in related_signals if signal.get("ticker")
+        ticker
+        for signal in related_signals
+        if signal.get("ticker")
+        and (ticker := str(signal["ticker"]).upper()) not in CONTEXT_SIGNAL_TARGETS
     ]
     metadata_tickers = source_metadata.get("tickers", [])
     title_features = RuleBasedNewsExtractor().extract(
@@ -222,6 +258,35 @@ def classify_news_event(
             else "Событие пока не привязано к отрасли или компании."
         ),
     }
+
+
+def signal_target(ticker: str) -> dict[str, str]:
+    context = CONTEXT_SIGNAL_TARGETS.get(ticker)
+    if context is not None:
+        return dict(context)
+    return {
+        "type": "instrument",
+        "id": ticker,
+        "label": ticker,
+    }
+
+
+def context_signal_specs(projection: Mapping[str, object]) -> list[tuple[str, str]]:
+    scope = projection.get("scope")
+    if scope == "market":
+        return [(MARKET_SIGNAL_CODE, str(MARKET_SIGNAL_TARGET["label"]))]
+    if scope != "sector":
+        return []
+    sectors = projection.get("sectors", [])
+    if not isinstance(sectors, list):
+        return []
+    return [
+        (code, str(sector))
+        for sector in sectors
+        if isinstance(sector, str)
+        and (definition := SECTOR_SIGNAL_TARGETS.get(sector)) is not None
+        for code in [definition[0]]
+    ]
 
 
 def is_broad_market_event_text(title: str, content: str) -> bool:

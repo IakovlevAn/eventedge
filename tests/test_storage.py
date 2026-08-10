@@ -303,7 +303,14 @@ def test_cbr_context_news_does_not_create_direct_company_signal() -> None:
         news = await repository.list_news(source_id="cbr_press", limit=10)
 
         assert len(news) == 1
-        assert signals == []
+        assert len(signals) == 1
+        assert signals[0].ticker == "RUEQ"
+        assert signals[0].direction == "neutral"
+        assert signals[0].as_api_dict()["target"] == {
+            "type": "market",
+            "id": "RU_EQUITIES",
+            "label": "Российский рынок",
+        }
 
     asyncio.run(scenario())
 
