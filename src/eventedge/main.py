@@ -671,6 +671,31 @@ async def list_news(
     scoped_news = [
         item for item in visible_news if scope is None or event_by_news[item.id]["scope"] == scope
     ]
+    processing_rows = [item.as_api_dict()["processing"] for item in scoped_news]
+    signaled_count = sum(bool(signals_by_news.get(item.id)) for item in scoped_news)
+    relevant_count = sum(
+        bool(row["event_candidate"] or row["analysis_candidate"] or signals_by_news.get(item.id))
+        for item, row in zip(scoped_news, processing_rows, strict=True)
+    )
+    analysis_candidate_count = sum(
+        bool(row["analysis_candidate"] or signals_by_news.get(item.id))
+        for item, row in zip(scoped_news, processing_rows, strict=True)
+    )
+    processing_coverage = {
+        "stored": len(scoped_news),
+        "relevant": relevant_count,
+        "analysis_candidates": analysis_candidate_count,
+        "signaled": signaled_count,
+        "candidate_coverage_pct": (
+            round(analysis_candidate_count / relevant_count * 100, 1) if relevant_count else 0.0
+        ),
+        "signal_yield_pct": (
+            round(signaled_count / analysis_candidate_count * 100, 1)
+            if analysis_candidate_count
+            else 0.0
+        ),
+        "signal_model_version": CURRENT_NEWS_MODEL_VERSION,
+    }
     news = scoped_news[:limit]
     source_stats: dict[str, dict[str, object]] = {}
     for item in scoped_news:
@@ -704,6 +729,7 @@ async def list_news(
                 "next_cursor": None,
                 "scope": scope,
                 "scope_counts": scope_counts,
+                "processing_coverage": processing_coverage,
                 "last_ingested_at": (
                     max(item.created_at for item in visible_news)
                     .astimezone(UTC)

@@ -2010,6 +2010,7 @@ components:
         - client_refresh_interval_seconds
         - delivery_target_seconds
         - collection_lanes
+        - processing_coverage
         - sources
       properties:
         limit:
@@ -2039,10 +2040,49 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/NewsCollectionLane'
+        processing_coverage:
+          $ref: '#/components/schemas/NewsProcessingCoverage'
         sources:
           type: array
           items:
             $ref: '#/components/schemas/NewsSourceStat'
+
+    NewsProcessingCoverage:
+      type: object
+      additionalProperties: false
+      required:
+        - stored
+        - relevant
+        - analysis_candidates
+        - signaled
+        - candidate_coverage_pct
+        - signal_yield_pct
+        - signal_model_version
+      properties:
+        stored:
+          type: integer
+          minimum: 0
+        relevant:
+          type: integer
+          minimum: 0
+        analysis_candidates:
+          type: integer
+          minimum: 0
+        signaled:
+          type: integer
+          minimum: 0
+        candidate_coverage_pct:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 100
+        signal_yield_pct:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 100
+        signal_model_version:
+          type: string
 
     SignalResponse:
       type: object
