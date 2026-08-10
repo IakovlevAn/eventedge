@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from eventedge.configs.scoring import load_scoring_config
 
-CURRENT_NEWS_MODEL_VERSION = "news-baseline-0.4.0"
+CURRENT_NEWS_MODEL_VERSION = "signal-engine-0.5.0"
 
 
 class EventType(StrEnum):
@@ -117,14 +117,14 @@ class BaselineSignal(BaseModel):
     factor_contributions: Annotated[list[FactorContribution], Field(min_length=5, max_length=5)]
     feature_schema_version: Literal["news-features-0.1"]
     extractor_version: str
-    model_version: Literal["news-baseline-0.4.0"]
+    model_version: Literal["signal-engine-0.5.0"]
     config_version: int
 
 
 class BaselineScoringConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    model_version: Literal["news-baseline-0.4.0"] = "news-baseline-0.4.0"
+    model_version: Literal["signal-engine-0.5.0"] = "signal-engine-0.5.0"
     config_version: Annotated[int, Field(ge=1)] = 1
     positive_threshold: Annotated[float, Field(ge=0, le=100)] = 18
     negative_threshold: Annotated[float, Field(ge=-100, le=0)] = -18

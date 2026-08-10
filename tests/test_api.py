@@ -184,10 +184,74 @@ def test_admin_reprocesses_one_explicit_stored_candidate(
     assert response.status_code == 200
     assert response.json()["meta"]["completed"] == 1
     assert response.json()["meta"]["batch_limit"] == 1
-    assert response.json()["meta"]["model_version"] == "news-baseline-0.4.0"
+    assert response.json()["meta"]["model_version"] == "signal-engine-0.5.0"
     assert response.json()["data"][0]["news_id"] == stored.id
     assert response.json()["data"][0]["result_ref"].startswith("sig_")
-    assert updated.source_metadata["reprocess_version"] == "news-baseline-0.4.0"
+    assert updated.source_metadata["reprocess_version"] == "signal-engine-0.5.0"
+
+
+def test_backfill_reclassifies_stored_sector_news_without_ticker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EVENTEDGE_ADMIN_KEY", "test-admin-key")
+    original_repository = app.state.news_repository
+    app.state.news_repository = MemoryNewsRepository()
+    try:
+        with TestClient(app) as isolated_client:
+            repository = app.state.news_repository
+            document = NewsDocument(
+                source_id="telegram_bbbreaking",
+                external_id="bbbreaking/235334",
+                published_at=datetime(2026, 8, 10, 7, 10, tzinfo=UTC),
+                received_at=datetime(2026, 8, 10, 7, 12, tzinfo=UTC),
+                title="Правительство готовит поддержку железнодорожных перевозок",
+                url="https://t.me/bbbreaking/235334",
+                content=(
+                    "Правительство выделит 10 млрд руб. на поддержку ж/д перевозок "
+                    "экспортной сельхозпродукции."
+                ),
+                language="ru",
+                source_metadata={"signal_candidate": False, "tickers": []},
+                payload_hash="bbbreaking-235334-original",
+            )
+            asyncio.run(
+                repository.ingest(
+                    "bbbreaking-235334-original-key",
+                    document,
+                    generate_signals=False,
+                )
+            )
+            stored = asyncio.run(
+                repository.list_news(source_id="telegram_bbbreaking", limit=10)
+            )[0]
+
+            response = isolated_client.post(
+                "/v1/admin/signals/reprocess",
+                json={"limit": 1, "news_ids": [stored.id]},
+                headers={"X-EventEdge-Admin-Key": "test-admin-key"},
+            )
+            signals = asyncio.run(
+                repository.list_signals(
+                    ticker=None,
+                    directions=None,
+                    status=None,
+                    min_confidence=None,
+                    limit=10,
+                )
+            )
+            updated = asyncio.run(
+                repository.list_news(source_id="telegram_bbbreaking", limit=10)
+            )[0]
+    finally:
+        app.state.news_repository = original_repository
+        app.state.evaluation_material_cache = None
+
+    assert response.status_code == 200
+    assert response.json()["meta"]["candidate_policy"] == "semantic-economic-0.3.0"
+    assert {signal.ticker for signal in signals} == {"RUAGRI", "RUTRANS"}
+    assert {signal.model_version for signal in signals} == {"signal-engine-0.5.0"}
+    assert updated.source_metadata["classification_status"] == "semantic_candidate"
+    assert updated.source_metadata["analysis_candidate"] is True
 
 
 def test_timer_event_dispatches_private_collector() -> None:
@@ -300,7 +364,7 @@ def test_signal_list_has_contract_shape_and_etag() -> None:
             "model_scope": "news_event",
             "final_assessment_endpoint": "/v1/assessments",
             "final_assessment_model_version": "hybrid-market-0.1.0",
-            "model_version": "news-baseline-0.4.0",
+            "model_version": "signal-engine-0.5.0",
         },
     }
     assert response.headers["ETag"].startswith('"')
@@ -366,7 +430,7 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
     assert signal.json()["data"]["ticker"] == "SBER"
     assert signal.json()["data"]["direction"] == "up"
     assert signal.json()["data"]["action"] == "consider_buy"
-    assert signal.json()["data"]["model_version"] == "news-baseline-0.4.0"
+    assert signal.json()["data"]["model_version"] == "signal-engine-0.5.0"
     assert len(signal.json()["data"]["factor_contributions"]) == 5
 
     listed = client.get("/v1/signals", params={"ticker": "SBER", "direction": "up"})
