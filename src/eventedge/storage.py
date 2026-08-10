@@ -12,10 +12,13 @@ from typing import Protocol
 import ydb
 
 from eventedge.analysis import (
+    InstrumentMention,
     NewsAnalysisInput,
     SemanticFeatures,
+    SignalAction,
     score_features,
 )
+from eventedge.events import classify_news_event, context_signal_specs, signal_target
 from eventedge.llm import NewsAnalyzer, RuleBasedNewsAnalyzer
 
 CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -93,6 +96,9 @@ class NewsRecord:
             else True
         )
         signal_candidate = bool(self.source_metadata.get("signal_candidate", False))
+        analysis_candidate = bool(
+            self.source_metadata.get("analysis_candidate", signal_candidate)
+        )
         classification_status = self.source_metadata.get("classification_status")
         if not isinstance(classification_status, str):
             classification_status = (
@@ -128,6 +134,7 @@ class NewsRecord:
                 "reason": classification_reason,
                 "event_candidate": event_candidate,
                 "signal_candidate": signal_candidate,
+                "analysis_candidate": analysis_candidate,
                 "classification_version": self.source_metadata.get(
                     "classification_version",
                     "legacy",
@@ -165,6 +172,7 @@ class SignalRecord:
         return {
             "id": self.id,
             "ticker": self.ticker,
+            "target": signal_target(self.ticker),
             "as_of": to_rfc3339(self.as_of),
             "data_cutoff_at": to_rfc3339(self.data_cutoff_at),
             "status": self.status,
@@ -336,6 +344,7 @@ def process_document(
     features: SemanticFeatures,
     *,
     now: datetime | None = None,
+    generate_signals: bool = True,
 ) -> ProcessedNews:
     created_at = now or utc_now()
     news_id = stable_id("news_", f"{document.source_id}\x00{document.external_id}")
@@ -352,6 +361,35 @@ def process_document(
         signal_features,
         source_id=document.source_id,
     )
+    if generate_signals and not signal_instruments:
+        projection = classify_news_event(
+            title=document.title,
+            content=document.content,
+            source_metadata=document.source_metadata,
+        )
+        context_instruments = [
+            InstrumentMention(ticker=code, relevance=1.0, matched_alias=label)
+            for code, label in context_signal_specs(projection)
+        ]
+        context_features = features.model_copy(update={"instruments": context_instruments})
+        baseline_signals = score_features(
+            context_features,
+            source_id=document.source_id,
+        )
+        baseline_signals = [
+            signal.model_copy(
+                update={
+                    "action": (
+                        SignalAction.RISK_ON
+                        if signal.direction.value == "up"
+                        else SignalAction.RISK_OFF
+                        if signal.direction.value == "down"
+                        else SignalAction.NO_ACTION
+                    )
+                }
+            )
+            for signal in baseline_signals
+        ]
     feature_set_id = stable_id(
         "feat_",
         f"{news_id}\x00{document.payload_hash}\x00{features.extractor_version}",
@@ -533,7 +571,12 @@ class MemoryNewsRepository:
                 document,
                 generate_signals=generate_signals,
             )
-            processed = process_document(document, features, now=now)
+            processed = process_document(
+                document,
+                features,
+                now=now,
+                generate_signals=generate_signals,
+            )
             result_ref = processed.signals[0].id if processed.signals else processed.feature_set_id
             job = Job(
                 id=stable_id("job_", idempotency_key),
@@ -721,7 +764,12 @@ class YdbNewsRepository:
             document,
             generate_signals=generate_signals,
         )
-        processed = process_document(document, features, now=now)
+        processed = process_document(
+            document,
+            features,
+            now=now,
+            generate_signals=generate_signals,
+        )
         result_ref = processed.signals[0].id if processed.signals else processed.feature_set_id
         job = Job(
             id=job_id,

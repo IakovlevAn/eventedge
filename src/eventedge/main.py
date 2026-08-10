@@ -26,6 +26,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from eventedge import __version__
 from eventedge.analysis import (
     CURRENT_NEWS_MODEL_VERSION,
+    DEFAULT_MOEX_ALIASES,
     NewsAnalysisInput,
     RuleBasedNewsExtractor,
 )
@@ -53,7 +54,7 @@ from eventedge.evals import (
     event_time_export_rows,
     outcome_export_rows,
 )
-from eventedge.events import classify_news_event, cluster_market_events
+from eventedge.events import classify_news_event, cluster_market_events, signal_target
 from eventedge.llm import analyzer_from_environment
 from eventedge.market import (
     InstrumentNotFoundError,
@@ -642,6 +643,7 @@ async def list_news(
             {
                 "id": signal.id,
                 "ticker": signal.ticker,
+                "target": signal_target(signal.ticker),
                 "direction": signal.direction,
                 "action": signal.action,
                 "score": signal.score,
@@ -735,6 +737,7 @@ async def list_market_events(
             {
                 "id": signal.id,
                 "ticker": signal.ticker,
+                "target": signal_target(signal.ticker),
                 "direction": signal.direction,
                 "score": signal.score,
                 "confidence": signal.confidence,
@@ -1348,7 +1351,9 @@ async def _load_evaluation_material(
         (
             signal
             for signal in deduplicate_eval_signals(deduplicate_signals(stored_signals))
-            if signal.news_id in news_by_id and signal.direction in {"up", "down"}
+            if signal.news_id in news_by_id
+            and signal.ticker in DEFAULT_MOEX_ALIASES
+            and signal.direction in {"up", "down"}
         ),
         news_by_id,
         preserve_model_epochs=True,

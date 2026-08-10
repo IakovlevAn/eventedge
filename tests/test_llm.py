@@ -72,7 +72,7 @@ def test_yandexgpt_extracts_semantics_but_keeps_ticker_deterministic() -> None:
     features = asyncio.run(analyzer.extract(document))
 
     assert [item.ticker for item in features.instruments] == ["SBER"]
-    assert features.extractor_version == "yandexgpt-lite-0.2.0"
+    assert features.extractor_version == "yandexgpt-lite-0.3.0"
     assert features.polarity == 0.86
     request = session.calls[0]
     assert request["url"] == "https://ai.api.cloud.yandex.net/v1/chat/completions"
@@ -83,8 +83,20 @@ def test_yandexgpt_extracts_semantics_but_keeps_ticker_deterministic() -> None:
     assert "action" not in json.dumps(payload)
 
 
-def test_yandexgpt_is_not_called_for_unrelated_news() -> None:
-    session = FakeSession("{}")
+def test_yandexgpt_analyzes_market_semantics_without_ticker() -> None:
+    session = FakeSession(
+        json.dumps(
+            {
+                "event_type": "government_support",
+                "facts": [],
+                "polarity": 0.7,
+                "materiality": 0.8,
+                "temporal_status": "future",
+                "rationale": "Господдержка позитивна для затронутой отрасли.",
+            },
+            ensure_ascii=False,
+        )
+    )
     analyzer = YandexGptNewsAnalyzer(
         folder_id="folder-id",
         session=session,  # type: ignore[arg-type]
@@ -95,14 +107,16 @@ def test_yandexgpt_is_not_called_for_unrelated_news() -> None:
         analyzer.extract(
             NewsAnalysisInput(
                 source_id="moex_news",
-                title="Биржа изменила параметры торгов",
-                content="Изменения вступают в силу в понедельник.",
+                title="Правительство расширит поддержку железнодорожных перевозок",
+                content="Субсидии направят на экспорт сельхозпродукции.",
             )
         )
     )
 
     assert features.instruments == []
-    assert session.calls == []
+    assert features.event_type.value == "government_support"
+    assert features.polarity > 0
+    assert len(session.calls) == 1
 
 
 def test_confident_llm_rule_polarity_conflict_is_neutralized() -> None:

@@ -77,9 +77,9 @@ class MetadataIamTokenProvider:
 
 
 class YandexGptNewsAnalyzer:
-    """Semantic extractor with deterministic ticker prefilter and safe rule fallback."""
+    """Target-neutral semantic extractor with a deterministic rule fallback."""
 
-    version = "yandexgpt-lite-0.2.0"
+    version = "yandexgpt-lite-0.3.0"
 
     def __init__(
         self,
@@ -104,8 +104,6 @@ class YandexGptNewsAnalyzer:
 
     async def extract(self, document: NewsAnalysisInput) -> SemanticFeatures:
         baseline = self._rules.extract(document)
-        if not baseline.instruments:
-            return baseline
         try:
             payload = await asyncio.to_thread(self._extract_sync, document, baseline)
         except Exception as error:  # the deterministic path must remain available
@@ -154,7 +152,7 @@ class YandexGptNewsAnalyzer:
         document: NewsAnalysisInput,
         baseline: SemanticFeatures,
     ) -> LlmSemanticPayload:
-        ticker_list = ", ".join(item.ticker for item in baseline.instruments)
+        ticker_list = ", ".join(item.ticker for item in baseline.instruments) or "нет"
         schema = LlmSemanticPayload.model_json_schema()
         response = self._session.post(
             CHAT_COMPLETIONS_URL,
@@ -182,8 +180,10 @@ class YandexGptNewsAnalyzer:
                             "финансовой новости на русском языке. Не прогнозируй цену, не "
                             "давай торговых рекомендаций и не добавляй факты, которых нет "
                             "в тексте. source_quote должен быть дословным коротким фрагментом. "
-                            "polarity: -1 негативно для акционера, 0 без направленного эффекта, "
-                            "+1 позитивно. materiality: 0..1 для краткосрочного движения."
+                            "polarity: -1 негативно, 0 без направленного эффекта, +1 позитивно "
+                            "для указанной компании, а если тикера нет — для затронутого "
+                            "российского рынка или отрасли. materiality: 0..1 для "
+                            "краткосрочного движения. Цель сигнала будет выбрана кодом."
                         ),
                     },
                     {

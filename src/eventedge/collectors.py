@@ -289,6 +289,7 @@ async def collect_news_items(
     matched = 0
     filtered = 0
     signal_candidates = 0
+    analysis_candidates = 0
     consecutive_replays = 0
 
     for item in items:
@@ -297,11 +298,14 @@ async def collect_news_items(
             matched += 1
         else:
             filtered += 1
-        generate_signals = event_candidate and (
+        direct_signal_candidate = event_candidate and (
             signal_filter(item) if signal_filter is not None else True
         )
-        if generate_signals:
+        if direct_signal_candidate:
             signal_candidates += 1
+        generate_signals = direct_signal_candidate or is_semantic_analysis_candidate(item)
+        if generate_signals:
+            analysis_candidates += 1
         features = RuleBasedNewsExtractor().extract(
             NewsAnalysisInput(
                 source_id=source_id,
@@ -317,7 +321,7 @@ async def collect_news_items(
         hash_metadata: dict[str, object] = {
             "collector": collector,
             "categories": list(item.categories),
-            "signal_candidate": generate_signals,
+            "signal_candidate": direct_signal_candidate,
             "tickers": [
                 instrument.ticker
                 for instrument in features.instruments
@@ -332,13 +336,17 @@ async def collect_news_items(
             hash_metadata["channel_url"] = source_url
         classification_status = (
             "signal_candidate"
+            if direct_signal_candidate
+            else "semantic_candidate"
             if generate_signals
             else "event_candidate"
             if event_candidate
             else "unclassified"
         )
         classification_reason = (
-            "eligible_for_signal_analysis"
+            "eligible_for_direct_signal_analysis"
+            if direct_signal_candidate
+            else "eligible_for_semantic_signal_analysis"
             if generate_signals
             else "stored_as_market_context"
             if event_candidate
@@ -349,8 +357,9 @@ async def collect_news_items(
             "processing_status": "processed",
             "classification_status": classification_status,
             "classification_reason": classification_reason,
-            "classification_version": "candidate-gate-0.2.0",
+            "classification_version": "candidate-gate-0.3.0",
             "event_candidate": event_candidate,
+            "analysis_candidate": generate_signals,
         }
         hash_payload = {
             "source_id": source_id,
@@ -398,6 +407,7 @@ async def collect_news_items(
         "matched": matched,
         "filtered": filtered,
         "signal_candidates": signal_candidates,
+        "analysis_candidates": analysis_candidates,
         "accepted": accepted,
         "replayed": replayed,
     }
@@ -705,6 +715,42 @@ def is_market_event_candidate(item: RssItem) -> bool:
     )
 
 
+SEMANTIC_EVENT_MARKERS = (
+    *MARKET_EVENT_MARKERS,
+    "правительств",
+    "господдерж",
+    "поддержк",
+    "субсиди",
+    "экспорт",
+    "импорт",
+    "пошлин",
+    "тариф",
+    "железнодорож",
+    "ж/д",
+    "перевоз",
+    "логистик",
+    "сельхоз",
+    "агропром",
+    "зерн",
+    "урожа",
+    "нефт",
+    "газ",
+    "курс рубл",
+    "инфляц",
+    "ключевая ставка",
+)
+
+
+def is_semantic_analysis_candidate(item: RssItem) -> bool:
+    """High-recall economic router; final target and signal remain downstream."""
+    normalized = f"{item.title} {item.content[:2500]}".casefold()
+    if any(marker in item.title.casefold() for marker in MARKET_NOISE_TITLE_MARKERS):
+        return False
+    return is_market_event_candidate(item) or any(
+        marker in normalized for marker in SEMANTIC_EVENT_MARKERS
+    )
+
+
 GOOGLE_TRUSTED_PUBLISHERS = (
     "бкс экспресс",
     "интерфакс",
@@ -784,6 +830,7 @@ def empty_collection_totals() -> dict[str, int]:
         "matched": 0,
         "filtered": 0,
         "signal_candidates": 0,
+        "analysis_candidates": 0,
         "accepted": 0,
         "replayed": 0,
         "failed": 0,

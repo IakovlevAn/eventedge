@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import pytest
 
 import eventedge.collectors as collectors_module
+from eventedge.analysis import RuleBasedNewsExtractor
 from eventedge.collectors import (
     RssFeedConfig,
     RssItem,
@@ -20,6 +21,7 @@ from eventedge.collectors import (
     is_market_event_candidate,
     is_market_signal_candidate,
     is_moex_equity_title,
+    is_semantic_analysis_candidate,
     is_watched_company_news,
     parse_rss,
     parse_telegram_channel,
@@ -133,11 +135,11 @@ def test_telegram_collection_is_idempotent_and_marks_source_metadata() -> None:
     assert metadata["channel_url"] == "https://t.me/s/AK47pfl"
 
 
-def test_telegram_gate_rejection_is_stored_for_future_reclassification() -> None:
+def test_sector_news_without_ticker_is_analyzed_and_stored() -> None:
     repository = MemoryNewsRepository()
     config = TelegramChannelConfig(source_id="telegram_bbbreaking", channel="bbbreaking")
 
-    async def scenario() -> tuple[dict[str, int], dict[str, object], int]:
+    async def scenario() -> tuple[dict[str, int], dict[str, object], list[dict[str, object]]]:
         result = await collect_telegram_channel(
             repository,
             config,
@@ -153,28 +155,33 @@ def test_telegram_gate_rejection_is_stored_for_future_reclassification() -> None
             min_confidence=None,
             limit=10,
         )
-        return result, news[0].as_api_dict(), len(signals)
+        return result, news[0].as_api_dict(), [signal.as_api_dict() for signal in signals]
 
-    result, stored, signal_count = asyncio.run(scenario())
+    result, stored, signals = asyncio.run(scenario())
 
     assert result == {
         "fetched": 1,
-        "matched": 0,
-        "filtered": 1,
+        "matched": 1,
+        "filtered": 0,
         "signal_candidates": 0,
+        "analysis_candidates": 1,
         "accepted": 1,
         "replayed": 0,
     }
     assert stored["external_id"] == "bbbreaking/235334"
     assert stored["processing"] == {
         "status": "processed",
-        "classification": "unclassified",
-        "reason": "stored_for_future_reclassification",
-        "event_candidate": False,
+        "classification": "semantic_candidate",
+        "reason": "eligible_for_semantic_signal_analysis",
+        "event_candidate": True,
         "signal_candidate": False,
-        "classification_version": "candidate-gate-0.2.0",
+        "analysis_candidate": True,
+        "classification_version": "candidate-gate-0.3.0",
     }
-    assert signal_count == 0
+    assert {signal["ticker"] for signal in signals} == {"RUAGRI", "RUTRANS"}
+    assert {signal["target"]["type"] for signal in signals} == {"sector"}
+    assert {signal["direction"] for signal in signals} == {"up"}
+    assert {signal["action"] for signal in signals} == {"risk_on"}
 
 
 def test_rss_collection_is_idempotent() -> None:
@@ -199,6 +206,7 @@ def test_rss_collection_is_idempotent() -> None:
         "matched": 2,
         "filtered": 0,
         "signal_candidates": 2,
+        "analysis_candidates": 2,
         "accepted": 2,
         "replayed": 0,
     }
@@ -207,6 +215,7 @@ def test_rss_collection_is_idempotent() -> None:
         "matched": 2,
         "filtered": 0,
         "signal_candidates": 2,
+        "analysis_candidates": 2,
         "accepted": 0,
         "replayed": 2,
     }
@@ -238,18 +247,23 @@ def test_minute_collector_stops_after_known_head_items() -> None:
         "matched": 1,
         "filtered": 0,
         "signal_candidates": 1,
+        "analysis_candidates": 1,
         "accepted": 0,
         "replayed": 1,
     }
     assert received_at > published_at
 
 
-def test_broad_news_is_stored_without_calling_signal_analyzer() -> None:
-    class FailAnalyzer:
-        async def extract(self, document: object) -> object:
-            raise AssertionError("Broad news must not call the configured LLM analyzer")
+def test_broad_economic_news_is_sent_to_semantic_analyzer() -> None:
+    class CountingAnalyzer:
+        calls = 0
 
-    repository = MemoryNewsRepository(analyzer=FailAnalyzer())  # type: ignore[arg-type]
+        async def extract(self, document: object) -> object:
+            self.calls += 1
+            return RuleBasedNewsExtractor().extract(document)  # type: ignore[arg-type]
+
+    analyzer = CountingAnalyzer()
+    repository = MemoryNewsRepository(analyzer=analyzer)  # type: ignore[arg-type]
     config = RssFeedConfig(source_id="interfax", url="https://example.com/feed")
 
     async def scenario() -> tuple[dict[str, int], int, int]:
@@ -274,8 +288,23 @@ def test_broad_news_is_stored_without_calling_signal_analyzer() -> None:
 
     assert result["accepted"] == 2
     assert result["signal_candidates"] == 0
+    assert result["analysis_candidates"] == 2
+    assert analyzer.calls == 2
     assert news_count == 2
-    assert signal_count == 0
+    assert signal_count == 2
+
+
+def test_semantic_router_rejects_unrelated_post() -> None:
+    item = RssItem(
+        external_id="misc-1",
+        published_at=datetime(2026, 8, 10, tzinfo=UTC),
+        title="Городской фестиваль открылся в парке",
+        url="https://example.com/misc-1",
+        content="Посетителей ждут музыка и выставки.",
+        categories=(),
+    )
+
+    assert is_semantic_analysis_candidate(item) is False
 
 
 def test_moex_equity_filter_rejects_mechanical_listing_notice() -> None:
@@ -440,6 +469,7 @@ def test_composite_collector_isolates_a_failed_feed(
         "matched": 12,
         "filtered": 0,
         "signal_candidates": 0,
+        "analysis_candidates": 0,
         "accepted": 12,
         "replayed": 0,
         "failed": 7,
@@ -500,6 +530,7 @@ def test_fast_collector_uses_only_direct_feeds_and_isolates_failures(
         "matched": 9,
         "filtered": 0,
         "signal_candidates": 0,
+        "analysis_candidates": 0,
         "accepted": 9,
         "replayed": 0,
         "failed": 1,
