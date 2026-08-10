@@ -5,12 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 import ydb
-from ydb.query.base import QueryExecMode
 
 from eventedge.storage import (
     SCHEMA_STATEMENTS,
     SCHEMA_TABLE_NAMES,
-    VALIDATED_QUERIES,
     EvaluationEpochRecord,
     MemoryNewsRepository,
     NewsDocument,
@@ -376,11 +374,7 @@ def test_ydb_runtime_is_created_inside_running_event_loop(
         async def execute_with_retries(
             self, statement: str, **kwargs: object
         ) -> list[object]:
-            if kwargs:
-                assert kwargs == {"exec_mode": QueryExecMode.EXPLAIN}
-                events.append("explain")
-            else:
-                events.append("schema")
+            events.append("query")
             return []
 
         async def stop(self) -> None:
@@ -406,7 +400,6 @@ def test_ydb_runtime_is_created_inside_running_event_loop(
         "driver.init",
         "driver.wait:15:True",
         "pool.init:2",
-        *("explain" for _ in VALIDATED_QUERIES),
         "pool.stop",
         "driver.stop:5",
     ]
