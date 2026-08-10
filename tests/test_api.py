@@ -176,6 +176,7 @@ def test_admin_reprocesses_one_explicit_stored_candidate(
                 json={"limit": 1, "news_ids": [stored.id]},
                 headers={"X-EventEdge-Admin-Key": "test-admin-key"},
             )
+            updated = asyncio.run(repository.list_news(source_id="interfax", limit=10))[0]
     finally:
         app.state.news_repository = original_repository
         app.state.evaluation_material_cache = None
@@ -186,6 +187,7 @@ def test_admin_reprocesses_one_explicit_stored_candidate(
     assert response.json()["meta"]["model_version"] == "news-baseline-0.3.0"
     assert response.json()["data"][0]["news_id"] == stored.id
     assert response.json()["data"][0]["result_ref"].startswith("sig_")
+    assert updated.source_metadata["reprocess_version"] == "news-baseline-0.3.0"
 
 
 def test_timer_event_dispatches_private_collector() -> None:
