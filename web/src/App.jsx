@@ -30,7 +30,7 @@ import {
   Terminal,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "");
 const apiUrl = (path) => `${API_BASE}${path}`;
@@ -650,6 +650,69 @@ function Direction({ direction, label = null }) {
       <Icon size={13} strokeWidth={2.2} />
       {label || meta.label}
     </span>
+  );
+}
+
+function FilterSelect({ label, value, options, onChange }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  const selected = options.find((option) => option.value === value) || options[0];
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOutside = (event) => {
+      if (!rootRef.current?.contains(event.target)) setOpen(false);
+    };
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  return (
+    <div className={`event-filter-select ${open ? "is-open" : ""}`} ref={rootRef}>
+      <button
+        type="button"
+        className="event-filter-select__trigger"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={`${label}: ${selected?.label || ""}`}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            setOpen(true);
+          }
+        }}
+      >
+        <span>{label}</span>
+        <strong title={selected?.label}>{selected?.label}</strong>
+        <ChevronDown size={13} />
+      </button>
+      {open && <div className="event-filter-select__menu" role="listbox" aria-label={label}>
+        {options.map((option) => (
+          <button
+            type="button"
+            role="option"
+            aria-selected={option.value === value}
+            className={option.value === value ? "is-selected" : ""}
+            key={option.value}
+            onClick={() => {
+              onChange(option.value);
+              setOpen(false);
+            }}
+          >
+            <span>{option.label}</span>
+            {option.value === value && <Check size={12} />}
+          </button>
+        ))}
+      </div>}
+    </div>
   );
 }
 
@@ -1433,12 +1496,12 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
 
       <section className="news-controlbar">
         <div className="event-selects event-selects--news">
-          <label><span>Компания</span><select value={ticker} onChange={(event) => setTicker(event.target.value)}><option value="all">Все бумаги</option>{companies.map((item) => <option value={item.ticker} key={item.ticker}>{item.ticker} · {item.company}</option>)}</select><ChevronDown size={13} /></label>
-          <label><span>Источник</span><select value={sourceId} onChange={(event) => setSourceId(event.target.value)}><option value="all">Все источники</option>{sources.map(([id, name]) => <option value={id} key={id}>{name}</option>)}</select><ChevronDown size={13} /></label>
-          <label><span>Период</span><select value={period} onChange={(event) => setPeriod(event.target.value)}><option value="1d">24 часа</option><option value="3d">3 дня</option><option value="7d">7 дней</option><option value="30d">30 дней</option><option value="all">Всё время</option></select><ChevronDown size={13} /></label>
-          <label><span>Сигнал</span><select value={signalState} onChange={(event) => setSignalState(event.target.value)}><option value="all">Все</option><option value="signal">Есть сигнал</option><option value="context">Только контекст</option></select><ChevronDown size={13} /></label>
-          <label><span>Направление</span><select value={direction} onChange={(event) => setDirection(event.target.value)}><option value="all">Любое</option><option value="up">Вверх</option><option value="neutral">Нейтрально</option><option value="down">Вниз</option></select><ChevronDown size={13} /></label>
-          <label><span>Сортировка</span><select value={sortMode} onChange={(event) => setSortMode(event.target.value)}><option value="newest">Сначала новые</option><option value="impact">Сначала весомые</option></select><ChevronDown size={13} /></label>
+          <FilterSelect label="Компания" value={ticker} onChange={setTicker} options={[{ value: "all", label: "Все бумаги" }, ...companies.map((item) => ({ value: item.ticker, label: `${item.ticker} · ${item.company}` }))]} />
+          <FilterSelect label="Источник" value={sourceId} onChange={setSourceId} options={[{ value: "all", label: "Все источники" }, ...sources.map(([id, name]) => ({ value: id, label: name }))]} />
+          <FilterSelect label="Период" value={period} onChange={setPeriod} options={[{ value: "1d", label: "24 часа" }, { value: "3d", label: "3 дня" }, { value: "7d", label: "7 дней" }, { value: "30d", label: "30 дней" }, { value: "all", label: "Всё время" }]} />
+          <FilterSelect label="Сигнал" value={signalState} onChange={setSignalState} options={[{ value: "all", label: "Все" }, { value: "signal", label: "Есть сигнал" }, { value: "context", label: "Только контекст" }]} />
+          <FilterSelect label="Направление" value={direction} onChange={setDirection} options={[{ value: "all", label: "Любое" }, { value: "up", label: "Вверх" }, { value: "neutral", label: "Нейтрально" }, { value: "down", label: "Вниз" }]} />
+          <FilterSelect label="Сортировка" value={sortMode} onChange={setSortMode} options={[{ value: "newest", label: "Сначала новые" }, { value: "impact", label: "Сначала весомые" }]} />
           {activeFilterCount > 0 && <button type="button" className="signal-filter is-active" onClick={resetFilters}><X size={13} /> Сбросить · {activeFilterCount}</button>}
         </div>
       </section>
