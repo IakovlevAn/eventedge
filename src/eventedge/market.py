@@ -18,6 +18,22 @@ DEFAULT_TIMEOUT_SECONDS = 10.0
 MAX_DAILY_CANDLES = 66
 MAX_INTRADAY_CANDLES = 1500
 
+# Context signals use product codes rather than exchange tickers. Evals measure
+# them against explicit MOEX index proxies instead of silently dropping them.
+EVALUATION_INDEX_BENCHMARKS: dict[str, str] = {
+    "RUEQ": "IMOEX",
+    "RURETAIL": "MOEXCN",
+    "RUFIN": "MOEXFN",
+    "RUOILGAS": "MOEXOG",
+    "RUMETALS": "MOEXMM",
+    "RUTECH": "MOEXINN",
+    # MOEX has no dedicated agriculture index. Use the broad equity index as
+    # an explicit fallback until EventEdge maintains its own sector basket.
+    "RUAGRI": "IMOEX",
+    "RUTRANS": "MOEXTN",
+    "RUPOWER": "MOEXEU",
+}
+
 
 class InstrumentNotFoundError(LookupError):
     pass
@@ -160,12 +176,19 @@ class MoexMarketDataClient:
         interval: int,
         lookback_days: int,
     ) -> dict[str, object]:
-        encoded_ticker = quote(ticker, safe="")
+        benchmark_ticker = EVALUATION_INDEX_BENCHMARKS.get(ticker, ticker)
+        encoded_ticker = quote(benchmark_ticker, safe="")
         from_date = (datetime.now(UTC) - timedelta(days=lookback_days)).date().isoformat()
-        candles_url = (
-            f"{MOEX_ISS_BASE_URL}/engines/stock/markets/shares/boards/TQBR/"
-            f"securities/{encoded_ticker}/candles.json"
-        )
+        if ticker in EVALUATION_INDEX_BENCHMARKS:
+            candles_url = (
+                f"{MOEX_ISS_BASE_URL}/engines/stock/markets/index/boards/SNDX/"
+                f"securities/{encoded_ticker}/candles.json"
+            )
+        else:
+            candles_url = (
+                f"{MOEX_ISS_BASE_URL}/engines/stock/markets/shares/boards/TQBR/"
+                f"securities/{encoded_ticker}/candles.json"
+            )
         rows: list[dict[str, Any]] = []
         page_size = 500
         for start in range(0, 1500, page_size):
@@ -201,6 +224,7 @@ class MoexMarketDataClient:
             raise MarketDataUnavailableError("MOEX ISS returned no intraday candles")
         return {
             "ticker": ticker,
+            "benchmark_ticker": benchmark_ticker,
             "interval_minutes": interval,
             "candles": candles,
             "observed_at": candles[-1]["begin"],

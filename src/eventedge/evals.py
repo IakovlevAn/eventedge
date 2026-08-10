@@ -764,6 +764,11 @@ def outcome_export_rows(outcomes: list[dict[str, object]]) -> list[dict[str, obj
     for item in outcomes:
         entry = item.get("entry") if isinstance(item.get("entry"), dict) else {}
         news = item.get("news") if isinstance(item.get("news"), dict) else {}
+        benchmark = (
+            item.get("evaluation_benchmark")
+            if isinstance(item.get("evaluation_benchmark"), dict)
+            else {}
+        )
         rows.append(
             {
                 "signal_id": item["signal_id"],
@@ -774,6 +779,7 @@ def outcome_export_rows(outcomes: list[dict[str, object]]) -> list[dict[str, obj
                 "confidence": item["confidence"],
                 "model_version": item["model_version"],
                 "config_version": item.get("config_version"),
+                "evaluation_benchmark": benchmark.get("ticker"),
                 "status": item["status"],
                 "news_id": news.get("id"),
                 "news_source_id": news.get("source_id"),

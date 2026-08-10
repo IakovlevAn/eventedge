@@ -59,6 +59,7 @@ from eventedge.evals import (
 from eventedge.events import classify_news_event, cluster_market_events, signal_target
 from eventedge.llm import analyzer_from_environment
 from eventedge.market import (
+    EVALUATION_INDEX_BENCHMARKS,
     InstrumentNotFoundError,
     MarketDataUnavailableError,
     MoexMarketDataClient,
@@ -1436,7 +1437,10 @@ async def _load_evaluation_material(
             signal
             for signal in deduplicate_eval_signals(deduplicate_signals(stored_signals))
             if signal.news_id in news_by_id
-            and signal.ticker in DEFAULT_MOEX_ALIASES
+            and (
+                signal.ticker in DEFAULT_MOEX_ALIASES
+                or signal.ticker in EVALUATION_INDEX_BENCHMARKS
+            )
             and signal.direction in {"up", "down"}
         ),
         news_by_id,
@@ -1462,15 +1466,24 @@ async def _load_evaluation_material(
         for ticker, result in zip(tickers, candle_results, strict=True)
         if isinstance(result, dict)
     }
-    outcomes = [
-        complete_outcomes.get(signal.id)
-        or evaluate_signal(
+    outcomes = []
+    for signal in signals:
+        outcome = complete_outcomes.get(signal.id) or evaluate_signal(
             signal,
             candles_by_ticker.get(signal.ticker, []),
             news_by_id.get(signal.news_id),
         )
-        for signal in signals
-    ]
+        benchmark_ticker = EVALUATION_INDEX_BENCHMARKS.get(signal.ticker)
+        if benchmark_ticker:
+            outcome = {
+                **outcome,
+                "evaluation_benchmark": {
+                    "ticker": benchmark_ticker,
+                    "source": "MOEX ISS",
+                    "kind": "index",
+                },
+            }
+        outcomes.append(outcome)
     generated_at = datetime.now(UTC)
     epoch_records = []
     for model_version, config_version in sorted(
@@ -1500,6 +1513,15 @@ async def _load_evaluation_material(
             candles_by_ticker,
             news_by_id,
         )
+        fresh_observations = [
+            {
+                **row,
+                "evaluation_benchmark": EVALUATION_INDEX_BENCHMARKS.get(
+                    str(row.get("ticker", ""))
+                ),
+            }
+            for row in fresh_observations
+        ]
         observations, observations_truncated = _merge_eval_observations(
             preserved_observations,
             fresh_observations,
@@ -1709,6 +1731,7 @@ async def export_evals(
             "confidence",
             "model_version",
             "config_version",
+            "evaluation_benchmark",
             "news_id",
             "news_source_id",
             "entry_at",
@@ -1739,6 +1762,7 @@ async def export_evals(
             "confidence",
             "model_version",
             "config_version",
+            "evaluation_benchmark",
             "status",
             "news_id",
             "news_source_id",

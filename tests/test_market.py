@@ -126,6 +126,31 @@ def test_intraday_candles_keep_moscow_time_and_interval() -> None:
     assert result["candles"][-1]["close"] == 100.5
 
 
+def test_context_signal_candles_use_moex_index_benchmark() -> None:
+    captured: dict[str, object] = {}
+
+    def index_request(url: str, params: dict[str, object]) -> dict[str, Any]:
+        captured["url"] = url
+        return {
+            "candles": {
+                "columns": ["begin", "open", "close", "high", "low", "value", "volume"],
+                "data": [
+                    ["2026-08-10 10:00:00", 6000, 6010, 6020, 5990, 0, 0],
+                ],
+            }
+        }
+
+    client = MoexMarketDataClient(requester=index_request)
+    result = asyncio.run(client.candles("RUOILGAS", interval=10, lookback_days=14))
+
+    assert captured["url"] == (
+        "https://iss.moex.com/iss/engines/stock/markets/index/boards/SNDX/"
+        "securities/MOEXOG/candles.json"
+    )
+    assert result["ticker"] == "RUOILGAS"
+    assert result["benchmark_ticker"] == "MOEXOG"
+
+
 def test_intraday_candles_keep_full_eval_window_across_pages() -> None:
     starts: list[int] = []
     first_candle = datetime(2026, 7, 27, 10)
