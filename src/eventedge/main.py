@@ -520,7 +520,7 @@ async def readiness(request: Request) -> Response:
 async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONResponse:
     repository: NewsRepository = request.app.state.news_repository
     collectors = request.app.state.collectors
-    results: dict[str, dict[str, int]] = {}
+    results: dict[str, dict[str, object]] = {}
     for collector_name in dict.fromkeys(message.details.payload for message in envelope.messages):
         if collector_name == "maintenance":
             reprocess = await reprocess_signal_candidates_batch(
@@ -537,6 +537,7 @@ async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONRespons
             results[collector_name] = {
                 "reprocessed": int(reprocess_meta["completed"]),
                 "failed": int(reprocess_meta.get("failed", 0)),
+                "failure_types": list(reprocess_meta.get("failure_types", [])),
                 "remaining": int(reprocess_meta["remaining_candidates"]),
                 "outcomes": len(outcomes),
                 "epochs": len(epochs),
@@ -1058,6 +1059,13 @@ async def reprocess_signal_candidates_batch(
     )
     completed = [result for result in results if isinstance(result, dict)]
     failed = [type(result).__name__ for result in results if isinstance(result, BaseException)]
+    for (item, _), result in zip(selected, results, strict=True):
+        if isinstance(result, BaseException):
+            logger.warning(
+                "Signal reprocess failed news_id=%s error=%s",
+                item.id,
+                type(result).__name__,
+            )
     return {
         "data": completed,
         "meta": {
