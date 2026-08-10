@@ -31,9 +31,8 @@ def build_payload(
         "YANDEX_GPT_ENABLED": "true",
         "YANDEX_GPT_FOLDER_ID": environment["YC_FOLDER_ID"],
         "YANDEX_GPT_MODEL": "yandexgpt-lite",
-        # Production measurements show that 16 items fit the platform's
-        # request window; larger batches are cancelled after the 16th item.
-        "BACKFILL_BATCH_LIMIT": "16",
+        # Eight items also fit the platform request window after a cold start.
+        "BACKFILL_BATCH_LIMIT": "8",
         "BACKFILL_CONCURRENCY": "4",
         "EVENTEDGE_MONTHLY_BUDGET_RUB": "15000",
     }

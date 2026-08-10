@@ -247,7 +247,7 @@ def test_backfill_reclassifies_stored_sector_news_without_ticker(
         app.state.evaluation_material_cache = None
 
     assert response.status_code == 200
-    assert response.json()["meta"]["candidate_policy"] == "semantic-economic-0.4.0"
+    assert response.json()["meta"]["candidate_policy"] == "targetable-economic-0.4.1"
     assert {signal.ticker for signal in signals} == {"RUAGRI", "RUTRANS"}
     assert {signal.model_version for signal in signals} == {"signal-engine-0.6.1"}
     assert updated.source_metadata["classification_status"] == "semantic_candidate"

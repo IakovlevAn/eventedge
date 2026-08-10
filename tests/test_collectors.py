@@ -22,6 +22,7 @@ from eventedge.collectors import (
     is_market_signal_candidate,
     is_moex_equity_title,
     is_semantic_analysis_candidate,
+    is_signal_analysis_candidate,
     is_watched_company_news,
     parse_rss,
     parse_telegram_channel,
@@ -320,6 +321,49 @@ def test_semantic_router_rejects_sports_story_with_market_words() -> None:
 
     assert is_market_event_candidate(item) is False
     assert is_semantic_analysis_candidate(item) is False
+
+
+@pytest.mark.parametrize(
+    ("title", "content"),
+    [
+        (
+            "Путин призвал расширить субсидии регионам на оснащение остановок",
+            "Мера касается остановок в отдельных регионах.",
+        ),
+        (
+            "Аэропорт Омска отменил один рейс и задержал еще несколько",
+            "Об ограничениях сообщила транспортная прокуратура.",
+        ),
+    ],
+)
+def test_signal_router_keeps_local_context_out_of_llm(
+    title: str,
+    content: str,
+) -> None:
+    item = RssItem(
+        external_id="local-context",
+        published_at=datetime(2026, 8, 10, tzinfo=UTC),
+        title=title,
+        url="https://example.com/local-context",
+        content=content,
+        categories=("Экономика и бизнес",),
+    )
+
+    assert is_semantic_analysis_candidate(item) is True
+    assert is_signal_analysis_candidate(item) is False
+
+
+def test_signal_router_keeps_key_rate_for_llm() -> None:
+    item = RssItem(
+        external_id="key-rate",
+        published_at=datetime(2026, 8, 10, tzinfo=UTC),
+        title="Банк России изменил ключевую ставку",
+        url="https://example.com/key-rate",
+        content="Решение меняет денежно-кредитные условия для всего рынка.",
+        categories=("Экономика и бизнес",),
+    )
+
+    assert is_signal_analysis_candidate(item) is True
 
 
 @pytest.mark.parametrize(

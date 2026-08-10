@@ -13,6 +13,7 @@ from eventedge.collectors import (
     is_google_market_signal_candidate,
     is_market_signal_candidate,
     is_semantic_analysis_candidate,
+    is_signal_analysis_candidate,
 )
 
 STOP_WORDS = {
@@ -76,12 +77,14 @@ def audit(news_payload: dict[str, object], eval_payload: dict[str, object]) -> d
     news_by_id = {str(item["id"]): item for item in news if isinstance(item, dict)}
     new_candidates = []
     semantic_candidates = []
+    targetable_candidates = []
     old_candidates = []
     old_signaled = []
     rejected_old_signaled = []
     lags = []
     by_source: Counter[str] = Counter()
     semantic_by_source: Counter[str] = Counter()
+    targetable_by_source: Counter[str] = Counter()
     newly_by_source: Counter[str] = Counter()
     old_signal_directions: Counter[str] = Counter()
 
@@ -130,6 +133,9 @@ def audit(news_payload: dict[str, object], eval_payload: dict[str, object]) -> d
             semantic_by_source[source_id] += 1
         elif isinstance(related, list) and related:
             rejected_old_signaled.append(item)
+        if is_signal_analysis_candidate(rss_item):
+            targetable_candidates.append(item)
+            targetable_by_source[source_id] += 1
 
     eval_data = eval_payload.get("data", {})
     eval_data = eval_data if isinstance(eval_data, dict) else {}
@@ -175,6 +181,10 @@ def audit(news_payload: dict[str, object], eval_payload: dict[str, object]) -> d
             "current_semantic_candidates": len(semantic_candidates),
             "current_semantic_candidate_by_source": dict(
                 semantic_by_source.most_common()
+            ),
+            "current_targetable_candidates": len(targetable_candidates),
+            "current_targetable_candidate_by_source": dict(
+                targetable_by_source.most_common()
             ),
             "old_signaled_rejected_by_current_gate": len(rejected_old_signaled),
             "newly_eligible": len(new_candidates) - len(
