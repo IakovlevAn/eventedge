@@ -1030,8 +1030,12 @@ async def reprocess_signal_candidates_batch(
             "source_metadata": metadata,
             "reprocess_version": CURRENT_NEWS_MODEL_VERSION,
         }
+        payload_hash = canonical_payload_hash(hash_payload)
         result = await repository.ingest(
-            f"reprocess:v3:{item.id}:{CURRENT_NEWS_MODEL_VERSION}",
+            (
+                f"reprocess:v4:{item.id}:{CURRENT_NEWS_MODEL_VERSION}:"
+                f"{payload_hash[:16]}"
+            ),
             NewsDocument(
                 source_id=item.source_id,
                 external_id=item.external_id,
@@ -1042,7 +1046,7 @@ async def reprocess_signal_candidates_batch(
                 content=item.content,
                 language=item.language,
                 source_metadata=metadata,
-                payload_hash=canonical_payload_hash(hash_payload),
+                payload_hash=payload_hash,
             ),
             generate_signals=True,
         )
