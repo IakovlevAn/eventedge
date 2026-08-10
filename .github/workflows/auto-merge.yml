@@ -15,7 +15,8 @@ jobs:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'pull_request' &&
-      startsWith(github.event.workflow_run.head_branch, 'agent/')
+      (startsWith(github.event.workflow_run.head_branch, 'agent/') ||
+       startsWith(github.event.workflow_run.head_branch, 'codex/'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -46,8 +47,12 @@ jobs:
             echo "PR head changed after this CI run; a newer run must pass"
             exit 0
           fi
-          if [[ "$head_ref" != agent/* || "$head_repo" != "$REPOSITORY" || "$base_ref" != "main" ]]; then
-            echo "PR is outside the trusted agent/* -> main policy; skipping"
+          if [[ "$head_ref" != agent/* && "$head_ref" != codex/* ]]; then
+            echo "PR is outside the trusted agent/* or codex/* policy; skipping"
+            exit 0
+          fi
+          if [[ "$head_repo" != "$REPOSITORY" || "$base_ref" != "main" ]]; then
+            echo "PR is outside the trusted same-repository -> main policy; skipping"
             exit 0
           fi
           if [[ "$draft" == "true" || "$blocked" == "true" ]]; then
