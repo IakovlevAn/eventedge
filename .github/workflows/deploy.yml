@@ -112,6 +112,7 @@ jobs:
       - name: Deploy news collection triggers
         env:
           IAM_TOKEN: ${{ steps.yandex-iam.outputs.token }}
+          PYTHONPATH: src
         run: python -m scripts.deploy_triggers
 
       - name: Deploy API Gateway specification
