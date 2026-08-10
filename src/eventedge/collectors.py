@@ -20,7 +20,11 @@ from eventedge.configs.sources import (
 from eventedge.configs.sources import (
     google_news_search_url as configured_google_news_search_url,
 )
-from eventedge.events import is_broad_market_event_text
+from eventedge.events import (
+    classify_news_event,
+    context_signal_specs,
+    is_broad_market_event_text,
+)
 from eventedge.storage import (
     NewsDocument,
     NewsRepository,
@@ -303,7 +307,7 @@ async def collect_news_items(
         )
         if direct_signal_candidate:
             signal_candidates += 1
-        generate_signals = direct_signal_candidate or is_semantic_analysis_candidate(item)
+        generate_signals = direct_signal_candidate or is_signal_analysis_candidate(item)
         if generate_signals:
             analysis_candidates += 1
         features = RuleBasedNewsExtractor().extract(
@@ -779,6 +783,26 @@ def is_semantic_analysis_candidate(item: RssItem) -> bool:
         return False
     return is_market_event_candidate(item) or any(
         marker in normalized for marker in SEMANTIC_EVENT_MARKERS
+    )
+
+
+def is_signal_analysis_candidate(item: RssItem) -> bool:
+    """Route only targetable company or material context events to the LLM."""
+    if not is_semantic_analysis_candidate(item):
+        return False
+    if is_market_signal_candidate(item):
+        return True
+    projection = classify_news_event(
+        title=item.title,
+        content=item.content,
+        source_metadata={},
+    )
+    return bool(
+        context_signal_specs(
+            projection,
+            title=item.title,
+            content=item.content,
+        )
     )
 
 

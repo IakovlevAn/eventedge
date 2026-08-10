@@ -40,7 +40,7 @@ from eventedge.collectors import (
     is_market_event_candidate,
     is_market_signal_candidate,
     is_moex_equity_title,
-    is_semantic_analysis_candidate,
+    is_signal_analysis_candidate,
 )
 from eventedge.configs.collection import load_collection_config
 from eventedge.evals import (
@@ -95,7 +95,7 @@ NEWS_COLLECTION_INTERVAL_SECONDS = next(
 NEWS_CLIENT_REFRESH_INTERVAL_SECONDS = 30
 NEWS_DELIVERY_TARGET_SECONDS = 120
 EVALUATION_CACHE_TTL_SECONDS = 60
-BACKFILL_BATCH_LIMIT = min(40, max(1, int(os.environ.get("BACKFILL_BATCH_LIMIT", "16"))))
+BACKFILL_BATCH_LIMIT = min(40, max(1, int(os.environ.get("BACKFILL_BATCH_LIMIT", "8"))))
 BACKFILL_CONCURRENCY = min(4, max(1, int(os.environ.get("BACKFILL_CONCURRENCY", "4"))))
 CONTENT_SNAPSHOT_TTL_SECONDS = 60 if os.environ.get("APP_ENV") == "prod" else 0
 RECENT_REPOSITORY_SUCCESS_TTL_SECONDS = 120 if os.environ.get("APP_ENV") == "prod" else 0
@@ -965,7 +965,7 @@ async def reprocess_signal_candidates_batch(
             if isinstance(categories, list | tuple)
             else (),
         )
-        if is_semantic_analysis_candidate(candidate):
+        if is_signal_analysis_candidate(candidate):
             candidates.append((item, candidate))
 
     selected = candidates[:limit]
@@ -1077,7 +1077,7 @@ async def reprocess_signal_candidates_batch(
             "model_version": CURRENT_NEWS_MODEL_VERSION,
             "batch_limit": limit,
             "concurrency": min(max(concurrency, 1), 4),
-            "candidate_policy": "semantic-economic-0.4.0",
+            "candidate_policy": "targetable-economic-0.4.1",
         },
     }
 

@@ -45,5 +45,5 @@ notes:
   - News collection and LLM analysis run in a separate non-provisioned worker so timer jobs cannot block the public API.
   - The pay-per-use worker processes one timer job at a time so collection waves cannot compete for YDB sessions.
   - At 12500 RUB, freeze resource increases and review the current-month forecast.
-  - Historical reprocessing is capped at 16 candidates per five-minute maintenance run and 4 parallel LLM calls so one batch fits the serverless request window without cancellation.
+  - Historical reprocessing is capped at 8 targetable candidates per five-minute maintenance run and 4 parallel LLM calls so even a cold batch fits the serverless request window without cancellation.
   - Automatic shutdown requires a separate explicitly approved runbook or trigger.
