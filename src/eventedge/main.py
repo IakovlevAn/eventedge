@@ -898,7 +898,11 @@ async def reprocess_signal_candidates(
     for item in public_news(stored_news):
         if payload.news_ids and item.id not in payload.news_ids:
             continue
-        if item.id in current_news_ids or item.source_id in {"cbr_press", "market_background"}:
+        if (
+            item.id in current_news_ids
+            or item.source_metadata.get("reprocess_version") == CURRENT_NEWS_MODEL_VERSION
+            or item.source_id in {"cbr_press", "market_background"}
+        ):
             continue
         categories = item.source_metadata.get("categories", [])
         candidate = RssItem(
@@ -930,6 +934,7 @@ async def reprocess_signal_candidates(
             {
                 "signal_candidate": True,
                 "classification_version": "candidate-gate-0.2.0",
+                "reprocess_version": CURRENT_NEWS_MODEL_VERSION,
                 "tickers": [
                     instrument.ticker
                     for instrument in features.instruments
@@ -949,7 +954,7 @@ async def reprocess_signal_candidates(
             "reprocess_version": CURRENT_NEWS_MODEL_VERSION,
         }
         result = await repository.ingest(
-            f"reprocess:{item.id}:{CURRENT_NEWS_MODEL_VERSION}",
+            f"reprocess:v2:{item.id}:{CURRENT_NEWS_MODEL_VERSION}",
             NewsDocument(
                 source_id=item.source_id,
                 external_id=item.external_id,
