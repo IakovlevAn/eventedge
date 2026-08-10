@@ -10,7 +10,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 import ydb
-from ydb.query.base import QueryExecMode
 
 from eventedge.analysis import (
     NewsAnalysisInput,
@@ -620,11 +619,6 @@ class YdbNewsRepository:
             self._driver = ydb.aio.Driver(config)
             await self._driver.wait(timeout=15, fail_fast=True)
             self._pool = ydb.aio.QuerySessionPool(self._driver, size=2)
-            for query in VALIDATED_QUERIES:
-                await self._pool.execute_with_retries(
-                    query,
-                    exec_mode=QueryExecMode.EXPLAIN,
-                )
         except (Exception, asyncio.CancelledError):
             await self._close()
             raise
