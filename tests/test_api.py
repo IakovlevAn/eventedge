@@ -11,7 +11,13 @@ from fastapi.testclient import TestClient
 
 import eventedge.main as main_module
 from eventedge.main import app
-from eventedge.storage import EvaluationEpochRecord, MemoryNewsRepository, NewsDocument
+from eventedge.storage import (
+    EvaluationEpochRecord,
+    MemoryNewsRepository,
+    NewsDocument,
+    NewsRecord,
+    SignalRecord,
+)
 
 client = TestClient(app)
 
@@ -952,6 +958,89 @@ def test_complete_eval_outcome_is_reused_without_moex_request() -> None:
         assert candles == {}
         current = next(epoch for epoch in epochs if epoch.model_version == signal.model_version)
         assert current.observations == (cached_observation,)
+
+    asyncio.run(scenario())
+
+
+def test_context_signal_is_evaluated_against_index_benchmark() -> None:
+    async def scenario() -> None:
+        repository = MemoryNewsRepository()
+        timestamp = datetime(2026, 8, 10, 7, tzinfo=UTC)
+        news = NewsRecord(
+            id="news_market",
+            source_id="telegram_bbbreaking",
+            external_id="market-1",
+            published_at=timestamp,
+            received_at=timestamp,
+            title="Санкционные риски усилились для российского рынка",
+            url="https://example.com/market-1",
+            content="Новые ограничения повышают риски для российских акций.",
+            language="ru",
+            source_metadata={"scope": "market"},
+            created_at=timestamp,
+        )
+        signal = SignalRecord(
+            id="sig_market",
+            news_id=news.id,
+            ticker="RUEQ",
+            as_of=timestamp,
+            data_cutoff_at=timestamp,
+            status="active",
+            direction="down",
+            action="risk_off",
+            horizon_value=3,
+            horizon_unit="calendar_days",
+            score=-45.0,
+            strength=0.45,
+            confidence=0.8,
+            summary="Негативный рыночный контекст",
+            factor_contributions=(),
+            evidence_refs=(news.id,),
+            expires_at=timestamp.replace(day=13),
+            invalidation_conditions=(),
+            model_version="signal-engine-0.6.1",
+            config_version=1,
+            created_at=timestamp,
+        )
+        repository._news[news.id] = news
+        repository._signals[signal.id] = signal
+
+        class IndexMarketData:
+            calls: list[str] = []
+
+            async def candles(
+                self,
+                ticker: str,
+                *,
+                interval: int,
+                lookback_days: int,
+            ) -> dict[str, object]:
+                self.calls.append(ticker)
+                return {
+                    "ticker": ticker,
+                    "benchmark_ticker": "IMOEX",
+                    "candles": [
+                        {"begin": "2026-08-10T07:00:00Z", "open": 2300, "close": 2300},
+                        {"begin": "2026-08-10T08:00:00Z", "open": 2290, "close": 2280},
+                    ],
+                }
+
+        market = IndexMarketData()
+        outcomes, signals, _, _, epochs = await main_module._load_evaluation_material(
+            repository,
+            market,  # type: ignore[arg-type]
+        )
+
+        assert market.calls == ["RUEQ"]
+        assert [item.ticker for item in signals] == ["RUEQ"]
+        assert outcomes[0]["status"] == "partial"
+        assert outcomes[0]["evaluation_benchmark"] == {
+            "ticker": "IMOEX",
+            "source": "MOEX ISS",
+            "kind": "index",
+        }
+        assert epochs[-1].outcomes[0]["signal_id"] == signal.id
+        assert {row["evaluation_benchmark"] for row in epochs[-1].observations} == {"IMOEX"}
 
     asyncio.run(scenario())
 
