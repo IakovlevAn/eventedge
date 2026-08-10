@@ -33,6 +33,13 @@ TIMER_SPECS = tuple(
         payload=lane.payload,
     )
     for lane in load_collection_config().lanes
+) + (
+    TimerSpec(
+        name="eventedge-maintenance",
+        description="Refresh directional Evals and reprocess recent candidates every ten minutes",
+        cron_expression="2/10 * ? * * *",
+        payload="maintenance",
+    ),
 )
 
 

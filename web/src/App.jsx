@@ -34,6 +34,26 @@ import { useEffect, useMemo, useState } from "react";
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "");
 const apiUrl = (path) => `${API_BASE}${path}`;
+const SOURCE_CACHE_KEY = "eventedge:source-registry:v1";
+
+function readCachedSourceRegistry() {
+  if (typeof window === "undefined") return null;
+  try {
+    const cached = JSON.parse(window.localStorage.getItem(SOURCE_CACHE_KEY) || "null");
+    return cached?.data?.length ? cached : null;
+  } catch {
+    return null;
+  }
+}
+
+function cacheSourceRegistry(payload) {
+  if (typeof window === "undefined" || !payload?.data?.length) return;
+  try {
+    window.localStorage.setItem(SOURCE_CACHE_KEY, JSON.stringify(payload));
+  } catch {
+    // The live response remains usable when browser storage is unavailable.
+  }
+}
 
 const methodologySignals = [
   {
@@ -1428,15 +1448,18 @@ function EvalsScreen() {
         setError("");
       } catch (loadError) {
         if (loadError.name !== "AbortError") {
-          setStatus("error");
           setError(loadError.message || "Не удалось загрузить Evals.");
+          setPayload((current) => {
+            setStatus(current ? "ready" : "error");
+            return current;
+          });
         }
       } finally {
         refreshing = false;
       }
     };
     load();
-    const interval = window.setInterval(load, 60000);
+    const interval = window.setInterval(load, 300000);
     const handleVisibility = () => { if (document.visibilityState === "visible") load(); };
     document.addEventListener("visibilitychange", handleVisibility);
     return () => {
@@ -1461,9 +1484,9 @@ function EvalsScreen() {
   return (
     <main className="screen section-screen evals-screen">
       <section className="page-hero evals-hero">
-        <div><span className="eyebrow"><Activity size={13} /> Проверка реальностью</span><h1>Evals: сигналы в цифрах</h1><p>Каждый сигнал сопоставляется с реальной ценой MOEX. Здесь видно, как меняется качество по горизонтам, направлениям, бумагам и уверенности.</p></div>
+        <div><span className="eyebrow"><Activity size={13} /> Проверка реальностью</span><h1>Evals: сигналы в цифрах</h1><p>Только направленные сигналы «вверх» и «вниз» сопоставляются с реальной ценой MOEX. Нейтральные события сохраняются в истории, но не искажают hit rate.</p></div>
         <div className="eval-hero-actions">
-          <div className="eval-live"><i /><span><strong>Обновляется раз в минуту</strong><small>{formatRelative(payload.meta.generated_at)} · основной горизонт 4 часа</small></span></div>
+          <div className={`eval-live${error ? " is-stale" : ""}`}><i /><span><strong>{error ? "Показываем последний snapshot" : "Snapshot каждые 10 минут"}</strong><small>{payload.meta.generated_at ? `${formatRelative(payload.meta.generated_at)} · ` : "Расчёт новой эпохи ожидается · "}основной горизонт 4 часа</small></span></div>
           <label className="eval-model-select"><span>Эпоха модели</span><select value={activeModelVersion || ""} onChange={(event) => setSelectedModelVersion(event.target.value)}>{modelEpochs.map((epoch) => <option value={epoch.model_version} key={epoch.epoch_id}>{epoch.model_version} · cfg {epoch.config_version} · n={epoch.signals}</option>)}</select><ChevronDown size={13} /></label>
           <div className="eval-exports">
             <a href={apiUrl("/v1/evals/export?format=csv&dataset=outcomes&model_version=all")} download><Download size={13} /> Все эпохи · outcomes</a>
@@ -1551,6 +1574,7 @@ function EvalsScreen() {
         <div className="section-heading"><span><BarChart3 size={15} /> Реакция после каждого сигнала</span><small>цена от первой торгуемой свечи</small></div>
         <div className="eval-table-wrap">
           <table className="eval-table outcomes-table">
+            <colgroup><col className="outcome-col-signal" /><col className="outcome-col-news" /><col span="4" className="outcome-col-return" /><col className="outcome-col-verdict" /></colgroup>
             <thead><tr><th>Сигнал</th><th>Новость</th><th>1 час</th><th>4 часа</th><th>1 день</th><th>3 дня</th><th>Вердикт</th></tr></thead>
             <tbody>
               {outcomes.slice(0, 30).map((outcome) => {
@@ -1565,7 +1589,7 @@ function EvalsScreen() {
                       : <span className="eval-verdict is-miss"><X size={11} /> {outcome.status === "partial" ? `Пока не попал · ${observedLabel}` : "Не попал"}</span>;
                 return <tr key={outcome.signal_id}>
                   <td><div className="outcome-signal"><strong>{outcome.ticker}</strong><Direction direction={outcome.direction} /><small>{formatScore(outcome.score)} п.</small></div></td>
-                  <td>{outcome.news ? <a href={outcome.news.url} target="_blank" rel="noreferrer"><span>{outcome.news.source_id}</span><strong>{outcome.news.title}</strong></a> : <span>Источник недоступен</span>}</td>
+                  <td>{outcome.news ? <a href={outcome.news.url} target="_blank" rel="noreferrer" title={outcome.news.title}><span>{outcome.news.source_id}</span><strong>{outcome.news.title}</strong></a> : <span>Источник недоступен</span>}</td>
                   {["1h", "4h", "1d", "3d"].map((period) => {
                     const value = outcome.returns?.[period];
                     return <td key={period} className={value === null || value === undefined ? "" : Number(value) >= 0 ? "market-positive" : "market-negative"}>{formatPct(value)}</td>;
@@ -1584,7 +1608,8 @@ function EvalsScreen() {
 function MethodologyScreen({ onApi, allNews, newsMeta }) {
   const sample = methodologySignals[0];
   const sampleFactors = scoreFactors(sample.score);
-  const [sourceRegistry, setSourceRegistry] = useState(null);
+  const [sourceRegistry, setSourceRegistry] = useState(readCachedSourceRegistry);
+  const [sourceRegistryStatus, setSourceRegistryStatus] = useState(sourceRegistry ? "cached" : "loading");
   const [showSourceForm, setShowSourceForm] = useState(false);
   const [channel, setChannel] = useState("");
   const [channelName, setChannelName] = useState("");
@@ -1606,9 +1631,13 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
     try {
       const response = await fetch(apiUrl("/v1/sources"));
       if (!response.ok) throw new Error("Реестр источников временно недоступен.");
-      setSourceRegistry(await response.json());
+      const payload = await response.json();
+      setSourceRegistry(payload);
+      cacheSourceRegistry(payload);
+      setSourceRegistryStatus("ready");
     } catch {
-      setSourceRegistry(null);
+      setSourceRegistry((current) => current || readCachedSourceRegistry());
+      setSourceRegistryStatus("error");
     }
   };
 
@@ -1648,7 +1677,7 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
       setChannelDescription("");
       setAdminKey("");
       setSourceFormStatus("saved");
-      setSourceFormMessage("Канал добавлен. Первый опрос — в течение минуты.");
+      setSourceFormMessage("Канал добавлен. Первый опрос — в течение 5 минут.");
       await loadSources();
     } catch (error) {
       setSourceFormStatus("error");
@@ -1693,7 +1722,7 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
       </div>
 
       <section className="quant-method">
-        <header><span>04</span><div><h2>Не‑LLM слой проверяет рынок</h2><p>Даже без свежей сильной новости по каждой бумаге остаётся live‑оценка. Если новостной сигнал есть, итог считается по фиксированной пропорции 65% news / 35% market.</p></div></header>
+        <header><span>04</span><div><h2>Не‑LLM слой проверяет рынок</h2><p>Без направленной новости факторы показываются как рыночный уклон, но не превращаются в зелёный или красный торговый сигнал. Если сильная новость есть, итог считается по фиксированной пропорции 65% news / 35% market.</p></div></header>
         <div className="quant-factor-grid">
           <article><strong>Реакция цены</strong><span>Движение за сессию и пять дней</span><b>направление</b></article>
           <article><strong>Объём</strong><span>Отклонение от медианы сессий</span><b>подтверждение</b></article>
@@ -1722,8 +1751,10 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
 
       <section className="source-method">
         <div className="section-heading"><span><Database size={15} /> Источники и их роль</span><button type="button" onClick={() => setShowSourceForm((value) => !value)}><Plus size={13} /> Добавить Telegram</button></div>
+        {sourceRegistryStatus === "error" && <div className="source-registry-warning"><Server size={14} /><span><strong>Live-реестр временно недоступен</strong>Показываем последний сохранённый список. Каналы в YDB не удалены.</span></div>}
+        {sourceRegistryStatus === "cached" && <div className="source-registry-warning is-cached"><Database size={14} /><span><strong>Показываем сохранённый реестр</strong>Проверяем актуальное состояние в фоне.</span></div>}
         {showSourceForm && <form className="telegram-source-form" onSubmit={addTelegramSource}>
-          <div><strong>Новый публичный Telegram-канал</strong><span>EventEdge читает публичную web-ленту без бота. Лимит — {sourceRegistry?.meta?.telegram_limit || 18} каналов, опрос раз в минуту.</span></div>
+          <div><strong>Новый публичный Telegram-канал</strong><span>EventEdge читает публичную web-ленту без бота. Лимит — {sourceRegistry?.meta?.telegram_limit || 18} каналов, пользовательские каналы опрашиваются раз в 5 минут.</span></div>
           <label><span>Канал</span><input required pattern="@?[A-Za-z0-9_]{3,48}" value={channel} onChange={(event) => setChannel(event.target.value)} placeholder="@channel_name" /></label>
           <label><span>Название</span><input value={channelName} onChange={(event) => setChannelName(event.target.value)} placeholder="Как показывать в EventEdge" /></label>
           <label className="source-description-field"><span>Описание</span><input minLength="8" maxLength="280" value={channelDescription} onChange={(event) => setChannelDescription(event.target.value)} placeholder="Что публикует источник и зачем он нужен" /></label>
@@ -1759,14 +1790,14 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
 }
 
 const apiEndpoints = [
-  { id: "assessments", method: "GET", path: "/v1/assessments", title: "Live‑оценки рынка", description: "Гибридная или quant‑оценка всех компаний с пятью не‑LLM факторами.", parameter: { name: "tickers", type: "string", description: "Опциональный список тикеров MOEX через запятую" } },
+  { id: "assessments", method: "GET", path: "/v1/assessments", title: "Live‑оценки рынка", description: "Гибридная оценка направленных news-сигналов и отдельный quant-уклон для остальных компаний.", parameter: { name: "tickers", type: "string", description: "Опциональный список тикеров MOEX через запятую" } },
   { id: "evals", method: "GET", path: "/v1/evals", title: "Анализ качества сигналов", description: "Короткие 1ч/4ч метрики, Pearson и выбор сохранённой эпохи модели.", parameter: { name: "model_version", type: "string", description: "Версия news-модели; без параметра выбирается текущая эпоха" } },
   { id: "evals_export", method: "GET", path: "/v1/evals/export?format=csv&dataset=timeseries&model_version=all", title: "Выгрузка Evals", description: "CSV/JSON: все эпохи моделей и сырой event-time ряд свечей до +3 дней.", parameter: { name: "dataset", type: "string", description: "outcomes или timeseries; model_version — версия или all" } },
   { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Семантические news‑сигналы", description: "Новостный слой: событие, направление и вес из semantic‑модели. Финальная оценка hybrid-market-0.1.0, включающая рыночные факторы, возвращается через /v1/assessments.", parameter: { name: "limit", type: "integer", description: "Количество записей, максимум 100" } },
   { id: "news", method: "GET", path: "/v1/news?limit=20", title: "Лента новостей", description: "Исходные публикации, event-проекция и связанные сигналы.", parameter: { name: "limit", type: "integer", description: "Количество публикаций, максимум 500" } },
   { id: "events", method: "GET", path: "/v1/events?limit=20", title: "Рыночные события", description: "Публикации как события уровня рынок, отрасль или компания.", parameter: { name: "scope", type: "string", description: "market, sector или company" } },
   { id: "sources", method: "GET", path: "/v1/sources", title: "Реестр источников", description: "Подключённые RSS и Telegram-источники, свежесть и статистика сбора.", parameter: null },
-  { id: "source_create", method: "POST", path: "/v1/sources/telegram", title: "Добавить Telegram", description: "Защищённое добавление публичного канала в минутный контур.", parameter: { name: "X-EventEdge-Admin-Key", type: "header", description: "Админ-ключ runtime; в UI не сохраняется" } },
+  { id: "source_create", method: "POST", path: "/v1/sources/telegram", title: "Добавить Telegram", description: "Защищённое добавление публичного канала в пятиминутный контур.", parameter: { name: "X-EventEdge-Admin-Key", type: "header", description: "Админ-ключ runtime; в UI не сохраняется" } },
   { id: "ticker", method: "GET", path: "/v1/signals?ticker=SBER&limit=1", title: "Сигнал компании", description: "Последний новостной сигнал по выбранному тикеру.", parameter: { name: "ticker", type: "string", description: "Тикер MOEX, например SBER" } },
   { id: "snapshot", method: "GET", path: "/v1/instruments/SBER/snapshot", title: "Рыночный snapshot", description: "Цена, объём, волатильность, дневные свечи MOEX и сценарный диапазон.", parameter: null },
   { id: "candles", method: "GET", path: "/v1/instruments/SBER/candles?interval=10&lookback_days=14", title: "Внутридневные свечи", description: "10-минутные OHLCV-свечи MOEX. Кэш и интерфейс обновляются раз в минуту.", parameter: { name: "lookback_days", type: "integer", description: "Окно истории от 1 до 14 дней" } },
@@ -1797,11 +1828,11 @@ function ApiScreen() {
     "summary": {"evaluated":12,"hit_rate_pct":58.3},
     "breakdowns": {"by_horizon":[{"horizon":"4h","hit_rate_pct":58.3}]},
     "relationships": [{"code":"signal_strength_vs_4h_return","value":0.21}],
-    "outcomes": [{"ticker":"SBER","model_version":"news-baseline-0.3.0","returns":{"1h":0.4,"4h":0.8,"1d":1.2,"3d":2.1},"verdict":true}]
+    "outcomes": [{"ticker":"SBER","model_version":"news-baseline-0.4.0","returns":{"1h":0.4,"4h":0.8,"1d":1.2,"3d":2.1},"verdict":true}]
   },
-  "meta": {"selected_model_version":"news-baseline-0.3.0","primary_horizon":"4h"}
+  "meta": {"selected_model_version":"news-baseline-0.4.0","primary_horizon":"4h","evaluation_scope":"directional_signals_only"}
 }` : endpoint.id === "evals_export" ? `signal_id,ticker,signal_as_of,direction,score,confidence,model_version,config_version,observation_at,offset_minutes,return_pct
-sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,news-baseline-0.3.0,1,2026-08-08T08:00:00Z,60,0.42` : endpoint.id === "snapshot" ? `{
+sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,news-baseline-0.4.0,1,2026-08-08T08:00:00Z,60,0.42` : endpoint.id === "snapshot" ? `{
   "data": {
     "ticker": "SBER",
     "market": {
@@ -1834,7 +1865,7 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,news-baseline-0.3.0,1,2026-08-08T0
   "data": [
     {"source_id":"telegram_bcs_express","name":"БКС Экспресс","kind":"Telegram","count":12,"freshness":"цель ≤ 2 мин"}
   ],
-  "meta": {"telegram_active":6,"telegram_limit":18,"poll_interval_seconds":60}
+  "meta": {"telegram_active":18,"telegram_limit":18,"poll_interval_seconds":60,"managed_telegram_poll_interval_seconds":300}
 }` : endpoint.id === "source_create" ? `{
   "data": {"source_id":"telegram_example","channel":"example","enabled":true,"managed":true}
 }` : endpoint.id === "events" ? `{
@@ -2005,16 +2036,25 @@ export default function App() {
       if (!loaded) setDataStatus("loading");
       setDataError("");
       try {
-        const [signalResponse, newsResponse, sourceResponse] = await Promise.all([
+        const sourceRequest = fetch(apiUrl("/v1/sources"), { signal: controller.signal }).catch(() => null);
+        const [signalResponse, newsResponse] = await Promise.all([
           fetch(apiUrl("/v1/signals?status=active&limit=100"), { signal: controller.signal }),
           fetch(apiUrl("/v1/news?limit=100"), { signal: controller.signal }),
-          fetch(apiUrl("/v1/sources"), { signal: controller.signal }),
         ]);
-        if (!signalResponse.ok || !newsResponse.ok || !sourceResponse.ok) throw new Error("API вернул ошибку. Попробуй обновить страницу.");
-        const [signalPayload, newsPayload, sourcePayload] = await Promise.all([signalResponse.json(), newsResponse.json(), sourceResponse.json()]);
+        const sourceResponse = await Promise.race([
+          sourceRequest,
+          new Promise((resolve) => window.setTimeout(() => resolve(null), 1200)),
+        ]);
+        if (!signalResponse.ok || !newsResponse.ok) throw new Error("API вернул ошибку. Попробуй обновить страницу.");
+        const [signalPayload, newsPayload] = await Promise.all([signalResponse.json(), newsResponse.json()]);
+        let sourcePayload = readCachedSourceRegistry();
+        if (sourceResponse?.ok) {
+          sourcePayload = await sourceResponse.json();
+          cacheSourceRegistry(sourcePayload);
+        }
         const allSignals = signalPayload.data.map(signalFromApi);
         const signalsById = new Map(allSignals.map((item) => [item.id, item]));
-        const sourceNames = new Map(sourcePayload.data.map((source) => [source.source_id, source.name]));
+        const sourceNames = new Map((sourcePayload?.data || methodologySources.map((source) => ({ source_id: source.id, name: source.name }))).map((source) => [source.source_id, source.name]));
         const nextNews = groupNewsEvents(newsPayload.data.map((item) => newsFromApi(item, signalsById, sourceNames)));
         const evidenceByTicker = new Map();
         nextNews.forEach((item) => {

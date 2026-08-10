@@ -13,11 +13,13 @@ cloud: eventedge
 │   ├── federation: eventedge-github
 │   ├── Container Registry: eventedge
 │   ├── Serverless Container: eventedge-api
+│   ├── Serverless Container: eventedge-worker
 │   ├── API Gateway: eventedge-api
 │   ├── YDB Serverless: eventedge-prod
 │   ├── Timer trigger: eventedge-fast-news
 │   ├── Timer trigger: eventedge-discovery-news
 │   ├── Timer trigger: eventedge-slow-news
+│   ├── Timer trigger: eventedge-maintenance
 │   └── VPC: eventedge-prod (без подсетей и разрешающих правил)
 └── folder: dev
 ```
@@ -44,13 +46,15 @@ cloud: eventedge
 | GitHub Actions variable | `YC_DEV_FOLDER_ID` | Идентификатор development-каталога, не секрет |
 | Container Registry | `eventedge` | Неизменяемые Docker-образы API |
 | Service account | `eventedge-api` | Скачивание production-образа и runtime-идентичность API |
-| Serverless Container | `eventedge-api` | Production API с масштабированием до нуля |
+| Serverless Container | `eventedge-api` | Публичный read API: один прогретый инстанс, второй только для burst |
+| Serverless Container | `eventedge-worker` | Сбор новостей, reprocess и Evals без прогретых инстансов |
 | Service account | `eventedge-gateway` | Вызов только приватного контейнера API |
 | API Gateway | `eventedge-api` | Публичная точка входа и маршрутизация к контейнеру |
 | YDB Serverless | `eventedge-prod` | Новости, признаки, сигналы, idempotency-записи и jobs |
 | Timer trigger | `eventedge-fast-news` | Интерфакс, ТАСС, РБК и Московская биржа каждую минуту |
-| Timer trigger | `eventedge-discovery-news` | Расширенный discovery Google News каждые 5 минут |
+| Timer trigger | `eventedge-discovery-news` | Google News и добавленные через UI Telegram каждые 5 минут |
 | Timer trigger | `eventedge-slow-news` | Макроэкономический фон Банка России каждые 15 минут |
+| Timer trigger | `eventedge-maintenance` | Пересчёт сохранённого Evals-snapshot и reprocess кандидатов каждые 10 минут |
 
 ## CI/CD и автоматические merge
 
@@ -59,12 +63,12 @@ cloud: eventedge
 - После bootstrap trusted workflow автоматически делает squash merge зелёных PR из веток `agent/*` в `main`.
 - Workflow сверяет SHA проверенной ревизии, репозиторий ветки и target `main`; draft и PR с label `do-not-merge` не мержатся.
 - После зелёного CI на `main` выполняется OIDC-аутентификация, публикация образа и деплой новой ревизии.
-- Production-ревизия ограничена 256 MB памяти, одной инстанцией на зону, 50 запросами на зону и `min-instances=0`.
+- API-ревизия использует 1 vCPU / 1 GB, concurrency 4, `min-instances=1`, максимум два инстанса. Worker использует те же ресурсы по требованию, но обрабатывает только одну timer-задачу одновременно и имеет `min-instances=0`.
 - YDB не имеет зарезервированной мощности, ограничена 10 RU/с и 1 ГБ, защищена от удаления.
 - Перед публикацией serverless-ревизии CI применяет DDL из того же Docker-образа. Для этого `eventedge-ci` должен иметь `ydb.editor` только на базе `eventedge-prod`.
 - Runtime service account имеет `ydb.editor` только на базе `eventedge-prod`; роль не выдана на каталог или облако.
 - Runtime service account имеет `ai.languageModels.user` в production-каталоге для вызова YandexGPT через короткоживущий metadata IAM token.
-- Три новостных Timer созданы административно и не изменяются обычным deploy. Для управления ими CI потребовалась бы широкая роль `functions.editor` на весь production-каталог; ради минимальных привилегий эта роль не выдаётся. В репозитории остаётся проверяемая конфигурация [`scripts/deploy_triggers.py`](../scripts/deploy_triggers.py) для явного административного запуска.
+- Все четыре Timer управляются тем же проверенным deploy через [`scripts/deploy_triggers.py`](../scripts/deploy_triggers.py). CI имеет `functions.editor` только в production-каталоге проекта.
 
 GitHub Free не предоставляет branch protection для приватного репозитория. Поэтому запрет прямого push в `main` нельзя обеспечить на стороне GitHub без GitHub Pro; автоматический pipeline сам прямой push не использует.
 
@@ -80,7 +84,9 @@ Gateway и YDB-backed ревизия контейнера развёрнуты. 
 
 Приватный production smoke test подтвердил запись синтетической новости в `eventedge-prod`, повтор запроса с тем же `Idempotency-Key` без дубля и последующее чтение созданного job. DDL выполняется один раз отдельным шагом деплоя с ограниченным exponential backoff при лимите schema operations; serverless-инстансы при старте только подключаются к готовой схеме и валидируют YDB-запросы в режиме `EXPLAIN`.
 
-Приоритетный контур собирает прямые RSS Интерфакса, ТАСС, РБК и Московской биржи каждую минуту. Медленные или широкие источники вынесены из него: Google News обновляется каждые 5 минут, Банк России — каждые 15 минут. Поэтому недоступность одного фида не задерживает остальные. Предфильтр оставляет новости по наблюдаемым компаниям и отбрасывает механические уведомления долгового и биржевого контура; только новый сильный кандидат отправляется в YandexGPT, после чего версия `news-baseline-0.2.0` детерминированно рассчитывает направление и действие. Интерфейс проверяет API каждые 30 секунд; целевая задержка от появления материала в приоритетном RSS до EventEdge — не более 2 минут.
+Приоритетный контур собирает прямые RSS и шесть отобранных Telegram-каналов каждую минуту. Google News и Telegram-каналы, добавленные через UI, обновляются каждые 5 минут, Банк России — каждые 15 минут. Поэтому рост пользовательского реестра не увеличивает минутную волну с 6 до 18 каналов. Предфильтр оставляет кандидатов на существенное событие; только они отправляются в YandexGPT, после чего версия `news-baseline-0.4.0` детерминированно рассчитывает направление и действие.
+
+Публичный `/v1/evals` не ходит в MOEX и ничего не пересчитывает: он читает последний snapshot из YDB. Тяжёлый пересчёт запускается в worker каждые 10 минут, включает только направленные `up/down`-сигналы, сохраняет сырые временные ряды и отдельные эпохи моделей. Нейтральные новости остаются в истории, но не входят в hit rate и Pearson.
 
 ## Проверка
 
@@ -94,4 +100,4 @@ Yandex Cloud OIDC exchange succeeded
 
 ## Следующий этап
 
-Следующий этап — добавить отдельные проверяемые блоки котировок и фундаментальных показателей, затем калибровать веса и пороги на исторической выборке. Object Storage и Message Queue не подключаются, пока их необходимость не подтверждена нагрузкой.
+Следующий этап — накопить 72 часа метрик раздельных API/worker-контуров, затем решить, можно ли безопасно уменьшить API до 512 MB. Object Storage нужен для будущих тяжёлых архивов и экспортов; Message Queue не подключается, пока последовательного worker и timer-очереди достаточно.

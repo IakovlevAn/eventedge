@@ -20,8 +20,7 @@ from eventedge.analysis import (
 
 LOGGER = logging.getLogger(__name__)
 METADATA_TOKEN_URL = (
-    "http://169.254.169.254/computeMetadata/v1/instance/"
-    "service-accounts/default/token"
+    "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token"
 )
 CHAT_COMPLETIONS_URL = "https://ai.api.cloud.yandex.net/v1/chat/completions"
 
@@ -114,10 +113,18 @@ class YandexGptNewsAnalyzer:
                 "YandexGPT semantic extraction failed; using rules fallback: %s",
                 type(error).__name__,
             )
-            return baseline.model_copy(
-                update={"extractor_version": "rules-fallback-0.1.0"}
-            )
-        polarity = self._reconcile_polarity(payload.polarity, baseline.polarity)
+            return baseline.model_copy(update={"extractor_version": "rules-fallback-0.1.0"})
+        # Structured financial results with numeric rule evidence must not be
+        # neutralized by a contradictory generic LLM sentiment.
+        if (
+            baseline.event_type == EventType.FINANCIAL_RESULTS
+            and baseline.facts
+            and abs(baseline.polarity) >= 0.75
+            and baseline.polarity * payload.polarity < 0
+        ):
+            polarity = baseline.polarity
+        else:
+            polarity = self._reconcile_polarity(payload.polarity, baseline.polarity)
         return SemanticFeatures(
             extractor_version=self.version,
             event_type=payload.event_type,

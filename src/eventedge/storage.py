@@ -176,7 +176,7 @@ class TelegramSourceRecord:
             "enabled": self.enabled,
             "managed": True,
             "quality": 65,
-            "freshness": "цель ≤ 2 мин",
+            "freshness": "до 5 мин",
             "description": self.description,
             "role": self.description,
             "created_at": to_rfc3339(self.created_at),
@@ -446,9 +446,7 @@ def normalize_signal_freshness(
         publication_expiry = news.published_at + timedelta(days=3) if news else signal.expires_at
         expires_at = min(signal.expires_at, publication_expiry)
         status = (
-            "expired"
-            if signal.status == "active" and expires_at <= current_time
-            else signal.status
+            "expired" if signal.status == "active" and expires_at <= current_time else signal.status
         )
         normalized.append(replace(signal, status=status, expires_at=expires_at))
     return normalized

@@ -10,7 +10,7 @@ from eventedge.analysis import DEFAULT_MOEX_ALIASES
 from eventedge.storage import NewsRecord, SignalRecord, to_rfc3339
 
 ASSESSMENT_MODEL_VERSION = "hybrid-market-0.1.0"
-ASSESSMENT_CONFIG_VERSION = 1
+ASSESSMENT_CONFIG_VERSION = 2
 POSITIVE_THRESHOLD = 18.0
 NEGATIVE_THRESHOLD = -18.0
 REPORT_MARKERS = (
@@ -82,21 +82,32 @@ def _action(direction: str) -> str:
     return "no_action"
 
 
-def _news_matches_ticker(item: NewsRecord, ticker: str) -> bool:
-    metadata_tickers = item.source_metadata.get("tickers", [])
-    if isinstance(metadata_tickers, (list, tuple)) and ticker in {
-        str(value).upper() for value in metadata_tickers
-    }:
-        return True
-    haystack = f"{item.title} {item.content}".lower()
-    return any(alias.lower() in haystack for alias in DEFAULT_MOEX_ALIASES.get(ticker, ()))
+def _report_evidence_text(item: NewsRecord, ticker: str) -> str | None:
+    """Return text that directly connects one company to a financial report."""
+    aliases = tuple(alias.casefold() for alias in DEFAULT_MOEX_ALIASES.get(ticker, ()))
+    title = item.title.casefold()
+    content = item.content.casefold()
+    title_is_direct = any(alias in title for alias in aliases) and any(
+        marker in title for marker in REPORT_MARKERS
+    )
+    if title_is_direct:
+        return f"{title} {content}"
+
+    sentences = re.split(r"(?<=[.!?])\s+|[\n\r]+", content)
+    direct_sentences = [
+        sentence
+        for sentence in sentences
+        if any(alias in sentence for alias in aliases)
+        and any(marker in sentence for marker in REPORT_MARKERS)
+    ]
+    return " ".join(direct_sentences) or None
 
 
 def _report_factor(ticker: str, news: Iterable[NewsRecord]) -> dict[str, object]:
     candidates = []
     for item in news:
-        text = f"{item.title} {item.content}".lower()
-        if _news_matches_ticker(item, ticker) and any(marker in text for marker in REPORT_MARKERS):
+        text = _report_evidence_text(item, ticker)
+        if text is not None:
             candidates.append((item, text))
     if not candidates:
         return {
@@ -281,7 +292,13 @@ def build_assessment(
         )
         news_signal = active_signal.as_api_dict()
 
-    direction = _direction(score)
+    # Quant factors expose a market bias, but do not become a trading signal
+    # without a directional news event.
+    has_directional_news = active_signal is not None and active_signal.direction in {
+        "up",
+        "down",
+    }
+    direction = _direction(score) if has_directional_news else "neutral"
     return {
         "id": f"assessment_{ticker}",
         "ticker": ticker,
@@ -366,9 +383,7 @@ def evaluate_signal(
         returns[label] = round((price / entry_price - 1) * 100, 2) if price is not None else None
     latest_price = _number(rows[-1][1].get("close"))
     latest_return = (
-        round((latest_price / entry_price - 1) * 100, 2)
-        if latest_price is not None
-        else None
+        round((latest_price / entry_price - 1) * 100, 2) if latest_price is not None else None
     )
     # The product is intentionally short-term: the UI verdict is based on the
     # first four tradable hours, while 1d/3d observations remain available for
@@ -561,8 +576,7 @@ def _metric_slice(
     horizon: str | None = None,
 ) -> dict[str, object]:
     values = [
-        (item, _return_at(item, horizon) if horizon else _primary_return(item))
-        for item in items
+        (item, _return_at(item, horizon) if horizon else _primary_return(item)) for item in items
     ]
     evaluated = [(item, value) for item, value in values if value is not None]
     verdicts = [
@@ -578,15 +592,9 @@ def _metric_slice(
     return {
         "signals": len(items),
         "observations": len(evaluated),
-        "hit_rate_pct": (
-            round(sum(verdicts) / len(verdicts) * 100, 1) if verdicts else None
-        ),
-        "average_signed_return_pct": (
-            round(statistics.mean(signed), 2) if signed else None
-        ),
-        "median_signed_return_pct": (
-            round(statistics.median(signed), 2) if signed else None
-        ),
+        "hit_rate_pct": (round(sum(verdicts) / len(verdicts) * 100, 1) if verdicts else None),
+        "average_signed_return_pct": (round(statistics.mean(signed), 2) if signed else None),
+        "median_signed_return_pct": (round(statistics.median(signed), 2) if signed else None),
     }
 
 
@@ -598,12 +606,10 @@ def eval_summary(outcomes: list[dict[str, object]]) -> dict[str, object]:
         "evaluated": len(decided),
         "complete": sum(item.get("status") == "evaluated" for item in outcomes),
         "partial": sum(
-            item.get("status") == "partial" and item.get("verdict") is not None
-            for item in outcomes
+            item.get("status") == "partial" and item.get("verdict") is not None for item in outcomes
         ),
         "pending": sum(
-            item.get("status") == "partial" and item.get("verdict") is None
-            for item in outcomes
+            item.get("status") == "partial" and item.get("verdict") is None for item in outcomes
         ),
         "unavailable": sum(item.get("status") == "unavailable" for item in outcomes),
         "hit_rate_pct": metrics["hit_rate_pct"],
@@ -623,7 +629,7 @@ def eval_breakdowns(outcomes: list[dict[str, object]]) -> dict[str, object]:
             "direction": direction,
             **_metric_slice([item for item in outcomes if item.get("direction") == direction]),
         }
-        for direction in ("up", "down", "neutral")
+        for direction in ("up", "down")
     ]
     tickers = sorted({str(item["ticker"]) for item in outcomes})
     by_ticker = sorted(
