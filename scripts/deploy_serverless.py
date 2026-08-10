@@ -57,8 +57,10 @@ def build_payload(
         "concurrency": "1" if is_worker else "4",
         "provisionPolicy": {"minInstances": "0" if is_worker else "2"},
         "scalingPolicy": {
-            "zoneInstancesLimit": "8" if is_worker else "2",
-            "zoneRequestsLimit": "8",
+            # Keep one account-level slot free for revision turnover and
+            # controlled reprocessing while the API holds two warm instances.
+            "zoneInstancesLimit": "7" if is_worker else "2",
+            "zoneRequestsLimit": "7" if is_worker else "8",
         },
         "runtime": {"http": {}},
     }
