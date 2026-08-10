@@ -505,22 +505,31 @@ function assessmentFromApi(item) {
 }
 
 function newsFromApi(item, signalsById, sourceNames = new Map()) {
-  const related = item.related_signals?.[0];
+  const relatedSignals = (item.related_signals || []).map((related) => {
+    const target = related.target || { type: "instrument", id: related.ticker, label: related.ticker };
+    const [company, sector] = target.type === "instrument"
+      ? companyMeta[related.ticker] || [target.label, "Российский рынок"]
+      : [target.label, item.event?.sectors?.join(", ") || "Российский рынок"];
+    return signalsById.get(related.id) || {
+      ...related,
+      target,
+      company,
+      sector,
+      confidence: Math.round(related.confidence * 100),
+      horizon: "3 дн.",
+      action: actionLabels[related.action] || related.action,
+      summary: "Ретроспективная оценка эффекта новости на момент её публикации.",
+      evidence: [],
+    };
+  });
+  const related = relatedSignals[0];
+  const instrumentSignalTickers = relatedSignals
+    .filter((signal) => (signal.target?.type || "instrument") === "instrument")
+    .map((signal) => signal.ticker);
   const tickers = [...new Set([
     ...(item.source_metadata?.tickers || []),
-    ...(related?.ticker ? [related.ticker] : []),
+    ...instrumentSignalTickers,
   ])];
-  const [company, sector] = related ? companyMeta[related.ticker] || [related.ticker, "Российский рынок"] : [];
-  const signal = related ? signalsById.get(related.id) || {
-    ...related,
-    company,
-    sector,
-    confidence: Math.round(related.confidence * 100),
-    horizon: "3 дн.",
-    action: actionLabels[related.action] || related.action,
-    summary: "Ретроспективная оценка эффекта новости на момент её публикации.",
-    evidence: [],
-  } : null;
   return {
     id: item.id,
     source: sourceNames.get(item.source_id) || sourceLabels[item.source_id] || item.source_id,
@@ -530,11 +539,13 @@ function newsFromApi(item, signalsById, sourceNames = new Map()) {
     receivedAt: item.received_at,
     deliveryLagMinutes: deliveryLagMinutes(item.published_at, item.received_at),
     processedAt: item.created_at,
-    tag: signal ? related.status === "active" ? "Активный сигнал" : "Исторический сигнал" : "Без сигнала",
+    tag: related ? related.status === "active" ? "Активный сигнал" : "Исторический сигнал" : "Без сигнала",
     title: item.title,
     content: item.content,
     url: item.url,
-    signal,
+    signal: related || null,
+    signals: relatedSignals,
+    processing: item.processing || null,
     tickers,
     event: item.event || {
       scope: tickers.length ? "company" : "market",
@@ -542,7 +553,7 @@ function newsFromApi(item, signalsById, sourceNames = new Map()) {
       tickers,
       sectors: tickers.map((ticker) => companyMeta[ticker]?.[1]).filter(Boolean),
     },
-    companySignal: !signal && tickers[0] ? {
+    companySignal: !related && tickers[0] ? {
       ticker: tickers[0],
       company: companyMeta[tickers[0]]?.[0] || tickers[0],
       sector: companyMeta[tickers[0]]?.[1] || "Российский рынок",
@@ -596,12 +607,16 @@ function groupNewsEvents(items) {
       });
       return;
     }
+    const mergedSignals = [...(group.signals || []), ...(item.signals || [])]
+      .filter((signal, index, values) => values.findIndex((candidate) => candidate.id === signal.id) === index);
     const groupWeight = Math.abs(group.signal?.score || 0) + Math.min(group.content?.length || 0, 600) / 120;
     const itemWeight = Math.abs(item.signal?.score || 0) + Math.min(item.content?.length || 0, 600) / 120;
     if (itemWeight > groupWeight) {
       const { sources, corroborations, sourceCount } = group;
       Object.assign(group, item, { sources, corroborations, sourceCount });
     } else if (!group.signal && item.signal) group.signal = item.signal;
+    group.signals = mergedSignals;
+    if (!group.signal && mergedSignals.length) group.signal = mergedSignals[0];
     group.tickers = [...new Set([...(group.tickers || []), ...(item.tickers || [])])];
     group.corroborations.push(item);
     if (!group.sources.some((source) => source.name === item.source && source.url === item.url)) {
@@ -1095,7 +1110,8 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
 
         <div className="market-strip">
           <span><i className={marketStatus === "error" ? "is-error" : ""} /> MOEX ISS · {marketStatus === "loading" && !marketUpdatedAt ? "загружаем котировки" : marketUpdatedAt ? `обновлено ${formatRelative(marketUpdatedAt)}` : "данные временно недоступны"}</span>
-          <span>Модель <strong>hybrid-market-0.1.0</strong></span>
+          <span>News engine <strong>signal-engine-0.5.0</strong></span>
+          <span>Live assessment <strong>hybrid-market-0.1.0</strong></span>
           <span>Шкала сигнала <strong>от −100 до +100</strong></span>
           <span className="market-strip__right"><strong>{assessmentMeta.directed || 0}</strong> сильных · {assessmentMeta.market_biases || 0} с уклоном · {assessmentMeta.news_backed || 0} с новостью</span>
         </div>
@@ -1124,7 +1140,7 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
                   </header>
                   <div className="company-signal-card__body">
                     <div className="company-signal-card__score">
-                      <span>{available ? signal.assessment_type === "hybrid" ? "Гибридный сигнал" : "Оценка рынка" : signal.sector}</span>
+                      <span>{available ? signal.assessment_type === "hybrid" ? "Live оценка компании" : "Рыночный фон" : signal.sector}</span>
                       {available ? <strong className={`score-cell--${displayDirection}`}>{formatScore(signal.score)}<small> / 100</small></strong> : <strong>Нет сигнала</strong>}
                     </div>
                     <p>{signal.summary}</p>
@@ -1242,7 +1258,7 @@ function CompanyScreen({ signal, companyNews, marketStatus, marketUpdatedAt, onB
 
         <div className="analysis-grid">
           <section className="decision-card">
-            <div className="section-kicker"><CircleGauge size={14} /> {signal.assessment_type === "hybrid" ? "Гибридный сигнал" : "Рыночная оценка без свежей сильной новости"}</div>
+            <div className="section-kicker"><CircleGauge size={14} /> {signal.assessment_type === "hybrid" ? "Live оценка · news + market" : "Рыночный фон без свежего news-сигнала"}</div>
             <div className="decision-headline">
               <div>
                 <h1>{signal.action}</h1>
@@ -1352,14 +1368,14 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
       const matchesTicker = ticker === "all" || item.tickers?.includes(ticker);
       const matchesScope = scope === "all" || item.event?.scope === scope;
       const matchesSource = sourceId === "all" || item.sources?.some((source) => source.id === sourceId) || item.sourceId === sourceId;
-      const matchesSignal = signalState === "all" || (signalState === "signal" ? Boolean(item.signal) : !item.signal);
-      const matchesDirection = direction === "all" || item.signal?.direction === direction;
+      const matchesSignal = signalState === "all" || (signalState === "signal" ? item.signals?.length > 0 : !item.signals?.length);
+      const matchesDirection = direction === "all" || item.signals?.some((signal) => signal.direction === direction);
       const matchesPeriod = cutoff === null || new Date(item.publishedAt).getTime() >= cutoff;
-      const haystack = `${item.title} ${item.content} ${item.source} ${(item.tickers || []).join(" ")} ${(item.event?.sectors || []).join(" ")} ${item.signal?.company || item.companySignal?.company || ""}`.toLocaleLowerCase("ru-RU");
+      const haystack = `${item.title} ${item.content} ${item.source} ${(item.tickers || []).join(" ")} ${(item.event?.sectors || []).join(" ")} ${(item.signals || []).map((signal) => signal.target?.label || signal.company || signal.ticker).join(" ")} ${item.companySignal?.company || ""}`.toLocaleLowerCase("ru-RU");
       return matchesTicker && matchesScope && matchesSource && matchesSignal && matchesDirection && matchesPeriod && (!normalized || haystack.includes(normalized));
     }).sort((left, right) => {
       if (sortMode === "impact") {
-        const impact = Math.abs(right.signal?.score || 0) - Math.abs(left.signal?.score || 0);
+        const impact = Math.max(0, ...(right.signals || []).map((signal) => Math.abs(signal.score || 0))) - Math.max(0, ...(left.signals || []).map((signal) => Math.abs(signal.score || 0)));
         if (impact) return impact;
       }
       return new Date(right.publishedAt) - new Date(left.publishedAt);
@@ -1372,6 +1388,26 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
     return result;
   }, {}), [allNews]);
   const visibleItems = items.slice(0, visibleCount);
+  const processingStats = useMemo(() => {
+    const apiStats = newsMeta.processing_coverage;
+    if (apiStats) return {
+      relevant: apiStats.relevant,
+      analyzed: apiStats.analysis_candidates,
+      withSignal: apiStats.signaled,
+      coverage: Math.round(apiStats.candidate_coverage_pct || 0),
+      modelVersion: apiStats.signal_model_version,
+    };
+    const relevant = allNews.filter((item) => item.processing?.event_candidate || item.processing?.analysis_candidate);
+    const analyzed = relevant.filter((item) => item.processing?.analysis_candidate);
+    const withSignal = allNews.filter((item) => item.signals?.length).length;
+    return {
+      relevant: relevant.length,
+      analyzed: analyzed.length,
+      withSignal,
+      coverage: relevant.length ? Math.round(analyzed.length / relevant.length * 100) : 0,
+      modelVersion: "signal-engine-0.5.0",
+    };
+  }, [allNews, newsMeta.processing_coverage]);
   const activeFilterCount = [ticker, scope, sourceId, signalState, direction, period, sortMode]
     .filter((value, index) => value !== ["all", "all", "all", "all", "all", "7d", "newest"][index]).length + (query ? 1 : 0);
   const resetFilters = () => {
@@ -1382,7 +1418,7 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
   return (
     <main className="screen section-screen news-screen">
       <section className="page-hero news-hero">
-        <div><span className="eyebrow"><Newspaper size={13} /> Карта событий</span><h1>Не лента, а структура рынка</h1><p>EventEdge собирает публикации в события и отдельно показывает общий рынок, отрасли и конкретные компании. Сигнал есть только там, где эффект на бумагу уже рассчитан.</p></div>
+        <div><span className="eyebrow"><Newspaper size={13} /> Карта событий</span><h1>Не лента, а структура рынка</h1><p>EventEdge сохраняет каждую публикацию, выделяет экономически значимые события и независимо рассчитывает сигнал для компании, отрасли или российского рынка.</p></div>
         <label className="page-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Компания, тикер или событие" />{query && <button type="button" onClick={() => setQuery("")} aria-label="Очистить поиск"><X size={13} /></button>}</label>
       </section>
 
@@ -1408,6 +1444,12 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
       </section>
 
       <div className="pipeline-status"><span><i /> Быстрый сбор работает</span><strong>Приоритетные источники проверяются каждую минуту</strong><small>{newsMeta.last_ingested_at ? `Последняя новая запись ${formatRelative(newsMeta.last_ingested_at)} · цель доставки до ${Math.round((newsMeta.delivery_target_seconds || 120) / 60)} мин` : "Ожидаем первую публикацию"}</small></div>
+      <section className="coverage-strip" aria-label="Покрытие обработки новостей">
+        <article><span>Экономически релевантные</span><strong>{processingStats.relevant}</strong><small>рынок · отрасли · компании</small></article>
+        <article><span>Переданы в Signal Engine</span><strong>{processingStats.coverage}%</strong><small>{processingStats.analyzed} из {processingStats.relevant} · {processingStats.modelVersion}</small></article>
+        <article><span>Публикации с сигналом</span><strong>{processingStats.withSignal}</strong><small>включая отраслевые и рыночные</small></article>
+        <p><Info size={13} /> Исторический backfill идёт небольшими пакетами; покрытие растёт без удаления старых версий сигналов.</p>
+      </section>
       <section className="news-feed">
         <div className="feed-heading"><span>{items.length} из {allNews.length} публикаций</span><small>{newsMeta.sources?.length || sources.length} источников · повторы одного события объединяются</small></div>
         {visibleItems.map((item) => {
@@ -1415,8 +1457,8 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
           const ScopeIcon = scopeMeta.Icon;
           return (
           <button type="button" className={`feed-item event-feed-item event-feed-item--${item.event?.scope || "market"}`} key={item.id} onClick={() => onReadNews(item)}>
-            {item.signal || item.companySignal ? <CompanyMark signal={item.signal || item.companySignal} /> : <span className="company-mark"><Newspaper size={17} /></span>}
-            <div className="feed-copy"><div><span className={`event-scope event-scope--${item.event?.scope || "market"}`}><ScopeIcon size={10} /> {scopeMeta.label}</span><span>{item.source}</span>{item.sourceCount > 1 && <i className="source-count">{item.sourceCount} источника</i>}<time>Опубликовано {formatPublicationTime(item.publishedAt)}</time></div><h2>{item.title}</h2><p>{item.content}</p><footer>{item.event?.sectors?.map((sector) => <span className="event-sector" key={sector}>{sector}</span>)}{item.signal ? <><strong>{item.signal.ticker}</strong><Direction direction={item.signal.direction} /><span>{formatScore(item.signal.score)} п.</span></> : <span className="context-only">Контекст · без торгового сигнала</span>}</footer></div>
+            {item.signal?.target?.type === "instrument" || item.companySignal ? <CompanyMark signal={item.signal?.target?.type === "instrument" ? item.signal : item.companySignal} /> : <span className={`company-mark company-mark--${item.event?.scope || "market"}`}><ScopeIcon size={17} /></span>}
+            <div className="feed-copy"><div><span className={`event-scope event-scope--${item.event?.scope || "market"}`}><ScopeIcon size={10} /> {scopeMeta.label}</span><span>{item.source}</span>{item.sourceCount > 1 && <i className="source-count">{item.sourceCount} источника</i>}<time>Опубликовано {formatPublicationTime(item.publishedAt)}</time></div><h2>{item.title}</h2><p>{item.content}</p><footer>{item.event?.sectors?.map((sector) => <span className="event-sector" key={sector}>{sector}</span>)}{item.signals?.length ? <span className="event-signal-list">{item.signals.map((signal) => <span className={`event-signal-chip event-signal-chip--${signal.direction}`} key={signal.id}><strong>{signal.target?.label || signal.ticker}</strong><Direction direction={signal.direction} /><span>{formatScore(signal.score)} п.</span></span>)}</span> : <span className="context-only">Сохранено · сигнал не рассчитан</span>}</footer></div>
             <BookOpen size={17} />
           </button>
         );})}
@@ -1697,6 +1739,14 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
         <div><h2>Что такое пункты оценки</h2><p><strong>{formatScore(sample.score)} п.</strong> — не «акция вырастет на 42,7%». Это нормализованная сила аналитической гипотезы на шкале от −100 до +100. Чем дальше значение от нуля, тем сильнее направленный сигнал.</p></div>
       </section>
 
+      <section className="model-stack">
+        <article><span>01</span><div><strong>signal-engine-0.5.0</strong><small>Новостной сигнал</small><p>LLM извлекает событие, факты, полярность и существенность. Код выбирает target — компания, отрасль или рынок — и рассчитывает score.</p></div></article>
+        <i><ArrowDownRight size={15} /></i>
+        <article><span>02</span><div><strong>hybrid-market-0.1.0</strong><small>Live оценка компании</small><p>Для конкретной акции объединяет активный news-сигнал с ценой, объёмом, волатильностью, ликвидностью и доступной отчётностью.</p></div></article>
+        <i><ArrowDownRight size={15} /></i>
+        <article><span>03</span><div><strong>Evals по эпохам</strong><small>Проверка после сигнала</small><p>Сохраняет результаты каждой версии отдельно и оценивает реакцию через 1 и 4 часа; сырые точки до 3 дней остаются в выгрузке.</p></div></article>
+      </section>
+
       <div className="method-grid">
         <section className="method-card">
           <header><span>01</span><div><h2>LLM разбирает новость</h2><p>Возвращает структурированные признаки, а не готовый торговый совет.</p></div></header>
@@ -1742,11 +1792,11 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
       <section className="event-method">
         <header><span>06</span><div><h2>Каждая публикация становится событием</h2><p>Это три независимых масштаба контекста, а не обязательная цепочка влияния.</p></div></header>
         <div className="event-method__grid">
-          <article><Globe2 size={16} /><strong>Рынок</strong><span>Ставка, инфляция, санкции, геополитика и другие страновые факторы.</span></article>
-          <article><Layers3 size={16} /><strong>Отрасль</strong><span>События, затрагивающие сектор: нефть, банки, металлы, ритейл или логистику.</span></article>
-          <article><BarChart3 size={16} /><strong>Компания</strong><span>Факт привязан к конкретной бумаге MOEX и может пройти расчёт сигнала.</span></article>
+          <article><Globe2 size={16} /><strong>Рынок</strong><span>Независимый risk-on / risk-off сигнал по общему фактору — без автоматического назначения всем акциям.</span></article>
+          <article><Layers3 size={16} /><strong>Отрасль</strong><span>Независимый сигнал по затронутому сектору, например сельскому хозяйству или логистике.</span></article>
+          <article><BarChart3 size={16} /><strong>Компания</strong><span>Сигнал конкретной бумаге возникает только при доказанной прямой связи публикации с эмитентом.</span></article>
         </div>
-        <p><Info size={14} /> Например, удар по складу маркетплейса попадёт в «Ритейл и логистика». Пока EventEdge не разносит такой контекст автоматически на все бумаги сектора — для этого нужна отдельная историческая калибровка.</p>
+        <p><Info size={14} /> Это не обязательная цепочка «рынок → отрасль → компания». Одна публикация получает тот target, для которого эффект обоснован; распространение на отдельные бумаги требует отдельной калибровки.</p>
       </section>
 
       <section className="source-method">
@@ -1777,11 +1827,11 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
             );
           })}
         </div>
-        <p className="source-note">Telegram-пост проходит тот же детерминированный фильтр и дедупликацию, что RSS. LLM вызывается только для кандидатов на сигнал; общий фон и отраслевые события сохраняются без LLM-затрат. Качество пользовательского канала по умолчанию — 65/100.</p>
+        <p className="source-note">Все Telegram- и RSS-публикации сохраняются. High-recall фильтр отправляет в LLM только экономически релевантные события; компания, отрасль или рынок выбираются кодом после семантического разбора. Качество пользовательского канала по умолчанию — 65/100.</p>
       </section>
 
       <section className="method-reality">
-        <div><ShieldCheck size={17} /><span><strong>Что работает сейчас</strong>Новостной baseline, пять не‑LLM факторов, live‑оценка 15 бумаг, outcomes, аналитические разрезы и выгрузки.</span></div>
+        <div><ShieldCheck size={17} /><span><strong>Что работает сейчас</strong>Signal Engine 0.5, независимые market/sector/company targets, пять не‑LLM факторов, live‑оценка бумаг, outcomes и выгрузки по эпохам.</span></div>
         <div><Database size={17} /><span><strong>Граница текущей версии</strong>Отчётность пока извлекается из распознанных раскрытий; полноценный point‑in‑time фундаментальный датасет и калиброванный backtest ещё не готовы.</span></div>
         <button type="button" onClick={onApi}>Посмотреть API <ArrowUpRight size={13} /></button>
       </section>
@@ -1793,7 +1843,7 @@ const apiEndpoints = [
   { id: "assessments", method: "GET", path: "/v1/assessments", title: "Live‑оценки рынка", description: "Гибридная оценка направленных news-сигналов и отдельный quant-уклон для остальных компаний.", parameter: { name: "tickers", type: "string", description: "Опциональный список тикеров MOEX через запятую" } },
   { id: "evals", method: "GET", path: "/v1/evals", title: "Анализ качества сигналов", description: "Короткие 1ч/4ч метрики, Pearson и выбор сохранённой эпохи модели.", parameter: { name: "model_version", type: "string", description: "Версия news-модели; без параметра выбирается текущая эпоха" } },
   { id: "evals_export", method: "GET", path: "/v1/evals/export?format=csv&dataset=timeseries&model_version=all", title: "Выгрузка Evals", description: "CSV/JSON: все эпохи моделей и сырой event-time ряд свечей до +3 дней.", parameter: { name: "dataset", type: "string", description: "outcomes или timeseries; model_version — версия или all" } },
-  { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Семантические news‑сигналы", description: "Новостный слой: событие, направление и вес из semantic‑модели. Финальная оценка hybrid-market-0.1.0, включающая рыночные факторы, возвращается через /v1/assessments.", parameter: { name: "limit", type: "integer", description: "Количество записей, максимум 100" } },
+  { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Сигналы Signal Engine", description: "Версия signal-engine-0.5.0: target может быть инструментом, отраслью или рынком. Live-оценка конкретной компании возвращается отдельно через /v1/assessments.", parameter: { name: "limit", type: "integer", description: "Количество записей, максимум 100" } },
   { id: "news", method: "GET", path: "/v1/news?limit=20", title: "Лента новостей", description: "Исходные публикации, event-проекция и связанные сигналы.", parameter: { name: "limit", type: "integer", description: "Количество публикаций, максимум 500" } },
   { id: "events", method: "GET", path: "/v1/events?limit=20", title: "Рыночные события", description: "Публикации как события уровня рынок, отрасль или компания.", parameter: { name: "scope", type: "string", description: "market, sector или company" } },
   { id: "sources", method: "GET", path: "/v1/sources", title: "Реестр источников", description: "Подключённые RSS и Telegram-источники, свежесть и статистика сбора.", parameter: null },
@@ -1828,11 +1878,11 @@ function ApiScreen() {
     "summary": {"evaluated":12,"hit_rate_pct":58.3},
     "breakdowns": {"by_horizon":[{"horizon":"4h","hit_rate_pct":58.3}]},
     "relationships": [{"code":"signal_strength_vs_4h_return","value":0.21}],
-    "outcomes": [{"ticker":"SBER","model_version":"news-baseline-0.4.0","returns":{"1h":0.4,"4h":0.8,"1d":1.2,"3d":2.1},"verdict":true}]
+    "outcomes": [{"ticker":"SBER","model_version":"signal-engine-0.5.0","returns":{"1h":0.4,"4h":0.8,"1d":1.2,"3d":2.1},"verdict":true}]
   },
-  "meta": {"selected_model_version":"news-baseline-0.4.0","primary_horizon":"4h","evaluation_scope":"directional_signals_only"}
+  "meta": {"selected_model_version":"signal-engine-0.5.0","primary_horizon":"4h","evaluation_scope":"directional_signals_only"}
 }` : endpoint.id === "evals_export" ? `signal_id,ticker,signal_as_of,direction,score,confidence,model_version,config_version,observation_at,offset_minutes,return_pct
-sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,news-baseline-0.4.0,1,2026-08-08T08:00:00Z,60,0.42` : endpoint.id === "snapshot" ? `{
+sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,signal-engine-0.5.0,1,2026-08-08T08:00:00Z,60,0.42` : endpoint.id === "snapshot" ? `{
   "data": {
     "ticker": "SBER",
     "market": {
@@ -1880,7 +1930,7 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,news-baseline-0.4.0,1,2026-08-08T0
     "source_id": "moex_news",
     "title": "Сообщение эмитента",
     "url": "https://www.moex.com/n…",
-    "related_signals": [{"ticker":"SBER","direction":"up","score":24.8}]
+    "related_signals": [{"ticker":"RUAGRI","target":{"type":"sector","id":"AGRICULTURE","label":"Сельское хозяйство"},"direction":"up","score":46.7}]
   }],
   "meta": {
     "limit":20,
@@ -1889,6 +1939,7 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,news-baseline-0.4.0,1,2026-08-08T0
     "poll_interval_seconds":60,
     "client_refresh_interval_seconds":30,
     "delivery_target_seconds":120,
+    "processing_coverage":{"stored":84,"relevant":61,"analysis_candidates":54,"signaled":27,"candidate_coverage_pct":88.5,"signal_yield_pct":50.0,"signal_model_version":"signal-engine-0.5.0"},
     "collection_lanes":[{"id":"fast","interval_seconds":60,"source_ids":["interfax","tass","rbc","moex_news"]}],
     "sources":[{"source_id":"interfax","count":24,"signal_count":5}]
   }
@@ -1896,12 +1947,13 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,news-baseline-0.4.0,1,2026-08-08T0
   "data": [
     {
       "id": "sig_01JZK6K5GDX90Q2X8C0R4D7M9P",
-      "ticker": "SBER",
+      "ticker": "RUAGRI",
+      "target": {"type":"sector","id":"AGRICULTURE","label":"Сельское хозяйство"},
       "direction": "up",
       "score": 42.7,
       "confidence": 0.76,
       "horizon": {"value": 3, "unit": "calendar_days"},
-      "model_version": "news-baseline-0.2.0"
+      "model_version": "signal-engine-0.5.0"
     }
   ],
   "meta": {
@@ -1969,20 +2021,26 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,news-baseline-0.4.0,1,2026-08-08T0
 
 function NewsReader({ item, onClose }) {
   if (!item) return null;
-  const { signal } = item;
-  const companySignal = signal || item.companySignal;
+  const relatedSignals = item.signals || (item.signal ? [item.signal] : []);
+  const companySignal = relatedSignals.find((signal) => signal.target?.type === "instrument") || item.companySignal;
   const scopeMeta = eventScopeMeta[item.event?.scope || "market"];
+  const ScopeIcon = scopeMeta.Icon;
+  const signalCountText = relatedSignals.length === 1
+    ? "одну независимую оценку"
+    : relatedSignals.length < 5
+      ? `${relatedSignals.length} независимые оценки`
+      : `${relatedSignals.length} независимых оценок`;
   return (
     <div className="reader-overlay">
       <button className="overlay-dismiss" type="button" aria-label="Закрыть новость" onClick={onClose} />
       <article className="reader-dialog" role="dialog" aria-modal="true" aria-label="Просмотр новости">
-        <header><div>{companySignal ? <CompanyMark signal={companySignal} /> : <span className="company-mark"><Newspaper size={17} /></span>}<span><strong>{companySignal?.ticker || "Новость"}</strong><small>{companySignal ? `${companySignal.company} · ` : ""}{item.source}</small></span></div><button type="button" onClick={onClose} aria-label="Закрыть"><X size={18} /></button></header>
+        <header><div>{companySignal ? <CompanyMark signal={companySignal} /> : <span className={`company-mark company-mark--${item.event?.scope || "market"}`}><ScopeIcon size={17} /></span>}<span><strong>{companySignal?.ticker || relatedSignals[0]?.target?.label || "Новость"}</strong><small>{companySignal ? `${companySignal.company} · ` : ""}{item.source}</small></span></div><button type="button" onClick={onClose} aria-label="Закрыть"><X size={18} /></button></header>
         <div className="reader-meta"><span>{scopeMeta.label}{item.event?.sectors?.length ? ` · ${item.event.sectors.join(", ")}` : ""}</span><time><Clock3 size={12} /> Опубликовано источником {formatPublicationTime(item.publishedAt)}</time>{item.receivedAt && <time>EventEdge получил {formatPublicationTime(item.receivedAt)}{item.deliveryLagMinutes === null ? "" : ` · лаг ${item.deliveryLagMinutes} мин`}</time>}</div>
         <h1>{item.title}</h1>
-        <div className="reader-body"><p>{item.content}</p>{signal ? <p>EventEdge связал публикацию с {signal.ticker} и алгоритмически рассчитал на горизонте {signal.horizon} оценку <strong>{formatScore(signal.score)} пункта</strong>.</p> : <p>Событие сохранено как <strong>{scopeMeta.label.toLocaleLowerCase("ru-RU")}</strong>-контекст. Торговый сигнал по конкретной бумаге из него пока не рассчитан.</p>}</div>
+        <div className="reader-body"><p>{item.content}</p>{relatedSignals.length ? <p>EventEdge рассчитал {signalCountText} влияния события. Это оценка силы события, а не обещанная доходность акции.</p> : <p>Событие сохранено как <strong>{scopeMeta.label.toLocaleLowerCase("ru-RU")}</strong>-контекст. Сигнал из него пока не рассчитан.</p>}</div>
+        {relatedSignals.length > 0 && <section className="reader-signal-list"><span>Связанные сигналы</span>{relatedSignals.map((signal) => <article key={signal.id}><div><strong>{signal.target?.label || signal.company || signal.ticker}</strong><small>{signal.target?.type === "sector" ? "Отрасль" : signal.target?.type === "market" ? "Рынок" : "Компания"}</small></div><Direction direction={signal.direction} /><b>{formatScore(signal.score)} п.</b><p>{signal.summary}</p></article>)}</section>}
         {item.sources?.length > 1 && <section className="reader-sources"><span>Подтверждающие публикации</span>{item.sources.map((source) => <a href={source.url} target="_blank" rel="noreferrer" key={`${source.name}-${source.url}`}>{source.name}<ArrowUpRight size={11} /></a>)}</section>}
-        {signal && <section className="reader-insight"><CircleGauge size={16} /><div><span>Что это меняет</span><strong>{signal.action}</strong><p>{signal.summary}</p></div></section>}
-        <footer><FileText size={13} /> Показан текст из RSS источника. <a href={item.url} target="_blank" rel="noreferrer">Открыть оригинал <ArrowUpRight size={11} /></a></footer>
+        <footer><FileText size={13} /> Показан текст, полученный от источника. <a href={item.url} target="_blank" rel="noreferrer">Открыть оригинал <ArrowUpRight size={11} /></a></footer>
       </article>
     </div>
   );
@@ -2053,6 +2111,7 @@ export default function App() {
           cacheSourceRegistry(sourcePayload);
         }
         const allSignals = signalPayload.data.map(signalFromApi);
+        const instrumentSignals = allSignals.filter((item) => !item.target || item.target.type === "instrument");
         const signalsById = new Map(allSignals.map((item) => [item.id, item]));
         const sourceNames = new Map((sourcePayload?.data || methodologySources.map((source) => ({ source_id: source.id, name: source.name }))).map((source) => [source.source_id, source.name]));
         const nextNews = groupNewsEvents(newsPayload.data.map((item) => newsFromApi(item, signalsById, sourceNames)));
@@ -2065,7 +2124,7 @@ export default function App() {
           });
         });
         const seenTickers = new Set();
-        setSignals(allSignals.filter((item) => {
+        setSignals(instrumentSignals.filter((item) => {
           if (seenTickers.has(item.ticker)) return false;
           seenTickers.add(item.ticker);
           return true;
@@ -2081,7 +2140,7 @@ export default function App() {
           const assessmentPayload = await assessmentResponse.json();
           const nextSignals = assessmentPayload.data.map(assessmentFromApi);
           const assessedTickers = new Set(nextSignals.map((item) => item.ticker));
-          const newsOnlySignals = allSignals.filter((item) => !assessedTickers.has(item.ticker));
+          const newsOnlySignals = instrumentSignals.filter((item) => !assessedTickers.has(item.ticker));
           setSignals([...nextSignals, ...newsOnlySignals].map((item) => ({ ...item, evidence: evidenceByTicker.get(item.ticker)?.slice(0, 8) || [] })));
           setAssessmentMeta(assessmentPayload.meta || { directed: 0, market_biases: 0, news_backed: 0 });
           setMarketUpdatedAt(new Date().toISOString());

@@ -442,6 +442,15 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
     assert news.json()["meta"]["poll_interval_seconds"] == 60
     assert news.json()["meta"]["client_refresh_interval_seconds"] == 30
     assert news.json()["meta"]["delivery_target_seconds"] == 120
+    assert news.json()["meta"]["processing_coverage"] == {
+        "stored": 1,
+        "relevant": 1,
+        "analysis_candidates": 1,
+        "signaled": 1,
+        "candidate_coverage_pct": 100.0,
+        "signal_yield_pct": 100.0,
+        "signal_model_version": "signal-engine-0.5.0",
+    }
     assert news.json()["meta"]["collection_lanes"] == [
         {
             "id": "fast",
