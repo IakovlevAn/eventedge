@@ -253,7 +253,11 @@ class NewsRepository(Protocol):
         epoch: EvaluationEpochRecord,
     ) -> EvaluationEpochRecord: ...
 
-    async def list_evaluation_epochs(self) -> list[EvaluationEpochRecord]: ...
+    async def list_evaluation_epochs(
+        self,
+        *,
+        include_observations: bool = True,
+    ) -> list[EvaluationEpochRecord]: ...
 
 
 def utc_now() -> datetime:
@@ -582,12 +586,30 @@ class MemoryNewsRepository:
         self._evaluation_epochs[epoch.epoch_id] = epoch
         return epoch
 
-    async def list_evaluation_epochs(self) -> list[EvaluationEpochRecord]:
-        return sorted(
+    async def list_evaluation_epochs(
+        self,
+        *,
+        include_observations: bool = True,
+    ) -> list[EvaluationEpochRecord]:
+        epochs = sorted(
             self._evaluation_epochs.values(),
             key=lambda epoch: (epoch.evaluated_at, epoch.epoch_id),
             reverse=True,
         )
+        if include_observations:
+            return epochs
+        return [
+            EvaluationEpochRecord(
+                epoch_id=epoch.epoch_id,
+                model_version=epoch.model_version,
+                config_version=epoch.config_version,
+                evaluated_at=epoch.evaluated_at,
+                outcomes=epoch.outcomes,
+                observations=(),
+                observations_truncated=epoch.observations_truncated,
+            )
+            for epoch in epochs
+        ]
 
 
 class YdbNewsRepository:
@@ -598,11 +620,15 @@ class YdbNewsRepository:
         database: str,
         credentials: ydb.Credentials | None = None,
         analyzer: NewsAnalyzer | None = None,
+        pool_size: int = 4,
     ) -> None:
+        if not 1 <= pool_size <= 32:
+            raise ValueError("YDB pool size must be between 1 and 32")
         self._endpoint = endpoint
         self._database = database
         self._credentials = credentials or ydb.iam.MetadataUrlCredentials()
         self._analyzer = analyzer or RuleBasedNewsAnalyzer()
+        self._pool_size = pool_size
         self._driver: ydb.aio.Driver | None = None
         self._pool: ydb.aio.QuerySessionPool | None = None
 
@@ -616,7 +642,7 @@ class YdbNewsRepository:
             )
             self._driver = ydb.aio.Driver(config)
             await self._driver.wait(timeout=15, fail_fast=True)
-            self._pool = ydb.aio.QuerySessionPool(self._driver, size=2)
+            self._pool = ydb.aio.QuerySessionPool(self._driver, size=self._pool_size)
         except (Exception, asyncio.CancelledError):
             await self._close()
             raise
@@ -851,9 +877,17 @@ class YdbNewsRepository:
         )
         return epoch
 
-    async def list_evaluation_epochs(self) -> list[EvaluationEpochRecord]:
+    async def list_evaluation_epochs(
+        self,
+        *,
+        include_observations: bool = True,
+    ) -> list[EvaluationEpochRecord]:
         result_sets = await self._require_pool().execute_with_retries(
-            SELECT_EVALUATION_EPOCHS_QUERY,
+            (
+                SELECT_EVALUATION_EPOCHS_QUERY
+                if include_observations
+                else SELECT_EVALUATION_EPOCH_SUMMARIES_QUERY
+            ),
         )
         rows = result_sets[0].rows if result_sets else []
         return [evaluation_epoch_from_row(row) for row in rows]
@@ -1012,7 +1046,9 @@ def evaluation_epoch_from_row(row: object) -> EvaluationEpochRecord:
         config_version=row.config_version,
         evaluated_at=ensure_utc(row.evaluated_at),
         outcomes=tuple(dict(item) for item in json_list(row.outcomes)),
-        observations=tuple(dict(item) for item in json_list(row.observations)),
+        observations=tuple(
+            dict(item) for item in json_list(getattr(row, "observations", "[]"))
+        ),
         observations_truncated=row.observations_truncated,
     )
 
@@ -1452,6 +1488,18 @@ FROM `evaluation_epochs`
 ORDER BY evaluated_at DESC, epoch_id DESC;
 """
 
+SELECT_EVALUATION_EPOCH_SUMMARIES_QUERY = """
+SELECT
+    epoch_id,
+    model_version,
+    config_version,
+    evaluated_at,
+    outcomes,
+    observations_truncated
+FROM `evaluation_epochs`
+ORDER BY evaluated_at DESC, epoch_id DESC;
+"""
+
 UPSERT_EVALUATION_EPOCH_QUERY = """
 DECLARE $epoch_id AS Utf8;
 DECLARE $model_version AS Utf8;
@@ -1493,5 +1541,6 @@ VALIDATED_QUERIES = (
     UPSERT_TELEGRAM_SOURCE_QUERY,
     UPSERT_TELEGRAM_SOURCE_METADATA_QUERY,
     SELECT_EVALUATION_EPOCHS_QUERY,
+    SELECT_EVALUATION_EPOCH_SUMMARIES_QUERY,
     UPSERT_EVALUATION_EPOCH_QUERY,
 )

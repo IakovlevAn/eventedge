@@ -38,6 +38,7 @@ def test_deployment_payload_has_budget_caps() -> None:
         "EVENTEDGE_COMPONENT": "api",
         "YDB_ENDPOINT": "grpcs://ydb.example:2135",
         "YDB_DATABASE": "/region/cloud/database",
+        "YDB_POOL_SIZE": "8",
         "YANDEX_GPT_ENABLED": "true",
         "YANDEX_GPT_FOLDER_ID": "folder-id",
         "YANDEX_GPT_MODEL": "yandexgpt-lite",
@@ -89,6 +90,7 @@ def test_worker_payload_has_no_provisioned_instances() -> None:
         "zoneRequestsLimit": "1",
     }
     assert payload["imageSpec"]["environment"]["EVENTEDGE_COMPONENT"] == "worker"
+    assert payload["imageSpec"]["environment"]["YDB_POOL_SIZE"] == "4"
 
 
 def test_budget_policy_matches_deployment_caps() -> None:

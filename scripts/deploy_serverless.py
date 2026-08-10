@@ -27,6 +27,7 @@ def build_payload(
         "EVENTEDGE_COMPONENT": component,
         "YDB_ENDPOINT": environment["YDB_ENDPOINT"],
         "YDB_DATABASE": environment["YDB_DATABASE"],
+        "YDB_POOL_SIZE": "4" if component == "worker" else "8",
         "YANDEX_GPT_ENABLED": "true",
         "YANDEX_GPT_FOLDER_ID": environment["YC_FOLDER_ID"],
         "YANDEX_GPT_MODEL": "yandexgpt-lite",

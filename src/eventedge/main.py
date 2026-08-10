@@ -209,10 +209,17 @@ def repository_from_environment(environment: Mapping[str, str]) -> NewsRepositor
     endpoint = environment.get("YDB_ENDPOINT")
     database = environment.get("YDB_DATABASE")
     if endpoint and database:
+        component = environment.get("EVENTEDGE_COMPONENT", "api")
+        default_pool_size = 4 if component == "worker" else 8
+        try:
+            pool_size = int(environment.get("YDB_POOL_SIZE", str(default_pool_size)))
+        except ValueError as exc:
+            raise RuntimeError("YDB_POOL_SIZE must be an integer") from exc
         return YdbNewsRepository(
             endpoint=endpoint,
             database=database,
             analyzer=analyzer,
+            pool_size=pool_size,
         )
     if endpoint or database:
         raise RuntimeError("YDB_ENDPOINT and YDB_DATABASE must be configured together")
@@ -775,8 +782,12 @@ async def list_market_events(
 @app.get("/v1/sources", tags=["Sources"])
 async def list_sources(request: Request) -> JSONResponse:
     repository: NewsRepository = request.app.state.news_repository
-    stored_news, _ = await load_content_snapshot(request)
-    stored_news = public_news(stored_news)
+    cached = request.app.state.content_snapshot_cache
+    stored_news = (
+        public_news(cached["news"])
+        if cached is not None and cached["repository"] is repository
+        else []
+    )
     stats: dict[str, dict[str, object]] = {}
     for item in stored_news:
         stat = stats.setdefault(
@@ -1476,7 +1487,7 @@ async def list_evals(
     ] = None,
 ) -> JSONResponse:
     repository: NewsRepository = request.app.state.news_repository
-    epochs = await repository.list_evaluation_epochs()
+    epochs = await repository.list_evaluation_epochs(include_observations=False)
     selected_model_version = model_version or CURRENT_NEWS_MODEL_VERSION
     selected_epoch = next(
         (epoch for epoch in epochs if epoch.model_version == selected_model_version),

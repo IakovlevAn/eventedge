@@ -212,6 +212,27 @@ jobs:
           done
           echo "Production source registry and market-event routes are ready"
 
+      - name: Smoke test concurrent dashboard reads
+        shell: bash
+        run: |
+          set -euo pipefail
+          check_dir="$(mktemp -d)"
+          curl --fail --silent --show-error --max-time 20 \
+            "${EVENTEDGE_API_URL}/v1/evals" >"${check_dir}/evals.json" &
+          evals_pid=$!
+          curl --fail --silent --show-error --max-time 20 \
+            "${EVENTEDGE_API_URL}/v1/sources" >"${check_dir}/sources.json" &
+          sources_pid=$!
+          curl --fail --silent --show-error --max-time 35 \
+            "${EVENTEDGE_API_URL}/v1/assessments" >"${check_dir}/assessments.json" &
+          assessments_pid=$!
+          wait "$evals_pid" "$sources_pid" "$assessments_pid"
+          jq -e '.meta.evaluation_scope == "directional_signals_only"' \
+            "${check_dir}/evals.json" >/dev/null
+          jq -e '.data | length >= 6' "${check_dir}/sources.json" >/dev/null
+          jq -e '.meta.returned == 20' "${check_dir}/assessments.json" >/dev/null
+          echo "Concurrent production dashboard reads are ready"
+
       - name: Smoke test web application
         shell: bash
         run: |

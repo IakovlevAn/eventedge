@@ -54,6 +54,13 @@ def test_evaluation_epochs_are_kept_independently_by_model() -> None:
         }
         assert sum(len(epoch.observations) for epoch in epochs) == 2
 
+        summaries = await repository.list_evaluation_epochs(include_observations=False)
+        assert all(not epoch.observations for epoch in summaries)
+        assert {epoch.model_version for epoch in summaries} == {
+            "news-baseline-0.2.0",
+            "news-baseline-0.3.0",
+        }
+
     asyncio.run(scenario())
 
 
@@ -399,7 +406,7 @@ def test_ydb_runtime_is_created_inside_running_event_loop(
     assert events == [
         "driver.init",
         "driver.wait:15:True",
-        "pool.init:2",
+        "pool.init:4",
         "pool.stop",
         "driver.stop:5",
     ]
