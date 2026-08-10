@@ -1,6 +1,7 @@
 import asyncio
 import time
 from contextlib import suppress
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -188,6 +189,61 @@ def test_admin_reprocesses_one_explicit_stored_candidate(
     assert response.json()["data"][0]["news_id"] == stored.id
     assert response.json()["data"][0]["result_ref"].startswith("sig_")
     assert updated.source_metadata["reprocess_version"] == "signal-engine-0.6.1"
+
+
+def test_admin_reprocess_accepts_a_refreshed_copy_of_the_same_news(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source refresh may update canonical metadata after an earlier model pass."""
+    monkeypatch.setenv("EVENTEDGE_ADMIN_KEY", "test-admin-key")
+    original_repository = app.state.news_repository
+    app.state.news_repository = MemoryNewsRepository()
+    try:
+        with TestClient(app) as isolated_client:
+            repository = app.state.news_repository
+            published_at = datetime(2026, 8, 9, 10, tzinfo=UTC)
+            received_at = datetime(2026, 8, 9, 10, 1, tzinfo=UTC)
+            original = NewsDocument(
+                source_id="interfax",
+                external_id="reprocess-sber-refreshed",
+                published_at=published_at,
+                received_at=received_at,
+                title="В России обсудили нефтяной рынок",
+                url="https://example.com/reprocess-sber-refreshed",
+                content="Участники совещания обменялись мнениями.",
+                language="ru",
+                source_metadata={"signal_candidate": False, "tickers": []},
+                payload_hash="reprocess-refreshed-original",
+            )
+            asyncio.run(repository.ingest("refresh-original", original, generate_signals=False))
+            stored = asyncio.run(repository.list_news(source_id="interfax", limit=10))[0]
+
+            first = isolated_client.post(
+                "/v1/admin/signals/reprocess",
+                json={"limit": 1, "news_ids": [stored.id]},
+                headers={"X-EventEdge-Admin-Key": "test-admin-key"},
+            )
+            refreshed = replace(
+                original,
+                content=f"{original.content} Решение принято единогласно.",
+                source_metadata={"signal_candidate": False, "tickers": []},
+                payload_hash="reprocess-refreshed-second-copy",
+            )
+            asyncio.run(repository.ingest("refresh-second-copy", refreshed, generate_signals=False))
+            second = isolated_client.post(
+                "/v1/admin/signals/reprocess",
+                json={"limit": 1, "news_ids": [stored.id]},
+                headers={"X-EventEdge-Admin-Key": "test-admin-key"},
+            )
+    finally:
+        app.state.news_repository = original_repository
+        app.state.evaluation_material_cache = None
+
+    assert first.status_code == 200
+    assert first.json()["meta"]["completed"] == 1
+    assert second.status_code == 200
+    assert second.json()["meta"]["completed"] == 1
+    assert second.json()["meta"]["failed"] == 0
 
 
 def test_backfill_reclassifies_stored_sector_news_without_ticker(
