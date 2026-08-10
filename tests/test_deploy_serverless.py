@@ -85,8 +85,8 @@ def test_worker_payload_has_no_provisioned_instances() -> None:
     assert payload["concurrency"] == "1"
     assert payload["provisionPolicy"] == {"minInstances": "0"}
     assert payload["scalingPolicy"] == {
-        "zoneInstancesLimit": "4",
-        "zoneRequestsLimit": "4",
+        "zoneInstancesLimit": "8",
+        "zoneRequestsLimit": "8",
     }
     assert payload["imageSpec"]["environment"]["EVENTEDGE_COMPONENT"] == "worker"
 
@@ -117,7 +117,7 @@ def test_budget_policy_matches_deployment_caps() -> None:
         "cores": 1,
         "concurrency": 1,
         "min_instances": 0,
-        "zone_instances_limit": 4,
-        "zone_requests_limit": 4,
+        "zone_instances_limit": 8,
+        "zone_requests_limit": 8,
         "execution_timeout_seconds": 180,
     }
