@@ -346,6 +346,7 @@ def test_maintenance_timer_refreshes_models_and_persisted_evals(
     assert response.json()["collectors"]["maintenance"] == {
         "reprocessed": 1,
         "failed": 0,
+        "failure_types": [],
         "remaining": 4,
         "outcomes": 1,
         "epochs": 0,
