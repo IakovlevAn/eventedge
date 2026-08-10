@@ -357,7 +357,7 @@ async def collect_news_items(
             "processing_status": "processed",
             "classification_status": classification_status,
             "classification_reason": classification_reason,
-            "classification_version": "candidate-gate-0.3.0",
+            "classification_version": "candidate-gate-0.4.0",
             "event_candidate": event_candidate,
             "analysis_candidate": generate_signals,
         }
@@ -585,7 +585,41 @@ MARKET_NOISE_TITLE_MARKERS = (
     "бондов",
     "благотвор",
     "фестивал",
+    "лидеры роста",
+    "лидеры падения",
+    "динамика финансовых инструментов",
+    "динамика акций",
+    "топ растущих акций",
 )
+
+NON_MARKET_CATEGORY_MARKERS = (
+    "спорт",
+    "культура",
+    "шоу-бизнес",
+)
+
+PRICE_REACTION_TITLE_PATTERN = re.compile(
+    r"(?:акци[ия]|котировк[аи]|#[A-ZА-Я0-9]{2,12}).{0,80}"
+    r"(?:подскочил|выросл|рост|упал|снизил|прибавил|потерял|"
+    r"подорожал|подешевел|обновил[аи]? максимум)",
+    re.IGNORECASE,
+)
+
+
+def is_market_noise(item: RssItem) -> bool:
+    """Reject posts that describe non-market topics or an already realised price move."""
+    normalized_title = item.title.casefold()
+    categories = " ".join(item.categories).casefold()
+    if any(marker in categories for marker in NON_MARKET_CATEGORY_MARKERS):
+        return True
+    if any(marker in normalized_title for marker in MARKET_NOISE_TITLE_MARKERS):
+        return True
+    if PRICE_REACTION_TITLE_PATTERN.search(item.title):
+        return True
+    return (
+        normalized_title.count("%") >= 3
+        and ("лидер" in normalized_title or "динамик" in normalized_title)
+    )
 
 MARKET_EVENT_MARKERS = (
     "дивиденд",
@@ -652,8 +686,7 @@ def is_market_signal_candidate(item: RssItem) -> bool:
     """
     if not is_moex_equity_title(item.title):
         return False
-    normalized_context = f"{item.title} {item.content[:1200]}".casefold()
-    if any(marker in normalized_context for marker in MARKET_NOISE_TITLE_MARKERS):
+    if is_market_noise(item):
         return False
     features = RuleBasedNewsExtractor().extract(
         NewsAnalysisInput(
@@ -687,8 +720,7 @@ def is_company_news_candidate(item: RssItem) -> bool:
     """Keep readable company news even when it is not strong enough for a signal."""
     if not is_moex_equity_title(item.title):
         return False
-    normalized_title = item.title.casefold()
-    if any(marker in normalized_title for marker in MARKET_NOISE_TITLE_MARKERS):
+    if is_market_noise(item):
         return False
     features = RuleBasedNewsExtractor().extract(
         NewsAnalysisInput(
@@ -706,8 +738,7 @@ def is_company_news_candidate(item: RssItem) -> bool:
 
 def is_market_event_candidate(item: RssItem) -> bool:
     """Keep company, sector and country-level events without spending LLM budget."""
-    normalized_title = item.title.casefold()
-    if any(marker in normalized_title for marker in MARKET_NOISE_TITLE_MARKERS):
+    if is_market_noise(item):
         return False
     return is_company_news_candidate(item) or is_broad_market_event_text(
         item.title,
@@ -744,7 +775,7 @@ SEMANTIC_EVENT_MARKERS = (
 def is_semantic_analysis_candidate(item: RssItem) -> bool:
     """High-recall economic router; final target and signal remain downstream."""
     normalized = f"{item.title} {item.content[:2500]}".casefold()
-    if any(marker in item.title.casefold() for marker in MARKET_NOISE_TITLE_MARKERS):
+    if is_market_noise(item):
         return False
     return is_market_event_candidate(item) or any(
         marker in normalized for marker in SEMANTIC_EVENT_MARKERS

@@ -42,7 +42,7 @@ def test_deployment_payload_has_budget_caps() -> None:
         "YANDEX_GPT_ENABLED": "true",
         "YANDEX_GPT_FOLDER_ID": "folder-id",
         "YANDEX_GPT_MODEL": "yandexgpt-lite",
-        "BACKFILL_BATCH_LIMIT": "12",
+        "BACKFILL_BATCH_LIMIT": "24",
         "BACKFILL_CONCURRENCY": "4",
         "EVENTEDGE_MONTHLY_BUDGET_RUB": "15000",
     }

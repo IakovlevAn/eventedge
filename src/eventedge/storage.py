@@ -12,6 +12,7 @@ from typing import Protocol
 import ydb
 
 from eventedge.analysis import (
+    EventType,
     InstrumentMention,
     NewsAnalysisInput,
     SemanticFeatures,
@@ -357,9 +358,13 @@ def process_document(
     if document.source_id == "cbr_press":
         signal_instruments = []
     signal_features = features.model_copy(update={"instruments": signal_instruments})
-    baseline_signals = score_features(
-        signal_features,
-        source_id=document.source_id,
+    baseline_signals = (
+        score_features(
+            signal_features,
+            source_id=document.source_id,
+        )
+        if generate_signals
+        else []
     )
     if generate_signals and not signal_instruments:
         projection = classify_news_event(
@@ -390,6 +395,20 @@ def process_document(
             )
             for signal in baseline_signals
         ]
+    # A semantic analysis result is not automatically a signal. Neutral context
+    # stays attached to the news feature set; only a high-recall direct company
+    # candidate may publish an explicit neutral signal. This prevents unrelated
+    # market/sector posts from flooding the signal and Evals surfaces with 0.0.
+    keep_neutral = (
+        bool(document.source_metadata.get("signal_candidate"))
+        and features.event_type is not EventType.OTHER
+        and features.materiality >= 0.55
+    )
+    baseline_signals = [
+        signal
+        for signal in baseline_signals
+        if signal.direction.value != "neutral" or keep_neutral
+    ]
     feature_set_id = stable_id(
         "feat_",
         f"{news_id}\x00{document.payload_hash}\x00{features.extractor_version}",

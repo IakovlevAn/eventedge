@@ -33,7 +33,7 @@ runtime_caps:
     managed_telegram_poll_interval_seconds: 300
     llm_analysis: economic_candidates_only
   historical_backfill:
-    model_version: signal-engine-0.5.0
+    model_version: signal-engine-0.6.0
     batch_size: 12
     max_parallel_llm_requests: 4
     interval_seconds: 600
@@ -45,5 +45,5 @@ notes:
   - News collection and LLM analysis run in a separate non-provisioned worker so timer jobs cannot block the public API.
   - The pay-per-use worker processes one timer job at a time so collection waves cannot compete for YDB sessions.
   - At 12500 RUB, freeze resource increases and review the current-month forecast.
-  - Historical reprocessing is capped at 12 candidates per maintenance run and 4 parallel LLM calls.
+  - Historical reprocessing is capped at 24 candidates per five-minute maintenance run and 4 parallel LLM calls.
   - Automatic shutdown requires a separate explicitly approved runbook or trigger.

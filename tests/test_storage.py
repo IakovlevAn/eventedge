@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import ydb
 
+from eventedge.analysis import EventType, InstrumentMention, SemanticFeatures, TemporalStatus
 from eventedge.storage import (
     SCHEMA_STATEMENTS,
     SCHEMA_TABLE_NAMES,
@@ -18,9 +19,72 @@ from eventedge.storage import (
     filter_signals,
     migrate_ydb_schema,
     normalize_signal_freshness,
+    process_document,
     signal_from_row,
     stable_id,
 )
+
+
+def test_neutral_market_context_is_analyzed_without_becoming_a_signal() -> None:
+    timestamp = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    document = NewsDocument(
+        source_id="rbc",
+        external_id="sports-noise",
+        published_at=timestamp,
+        received_at=timestamp,
+        title="Информационное сообщение",
+        url="https://example.com/sports-noise",
+        content="Нет нового экономического факта.",
+        language="ru",
+        source_metadata={"analysis_candidate": True, "signal_candidate": False},
+        payload_hash="sports-noise-payload",
+    )
+    features = SemanticFeatures(
+        extractor_version="test-0.1.0",
+        event_type=EventType.OTHER,
+        instruments=[],
+        facts=[],
+        polarity=0,
+        materiality=0.1,
+        novelty=1,
+        temporal_status=TemporalStatus.CURRENT,
+        rationale="Событие не влияет на рынок.",
+    )
+
+    processed = process_document(document, features, now=timestamp, generate_signals=True)
+
+    assert processed.signals == ()
+
+
+def test_generate_signals_false_is_a_hard_storage_boundary() -> None:
+    timestamp = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    document = NewsDocument(
+        source_id="interfax",
+        external_id="sber-results-no-signal",
+        published_at=timestamp,
+        received_at=timestamp,
+        title="Сбербанк увеличил чистую прибыль",
+        url="https://example.com/sber-results-no-signal",
+        content="Чистая прибыль выросла на 20%.",
+        language="ru",
+        source_metadata={"signal_candidate": True},
+        payload_hash="sber-results-no-signal-payload",
+    )
+    features = SemanticFeatures(
+        extractor_version="test-0.1.0",
+        event_type=EventType.FINANCIAL_RESULTS,
+        instruments=[InstrumentMention(ticker="SBER", relevance=0.96, matched_alias="Сбербанк")],
+        facts=[],
+        polarity=1,
+        materiality=0.9,
+        novelty=1,
+        temporal_status=TemporalStatus.CURRENT,
+        rationale="Позитивный финансовый результат.",
+    )
+
+    processed = process_document(document, features, now=timestamp, generate_signals=False)
+
+    assert processed.signals == ()
 
 
 def test_evaluation_epochs_are_kept_independently_by_model() -> None:
@@ -303,14 +367,7 @@ def test_cbr_context_news_does_not_create_direct_company_signal() -> None:
         news = await repository.list_news(source_id="cbr_press", limit=10)
 
         assert len(news) == 1
-        assert len(signals) == 1
-        assert signals[0].ticker == "RUEQ"
-        assert signals[0].direction == "neutral"
-        assert signals[0].as_api_dict()["target"] == {
-            "type": "market",
-            "id": "RU_EQUITIES",
-            "label": "Российский рынок",
-        }
+        assert signals == []
 
     asyncio.run(scenario())
 
