@@ -85,8 +85,8 @@ def test_worker_payload_has_no_provisioned_instances() -> None:
     assert payload["concurrency"] == "1"
     assert payload["provisionPolicy"] == {"minInstances": "0"}
     assert payload["scalingPolicy"] == {
-        "zoneInstancesLimit": "8",
-        "zoneRequestsLimit": "8",
+        "zoneInstancesLimit": "7",
+        "zoneRequestsLimit": "7",
     }
     assert payload["imageSpec"]["environment"]["EVENTEDGE_COMPONENT"] == "worker"
 
