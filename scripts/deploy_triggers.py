@@ -74,7 +74,7 @@ def timer_rule(spec: TimerSpec, environment: Mapping[str, str]) -> dict[str, obj
                 ),
                 "serviceAccountId": environment["YC_GATEWAY_SERVICE_ACCOUNT_ID"],
                 "retrySettings": {
-                    "retryAttempts": "3",
+                    "retryAttempts": "1",
                     "interval": "30s",
                 },
             },
