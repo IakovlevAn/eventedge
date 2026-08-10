@@ -505,6 +505,7 @@
   box-shadow: 0 18px 46px rgba(0, 0, 0, .52), 0 0 0 1px rgba(255, 255, 255, .02) inset;
 }
 .event-filter-select__menu > button {
+  position: relative;
   display: grid;
   width: 100%;
   min-height: 31px;
@@ -519,6 +520,7 @@
   background: transparent;
   cursor: pointer;
   pointer-events: auto;
+  touch-action: manipulation;
 }
 .event-filter-select__menu > button:hover,
 .event-filter-select__menu > button:focus-visible { color: #e1e4e8; outline: 0; background: #22262d; }
