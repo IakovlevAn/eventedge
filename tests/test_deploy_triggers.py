@@ -22,7 +22,7 @@ def test_fast_news_timer_runs_every_minute() -> None:
                 "containerId": "worker-container-id",
                 "serviceAccountId": "gateway-sa-id",
                 "retrySettings": {
-                    "retryAttempts": "3",
+                    "retryAttempts": "1",
                     "interval": "30s",
                 },
             },
