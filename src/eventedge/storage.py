@@ -86,6 +86,31 @@ class NewsRecord:
     created_at: datetime
 
     def as_api_dict(self) -> dict[str, object]:
+        explicit_event_candidate = self.source_metadata.get("event_candidate")
+        event_candidate = (
+            bool(explicit_event_candidate)
+            if explicit_event_candidate is not None
+            else True
+        )
+        signal_candidate = bool(self.source_metadata.get("signal_candidate", False))
+        classification_status = self.source_metadata.get("classification_status")
+        if not isinstance(classification_status, str):
+            classification_status = (
+                "signal_candidate"
+                if signal_candidate
+                else "event_candidate"
+                if event_candidate
+                else "unclassified"
+            )
+        classification_reason = self.source_metadata.get("classification_reason")
+        if not isinstance(classification_reason, str):
+            classification_reason = (
+                "eligible_for_signal_analysis"
+                if signal_candidate
+                else "stored_as_market_context"
+                if event_candidate
+                else "stored_for_future_reclassification"
+            )
         return {
             "id": self.id,
             "source_id": self.source_id,
@@ -97,6 +122,17 @@ class NewsRecord:
             "content": self.content,
             "language": self.language,
             "source_metadata": dict(self.source_metadata),
+            "processing": {
+                "status": str(self.source_metadata.get("processing_status", "processed")),
+                "classification": classification_status,
+                "reason": classification_reason,
+                "event_candidate": event_candidate,
+                "signal_candidate": signal_candidate,
+                "classification_version": self.source_metadata.get(
+                    "classification_version",
+                    "legacy",
+                ),
+            },
             "created_at": to_rfc3339(self.created_at),
         }
 

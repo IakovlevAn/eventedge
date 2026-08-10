@@ -76,6 +76,22 @@ TELEGRAM_FIXTURE = """
 </section>
 """.encode()
 
+BBBREAKING_SECTOR_FIXTURE = """
+<section class="tgme_channel_history js-message_history">
+  <div class="tgme_widget_message_wrap">
+    <div class="tgme_widget_message js-widget_message" data-post="bbbreaking/235334">
+      <div class="tgme_widget_message_text js-message_text">
+        ❗️Правительство готовит проект распоряжения о выделении порядка 10 млрд руб.
+        на поддержку ж/д перевозок направляемой на экспорт сельхозпродукции.
+      </div>
+      <a class="tgme_widget_message_date" href="https://t.me/bbbreaking/235334">
+        <time datetime="2026-08-10T07:10:13+00:00">07:10</time>
+      </a>
+    </div>
+  </div>
+</section>
+""".encode()
+
 
 def test_rss_parser_extracts_clean_text_and_metadata() -> None:
     items = parse_rss(RSS_FIXTURE, max_items=10)
@@ -117,6 +133,50 @@ def test_telegram_collection_is_idempotent_and_marks_source_metadata() -> None:
     assert metadata["channel_url"] == "https://t.me/s/AK47pfl"
 
 
+def test_telegram_gate_rejection_is_stored_for_future_reclassification() -> None:
+    repository = MemoryNewsRepository()
+    config = TelegramChannelConfig(source_id="telegram_bbbreaking", channel="bbbreaking")
+
+    async def scenario() -> tuple[dict[str, int], dict[str, object], int]:
+        result = await collect_telegram_channel(
+            repository,
+            config,
+            fetcher=lambda url, timeout: BBBREAKING_SECTOR_FIXTURE,
+            item_filter=is_market_event_candidate,
+            signal_filter=is_market_signal_candidate,
+        )
+        news = await repository.list_news(source_id="telegram_bbbreaking", limit=10)
+        signals = await repository.list_signals(
+            ticker=None,
+            directions=None,
+            status=None,
+            min_confidence=None,
+            limit=10,
+        )
+        return result, news[0].as_api_dict(), len(signals)
+
+    result, stored, signal_count = asyncio.run(scenario())
+
+    assert result == {
+        "fetched": 1,
+        "matched": 0,
+        "filtered": 1,
+        "signal_candidates": 0,
+        "accepted": 1,
+        "replayed": 0,
+    }
+    assert stored["external_id"] == "bbbreaking/235334"
+    assert stored["processing"] == {
+        "status": "processed",
+        "classification": "unclassified",
+        "reason": "stored_for_future_reclassification",
+        "event_candidate": False,
+        "signal_candidate": False,
+        "classification_version": "candidate-gate-0.2.0",
+    }
+    assert signal_count == 0
+
+
 def test_rss_collection_is_idempotent() -> None:
     repository = MemoryNewsRepository()
     config = RssFeedConfig(
@@ -137,6 +197,7 @@ def test_rss_collection_is_idempotent() -> None:
     assert first == {
         "fetched": 2,
         "matched": 2,
+        "filtered": 0,
         "signal_candidates": 2,
         "accepted": 2,
         "replayed": 0,
@@ -144,6 +205,7 @@ def test_rss_collection_is_idempotent() -> None:
     assert second == {
         "fetched": 2,
         "matched": 2,
+        "filtered": 0,
         "signal_candidates": 2,
         "accepted": 0,
         "replayed": 2,
@@ -174,6 +236,7 @@ def test_minute_collector_stops_after_known_head_items() -> None:
     assert result == {
         "fetched": 2,
         "matched": 1,
+        "filtered": 0,
         "signal_candidates": 1,
         "accepted": 0,
         "replayed": 1,
@@ -375,6 +438,7 @@ def test_composite_collector_isolates_a_failed_feed(
     assert result == {
         "fetched": 12,
         "matched": 12,
+        "filtered": 0,
         "signal_candidates": 0,
         "accepted": 12,
         "replayed": 0,
@@ -434,6 +498,7 @@ def test_fast_collector_uses_only_direct_feeds_and_isolates_failures(
     assert result == {
         "fetched": 9,
         "matched": 9,
+        "filtered": 0,
         "signal_candidates": 0,
         "accepted": 9,
         "replayed": 0,

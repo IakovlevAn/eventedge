@@ -287,14 +287,19 @@ async def collect_news_items(
     accepted = 0
     replayed = 0
     matched = 0
+    filtered = 0
     signal_candidates = 0
     consecutive_replays = 0
 
     for item in items:
-        if item_filter is not None and not item_filter(item):
-            continue
-        matched += 1
-        generate_signals = signal_filter(item) if signal_filter is not None else True
+        event_candidate = item_filter(item) if item_filter is not None else True
+        if event_candidate:
+            matched += 1
+        else:
+            filtered += 1
+        generate_signals = event_candidate and (
+            signal_filter(item) if signal_filter is not None else True
+        )
         if generate_signals:
             signal_candidates += 1
         features = RuleBasedNewsExtractor().extract(
@@ -305,7 +310,11 @@ async def collect_news_items(
                 language=language,
             )
         )
-        source_metadata: dict[str, object] = {
+        # The legacy metadata subset remains the payload-hash contract. This
+        # prevents a one-time re-ingestion of every existing article when
+        # lossless classification metadata is added. New items rejected by the
+        # old gate are still persisted because they never had an ingestion key.
+        hash_metadata: dict[str, object] = {
             "collector": collector,
             "categories": list(item.categories),
             "signal_candidate": generate_signals,
@@ -318,9 +327,31 @@ async def collect_news_items(
         # Keep the existing RSS payload shape stable so a deployment does not
         # re-ingest all known feed items merely because Telegram was added.
         if collector == "rss":
-            source_metadata["feed_url"] = source_url
+            hash_metadata["feed_url"] = source_url
         else:
-            source_metadata["channel_url"] = source_url
+            hash_metadata["channel_url"] = source_url
+        classification_status = (
+            "signal_candidate"
+            if generate_signals
+            else "event_candidate"
+            if event_candidate
+            else "unclassified"
+        )
+        classification_reason = (
+            "eligible_for_signal_analysis"
+            if generate_signals
+            else "stored_as_market_context"
+            if event_candidate
+            else "stored_for_future_reclassification"
+        )
+        source_metadata = {
+            **hash_metadata,
+            "processing_status": "processed",
+            "classification_status": classification_status,
+            "classification_reason": classification_reason,
+            "classification_version": "candidate-gate-0.2.0",
+            "event_candidate": event_candidate,
+        }
         hash_payload = {
             "source_id": source_id,
             "external_id": item.external_id,
@@ -329,7 +360,7 @@ async def collect_news_items(
             "url": item.url,
             "content": item.content,
             "language": language,
-            "source_metadata": source_metadata,
+            "source_metadata": hash_metadata,
         }
         payload_hash = canonical_payload_hash(hash_payload)
         document = NewsDocument(
@@ -365,6 +396,7 @@ async def collect_news_items(
     return {
         "fetched": len(items),
         "matched": matched,
+        "filtered": filtered,
         "signal_candidates": signal_candidates,
         "accepted": accepted,
         "replayed": replayed,
@@ -750,6 +782,7 @@ def empty_collection_totals() -> dict[str, int]:
     return {
         "fetched": 0,
         "matched": 0,
+        "filtered": 0,
         "signal_candidates": 0,
         "accepted": 0,
         "replayed": 0,
