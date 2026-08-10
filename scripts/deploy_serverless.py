@@ -31,9 +31,10 @@ def build_payload(
         "YANDEX_GPT_ENABLED": "true",
         "YANDEX_GPT_FOLDER_ID": environment["YC_FOLDER_ID"],
         "YANDEX_GPT_MODEL": "yandexgpt-lite",
-        # One four-item LLM wave fits the request window after a cold start.
+        # Keep one LLM request in flight: concurrent calls share the runtime
+        # client and were cancelled by the serverless request lifecycle.
         "BACKFILL_BATCH_LIMIT": "4",
-        "BACKFILL_CONCURRENCY": "4",
+        "BACKFILL_CONCURRENCY": "1",
         "EVENTEDGE_MONTHLY_BUDGET_RUB": "15000",
     }
     if admin_key := environment.get("EVENTEDGE_ADMIN_KEY"):

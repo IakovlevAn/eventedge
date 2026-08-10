@@ -34,6 +34,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "");
 const apiUrl = (path) => `${API_BASE}${path}`;
 const SOURCE_CACHE_KEY = "eventedge:source-registry:v1";
+const CURRENT_SIGNAL_MODEL_VERSION = "signal-engine-0.6.1";
 
 function readCachedSourceRegistry() {
   if (typeof window === "undefined") return null;
@@ -702,11 +703,6 @@ function FilterSelect({ label, value, options, onChange, className = "" }) {
             aria-selected={option.value === value}
             className={option.value === value ? "is-selected" : ""}
             key={option.value}
-            onPointerDown={(event) => {
-              event.preventDefault();
-              onChange(option.value);
-              setOpen(false);
-            }}
             onClick={() => {
               onChange(option.value);
               setOpen(false);
@@ -1552,8 +1548,20 @@ function EvalsScreen() {
   const horizonLabels = { "1h": "1 час", "4h": "4 часа", "1d": "1 день", "3d": "3 дня" };
   const directionLabels = { up: "Вверх", down: "Вниз", neutral: "Нейтрально" };
   const latestQuality = qualitySeries.at(-1);
-  const modelEpochs = payload.meta.model_epochs || [];
-  const activeModelVersion = payload.meta.selected_model_version || selectedModelVersion;
+  const storedModelEpochs = payload.meta.model_epochs || [];
+  const modelEpochs = storedModelEpochs.some((epoch) => epoch.model_version === CURRENT_SIGNAL_MODEL_VERSION)
+    ? storedModelEpochs
+    : [{
+      epoch_id: `pending-${CURRENT_SIGNAL_MODEL_VERSION}`,
+      model_version: CURRENT_SIGNAL_MODEL_VERSION,
+      config_version: 1,
+      signals: payload.meta.selected_model_version === CURRENT_SIGNAL_MODEL_VERSION ? summary.signals_total : 0,
+      evaluated_at: null,
+    }, ...storedModelEpochs];
+  // Reflect the user's choice immediately. The API response can take a few
+  // seconds, and preferring the previous snapshot made a valid row click look
+  // as though it had done nothing.
+  const activeModelVersion = selectedModelVersion || payload.meta.selected_model_version || CURRENT_SIGNAL_MODEL_VERSION;
   const orderedModelEpochs = [...modelEpochs].sort((left, right) => {
     if (left.model_version === activeModelVersion) return -1;
     if (right.model_version === activeModelVersion) return 1;
