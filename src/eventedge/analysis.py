@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from eventedge.configs.scoring import load_scoring_config
 
-CURRENT_NEWS_MODEL_VERSION = "news-baseline-0.3.0"
+CURRENT_NEWS_MODEL_VERSION = "news-baseline-0.4.0"
 
 
 class EventType(StrEnum):
@@ -114,14 +114,14 @@ class BaselineSignal(BaseModel):
     factor_contributions: Annotated[list[FactorContribution], Field(min_length=5, max_length=5)]
     feature_schema_version: Literal["news-features-0.1"]
     extractor_version: str
-    model_version: Literal["news-baseline-0.3.0"]
+    model_version: Literal["news-baseline-0.4.0"]
     config_version: int
 
 
 class BaselineScoringConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    model_version: Literal["news-baseline-0.3.0"] = "news-baseline-0.3.0"
+    model_version: Literal["news-baseline-0.4.0"] = "news-baseline-0.4.0"
     config_version: Annotated[int, Field(ge=1)] = 1
     positive_threshold: Annotated[float, Field(ge=0, le=100)] = 18
     negative_threshold: Annotated[float, Field(ge=-100, le=0)] = -18
@@ -224,7 +224,17 @@ EVENT_RULES: tuple[tuple[EventType, tuple[str, ...], float], ...] = (
     ),
     (
         EventType.FINANCIAL_RESULTS,
-        ("отчётност", "отчетност", "чистая прибыль", "выручк", "ebitda", "рентабельност"),
+        (
+            "отчётност",
+            "отчетност",
+            "чистая прибыль",
+            "чистый убыт",
+            "выручк",
+            "ebitda",
+            "рентабельност",
+            "мсфо",
+            "рсбу",
+        ),
         0.90,
     ),
     (EventType.DIVIDEND, ("дивиденд", "выплат акционер", "реестр акционер"), 0.85),
@@ -292,7 +302,7 @@ NEGATIVE_TERMS = (
     "снизил",
     "сократил",
     "падени",
-    "убыток",
+    "убыт",
     "ухудшил",
     "приостановил",
     "отозвал",
@@ -340,9 +350,7 @@ class RuleBasedNewsExtractor:
         polarity = 0.0 if total_hits == 0 else (positive_hits - negative_hits) / total_hits
         materiality = min(
             1.0,
-            base_materiality
-            + (0.05 if facts else 0)
-            + (0.05 if abs(polarity) >= 0.75 else 0),
+            base_materiality + (0.05 if facts else 0) + (0.05 if abs(polarity) >= 0.75 else 0),
         )
         temporal_status = self._temporal_status(body)
         rationale = self._rationale(

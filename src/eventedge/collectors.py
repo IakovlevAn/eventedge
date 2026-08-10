@@ -800,19 +800,6 @@ async def collect_feed_group(
 
 async def collect_fast_news(repository: NewsRepository) -> dict[str, int]:
     """Refresh direct priority feeds every minute without discovery latency."""
-    managed_sources = await repository.list_telegram_sources()
-    dynamic_channels = tuple(
-        TelegramChannelConfig(
-            source_id=source.source_id,
-            name=source.source_id,
-            channel=source.channel,
-            max_items=20,
-            timeout_seconds=10,
-        )
-        for source in managed_sources
-        if source.enabled
-    )
-    telegram_channels = (*TELEGRAM_CHANNELS, *dynamic_channels)
     results = await asyncio.gather(
         collect_feed_group(
             repository,
@@ -827,7 +814,7 @@ async def collect_fast_news(repository: NewsRepository) -> dict[str, int]:
                 signal_filter=is_market_signal_candidate,
                 stop_after_replays=5,
             )
-            for config in telegram_channels
+            for config in TELEGRAM_CHANNELS
         ),
         return_exceptions=True,
     )
@@ -835,12 +822,38 @@ async def collect_fast_news(repository: NewsRepository) -> dict[str, int]:
 
 
 async def collect_discovery_news(repository: NewsRepository) -> dict[str, int]:
-    """Refresh broad Google News discovery independently of the fast lane."""
-    return await collect_feed_group(
-        repository,
-        DISCOVERY_NEWS_FEEDS,
-        stop_after_replays=10,
+    """Refresh broad discovery and UI-managed Telegram every five minutes."""
+    managed_sources = await repository.list_telegram_sources()
+    dynamic_channels = tuple(
+        TelegramChannelConfig(
+            source_id=source.source_id,
+            name=source.display_name,
+            channel=source.channel,
+            max_items=20,
+            timeout_seconds=10,
+        )
+        for source in managed_sources
+        if source.enabled
     )
+    results = await asyncio.gather(
+        collect_feed_group(
+            repository,
+            DISCOVERY_NEWS_FEEDS,
+            stop_after_replays=10,
+        ),
+        *(
+            collect_telegram_channel(
+                repository,
+                config,
+                item_filter=is_market_event_candidate,
+                signal_filter=is_market_signal_candidate,
+                stop_after_replays=5,
+            )
+            for config in dynamic_channels
+        ),
+        return_exceptions=True,
+    )
+    return aggregate_collection_results(results)
 
 
 async def collect_slow_news(repository: NewsRepository) -> dict[str, int]:

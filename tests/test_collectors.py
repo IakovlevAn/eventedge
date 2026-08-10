@@ -24,7 +24,7 @@ from eventedge.collectors import (
     parse_rss,
     parse_telegram_channel,
 )
-from eventedge.storage import MemoryNewsRepository
+from eventedge.storage import MemoryNewsRepository, TelegramSourceRecord
 
 RSS_FIXTURE = """<?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0">
@@ -439,3 +439,38 @@ def test_fast_collector_uses_only_direct_feeds_and_isolates_failures(
         "replayed": 0,
         "failed": 1,
     }
+
+
+def test_ui_managed_telegram_runs_in_five_minute_discovery_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = MemoryNewsRepository()
+    source = TelegramSourceRecord(
+        source_id="telegram_private_news",
+        channel="private_news",
+        display_name="Частные новости",
+        description="Пользовательский новостной источник",
+        enabled=True,
+        created_at=datetime(2026, 8, 10, tzinfo=UTC),
+    )
+    asyncio.run(repository.upsert_telegram_source(source))
+    telegram_called: list[str] = []
+
+    async def fake_feed_group(*args: object, **kwargs: object) -> dict[str, int]:
+        return {"fetched": 1, "matched": 1, "signal_candidates": 0, "accepted": 1, "replayed": 0}
+
+    async def fake_telegram_collect(
+        repository: object,
+        config: TelegramChannelConfig,
+        **kwargs: object,
+    ) -> dict[str, int]:
+        telegram_called.append(config.source_id)
+        return {"fetched": 1, "matched": 1, "signal_candidates": 0, "accepted": 1, "replayed": 0}
+
+    monkeypatch.setattr(collectors_module, "collect_feed_group", fake_feed_group)
+    monkeypatch.setattr(collectors_module, "collect_telegram_channel", fake_telegram_collect)
+
+    result = asyncio.run(collectors_module.collect_discovery_news(repository))
+
+    assert telegram_called == ["telegram_private_news"]
+    assert result["accepted"] == 2

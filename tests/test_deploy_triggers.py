@@ -35,6 +35,7 @@ def test_collection_lanes_have_distinct_schedules_and_payloads() -> None:
         ("* * ? * * *", "fast_news"),
         ("0/5 * ? * * *", "discovery_news"),
         ("0/15 * ? * * *", "slow_news"),
+        ("2/10 * ? * * *", "maintenance"),
     ]
 
 

@@ -9,9 +9,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Mapping
 
-DEPLOY_URL = (
-    "https://serverless-containers.api.cloud.yandex.net/containers/v1/revisions:deploy"
-)
+DEPLOY_URL = "https://serverless-containers.api.cloud.yandex.net/containers/v1/revisions:deploy"
 OPERATION_URL = "https://operation.api.cloud.yandex.net/operations/{}"
 SECRET_PATTERN = re.compile(r"(?:y[01]_|t[01]_|AQAD-)[A-Za-z0-9_-]+")
 
@@ -38,9 +36,7 @@ def build_payload(
     is_worker = component == "worker"
     return {
         "containerId": (
-            environment["YC_WORKER_CONTAINER_ID"]
-            if is_worker
-            else environment["YC_CONTAINER_ID"]
+            environment["YC_WORKER_CONTAINER_ID"] if is_worker else environment["YC_CONTAINER_ID"]
         ),
         "description": f"GitHub {environment['DEPLOY_SHA']} ({component})",
         "resources": {
@@ -55,12 +51,12 @@ def build_payload(
             "environment": runtime_environment,
         },
         "concurrency": "1" if is_worker else "4",
-        "provisionPolicy": {"minInstances": "0" if is_worker else "2"},
+        "provisionPolicy": {"minInstances": "0" if is_worker else "1"},
         "scalingPolicy": {
-            # Keep one account-level slot free for revision turnover and
-            # controlled reprocessing while the API holds two warm instances.
-            "zoneInstancesLimit": "7" if is_worker else "2",
-            "zoneRequestsLimit": "7" if is_worker else "8",
+            # One serial worker prevents overlapping timer waves from competing
+            # for YDB sessions. The API keeps a second instance as burst capacity.
+            "zoneInstancesLimit": "1" if is_worker else "2",
+            "zoneRequestsLimit": "1" if is_worker else "8",
         },
         "runtime": {"http": {}},
     }

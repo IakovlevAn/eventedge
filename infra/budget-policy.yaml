@@ -15,7 +15,7 @@ runtime_caps:
     memory_mb: 1024
     cores: 1
     concurrency: 4
-    min_instances: 2
+    min_instances: 1
     zone_instances_limit: 2
     zone_requests_limit: 8
     execution_timeout_seconds: 180
@@ -24,19 +24,20 @@ runtime_caps:
     cores: 1
     concurrency: 1
     min_instances: 0
-    zone_instances_limit: 8
-    zone_requests_limit: 8
+    zone_instances_limit: 1
+    zone_requests_limit: 1
     execution_timeout_seconds: 180
   source_collection:
     max_telegram_channels: 18
-    telegram_poll_interval_seconds: 60
+    priority_telegram_poll_interval_seconds: 60
+    managed_telegram_poll_interval_seconds: 300
     llm_analysis: signal_candidates_only
 notes:
   - The Yandex Cloud billing budget sends alerts but does not stop resource consumption.
-  - Two provisioned API instances absorb the normal UI burst; each handles at most four concurrent requests.
+  - One provisioned API instance serves the normal UI load; a second instance is available only for bursts.
   - Public endpoints serve the last successful market snapshot immediately and refresh it every 60 seconds in the background.
   - Market snapshot prefetch starts after application startup so a cold instance can serve static UI without waiting for YDB.
   - News collection and LLM analysis run in a separate non-provisioned worker so timer jobs cannot block the public API.
-  - The pay-per-use worker can process up to eight timer or reprocessing jobs per zone without prepared-instance cost.
+  - The pay-per-use worker processes one timer job at a time so collection waves cannot compete for YDB sessions.
   - At 8500 RUB, freeze resource increases and review the current-month forecast.
   - Automatic shutdown requires a separate explicitly approved runbook or trigger.

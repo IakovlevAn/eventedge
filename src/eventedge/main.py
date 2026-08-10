@@ -77,6 +77,7 @@ from eventedge.storage import (
     filter_signals,
     normalize_signal_freshness,
     stable_id,
+    to_rfc3339,
 )
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
@@ -509,6 +510,21 @@ async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONRespons
     collectors = request.app.state.collectors
     results: dict[str, dict[str, int]] = {}
     for collector_name in dict.fromkeys(message.details.payload for message in envelope.messages):
+        if collector_name == "maintenance":
+            reprocess = await reprocess_signal_candidates_batch(repository, limit=3)
+            outcomes, _, _, _, epochs = await _load_evaluation_material(
+                repository,
+                request.app.state.market_data_client,
+            )
+            reprocess_meta = reprocess["meta"]
+            assert isinstance(reprocess_meta, dict)
+            results[collector_name] = {
+                "reprocessed": int(reprocess_meta["completed"]),
+                "remaining": int(reprocess_meta["remaining_candidates"]),
+                "outcomes": len(outcomes),
+                "epochs": len(epochs),
+            }
+            continue
         collector = collectors.get(collector_name)
         if collector is None:
             return problem_response(
@@ -680,6 +696,7 @@ async def list_news(
                     else None
                 ),
                 "poll_interval_seconds": NEWS_COLLECTION_INTERVAL_SECONDS,
+                "managed_telegram_poll_interval_seconds": 300,
                 "client_refresh_interval_seconds": NEWS_CLIENT_REFRESH_INTERVAL_SECONDS,
                 "delivery_target_seconds": NEWS_DELIVERY_TARGET_SECONDS,
                 "collection_lanes": NEWS_COLLECTION_LANES,
@@ -853,32 +870,13 @@ async def create_telegram_source(
     return JSONResponse(status_code=201, content={"data": source.as_api_dict()})
 
 
-@app.post("/v1/admin/signals/reprocess", tags=["Signals"])
-async def reprocess_signal_candidates(
-    payload: SignalReprocessRequest,
-    request: Request,
-    admin_key: Annotated[str | None, Header(alias="X-EventEdge-Admin-Key")] = None,
-) -> JSONResponse:
-    """Re-run the current candidate policy on stored news in small budget-capped batches."""
-    expected_key = os.environ.get("EVENTEDGE_ADMIN_KEY")
-    if not expected_key:
-        return problem_response(
-            request,
-            status=503,
-            code="SOURCE_ADMIN_NOT_CONFIGURED",
-            title="Signal administration is not configured",
-            detail="Set EVENTEDGE_ADMIN_KEY for the production runtime.",
-        )
-    if not admin_key or not hmac.compare_digest(admin_key, expected_key):
-        return problem_response(
-            request,
-            status=401,
-            code="INVALID_ADMIN_KEY",
-            title="Invalid admin key",
-            detail="A valid X-EventEdge-Admin-Key header is required.",
-        )
-
-    repository: NewsRepository = request.app.state.news_repository
+async def reprocess_signal_candidates_batch(
+    repository: NewsRepository,
+    *,
+    limit: int,
+    news_ids: list[str] | None = None,
+) -> dict[str, object]:
+    """Re-run current candidate policy in a bounded, idempotent batch."""
     stored_news, stored_signals = await asyncio.gather(
         repository.list_news(source_id=None, limit=1000),
         repository.list_signals(
@@ -894,9 +892,10 @@ async def reprocess_signal_candidates(
         for signal in stored_signals
         if signal.model_version == CURRENT_NEWS_MODEL_VERSION
     }
-    candidates = []
+    requested_news_ids = set(news_ids or [])
+    candidates: list[tuple[NewsRecord, RssItem]] = []
     for item in public_news(stored_news):
-        if payload.news_ids and item.id not in payload.news_ids:
+        if requested_news_ids and item.id not in requested_news_ids:
             continue
         if (
             item.id in current_news_ids
@@ -918,9 +917,9 @@ async def reprocess_signal_candidates(
         if is_market_signal_candidate(candidate):
             candidates.append((item, candidate))
 
-    selected = candidates[: payload.limit]
+    selected = candidates[:limit]
 
-    async def reprocess_one(item: NewsRecord, candidate: RssItem) -> dict[str, object]:
+    async def reprocess_one(item: NewsRecord) -> dict[str, object]:
         features = RuleBasedNewsExtractor().extract(
             NewsAnalysisInput(
                 source_id=item.source_id,
@@ -977,27 +976,59 @@ async def reprocess_signal_candidates(
         }
 
     results = await asyncio.gather(
-        *(reprocess_one(item, candidate) for item, candidate in selected),
+        *(reprocess_one(item) for item, _ in selected),
         return_exceptions=True,
     )
     completed = [result for result in results if isinstance(result, dict)]
     failed = [type(result).__name__ for result in results if isinstance(result, BaseException)]
+    return {
+        "data": completed,
+        "meta": {
+            "selected": len(selected),
+            "completed": len(completed),
+            "failed": len(failed),
+            "failure_types": failed,
+            "remaining_candidates": max(0, len(candidates) - len(completed)),
+            "model_version": CURRENT_NEWS_MODEL_VERSION,
+            "batch_limit": limit,
+        },
+    }
+
+
+@app.post("/v1/admin/signals/reprocess", tags=["Signals"])
+async def reprocess_signal_candidates(
+    payload: SignalReprocessRequest,
+    request: Request,
+    admin_key: Annotated[str | None, Header(alias="X-EventEdge-Admin-Key")] = None,
+) -> JSONResponse:
+    """Re-run the current candidate policy on stored news in small budget-capped batches."""
+    expected_key = os.environ.get("EVENTEDGE_ADMIN_KEY")
+    if not expected_key:
+        return problem_response(
+            request,
+            status=503,
+            code="SOURCE_ADMIN_NOT_CONFIGURED",
+            title="Signal administration is not configured",
+            detail="Set EVENTEDGE_ADMIN_KEY for the production runtime.",
+        )
+    if not admin_key or not hmac.compare_digest(admin_key, expected_key):
+        return problem_response(
+            request,
+            status=401,
+            code="INVALID_ADMIN_KEY",
+            title="Invalid admin key",
+            detail="A valid X-EventEdge-Admin-Key header is required.",
+        )
+
+    repository: NewsRepository = request.app.state.news_repository
+    result = await reprocess_signal_candidates_batch(
+        repository,
+        limit=payload.limit,
+        news_ids=payload.news_ids,
+    )
     request.app.state.evaluation_material_cache = None
     invalidate_content_snapshot(request)
-    return JSONResponse(
-        content={
-            "data": completed,
-            "meta": {
-                "selected": len(selected),
-                "completed": len(completed),
-                "failed": len(failed),
-                "failure_types": failed,
-                "remaining_candidates": max(0, len(candidates) - len(completed)),
-                "model_version": CURRENT_NEWS_MODEL_VERSION,
-                "batch_limit": payload.limit,
-            },
-        }
-    )
+    return JSONResponse(content=result)
 
 
 @app.get("/v1/signals", tags=["Signals"])
@@ -1040,19 +1071,15 @@ async def list_signals(
         min_confidence=min_confidence,
         limit=1000,
     )
-    selected_model_version = (
-        model_version
-        or (CURRENT_NEWS_MODEL_VERSION if (status or "active") == "active" else None)
+    selected_model_version = model_version or (
+        CURRENT_NEWS_MODEL_VERSION if (status or "active") == "active" else None
     )
     signals = deduplicate_eval_events(
         deduplicate_signals(
             signal
             for signal in signals
             if signal.news_id not in hidden_ids
-            and (
-                selected_model_version is None
-                or signal.model_version == selected_model_version
-            )
+            and (selected_model_version is None or signal.model_version == selected_model_version)
         ),
         news_by_id,
     )[:limit]
@@ -1310,7 +1337,7 @@ async def _load_evaluation_material(
         (
             signal
             for signal in deduplicate_eval_signals(deduplicate_signals(stored_signals))
-            if signal.news_id in news_by_id
+            if signal.news_id in news_by_id and signal.direction in {"up", "down"}
         ),
         news_by_id,
         preserve_model_epochs=True,
@@ -1341,13 +1368,10 @@ async def _load_evaluation_material(
         epoch_signals = [
             signal
             for signal in signals
-            if signal.model_version == model_version
-            and signal.config_version == config_version
+            if signal.model_version == model_version and signal.config_version == config_version
         ]
         signal_ids = {signal.id for signal in epoch_signals}
-        epoch_outcomes = [
-            outcome for outcome in outcomes if outcome["signal_id"] in signal_ids
-        ]
+        epoch_outcomes = [outcome for outcome in outcomes if outcome["signal_id"] in signal_ids]
         observations, observations_truncated = event_time_export_rows(
             epoch_signals,
             candles_by_ticker,
@@ -1429,6 +1453,20 @@ async def evaluation_material(
     return await asyncio.shield(task)
 
 
+def directional_epoch_outcomes(
+    epoch: EvaluationEpochRecord | None,
+) -> list[dict[str, object]]:
+    if epoch is None:
+        return []
+    return [outcome for outcome in epoch.outcomes if outcome.get("direction") in {"up", "down"}]
+
+
+def evaluation_epoch_meta(epoch: EvaluationEpochRecord) -> dict[str, object]:
+    meta = epoch.as_meta_dict()
+    meta["signals"] = len(directional_epoch_outcomes(epoch))
+    return meta
+
+
 @app.get("/v1/evals", tags=["Evals"])
 async def list_evals(
     request: Request,
@@ -1437,29 +1475,14 @@ async def list_evals(
         Query(pattern=r"^[a-z0-9._-]{3,80}$"),
     ] = None,
 ) -> JSONResponse:
-    outcomes, _, _, _, epochs = await evaluation_material(request)
-    available_versions = [epoch.model_version for epoch in epochs]
-    selected_model_version = model_version
-    if selected_model_version is None:
-        selected_model_version = (
-            CURRENT_NEWS_MODEL_VERSION
-            if CURRENT_NEWS_MODEL_VERSION in available_versions
-            else available_versions[0]
-            if available_versions
-            else None
-        )
-    selected_outcomes = [
-        outcome
-        for outcome in outcomes
-        if selected_model_version is None
-        or outcome.get("model_version") == selected_model_version
-    ]
-    if selected_model_version and not selected_outcomes:
-        stored_epoch = next(
-            (epoch for epoch in epochs if epoch.model_version == selected_model_version),
-            None,
-        )
-        selected_outcomes = list(stored_epoch.outcomes) if stored_epoch else []
+    repository: NewsRepository = request.app.state.news_repository
+    epochs = await repository.list_evaluation_epochs()
+    selected_model_version = model_version or CURRENT_NEWS_MODEL_VERSION
+    selected_epoch = next(
+        (epoch for epoch in epochs if epoch.model_version == selected_model_version),
+        None,
+    )
+    selected_outcomes = directional_epoch_outcomes(selected_epoch)
     return JSONResponse(
         content={
             "data": {
@@ -1470,12 +1493,16 @@ async def list_evals(
                 "outcomes": selected_outcomes,
             },
             "meta": {
-                "generated_at": utc_now(),
-                "refresh_after_seconds": 60,
+                "generated_at": (
+                    to_rfc3339(selected_epoch.evaluated_at) if selected_epoch else None
+                ),
+                "refresh_after_seconds": 600,
                 "primary_horizon": "4h",
                 "evaluation_window": "1h / 4h for product metrics; raw 1d / 3d retained",
+                "evaluation_scope": "directional_signals_only",
+                "snapshot_status": "ready" if selected_epoch else "pending",
                 "selected_model_version": selected_model_version,
-                "model_epochs": [epoch.as_meta_dict() for epoch in epochs],
+                "model_epochs": [evaluation_epoch_meta(epoch) for epoch in epochs],
                 "warning": (
                     "Prototype retrospective on the available MOEX window; "
                     "it is not a point-in-time calibrated backtest or proof of alpha."
@@ -1495,27 +1522,24 @@ async def export_evals(
         Query(pattern=r"^(all|[a-z0-9._-]{3,80})$"),
     ] = "all",
 ) -> Response:
-    outcomes, signals, candles_by_ticker, news_by_id, epochs = await evaluation_material(request)
+    repository: NewsRepository = request.app.state.news_repository
+    epochs = await repository.list_evaluation_epochs()
     selected_epochs = [
-        epoch
-        for epoch in epochs
-        if model_version == "all" or epoch.model_version == model_version
+        epoch for epoch in epochs if model_version == "all" or epoch.model_version == model_version
     ]
     if dataset == "timeseries":
-        if selected_epochs:
-            rows = [row for epoch in selected_epochs for row in epoch.observations]
-            truncated = any(epoch.observations_truncated for epoch in selected_epochs)
-        else:
-            selected_signals = [
-                signal
-                for signal in signals
-                if model_version == "all" or signal.model_version == model_version
-            ]
-            rows, truncated = event_time_export_rows(
-                selected_signals,
-                candles_by_ticker,
-                news_by_id,
-            )
+        directional_signal_ids = {
+            str(outcome["signal_id"])
+            for epoch in selected_epochs
+            for outcome in directional_epoch_outcomes(epoch)
+        }
+        rows = [
+            row
+            for epoch in selected_epochs
+            for row in epoch.observations
+            if row.get("signal_id") in directional_signal_ids
+        ]
+        truncated = any(epoch.observations_truncated for epoch in selected_epochs)
         fieldnames = [
             "signal_id",
             "ticker",
@@ -1541,16 +1565,9 @@ async def export_evals(
             "signed_return_pct",
         ]
     else:
-        selected_outcomes = (
-            [outcome for epoch in selected_epochs for outcome in epoch.outcomes]
-            if selected_epochs
-            else [
-                outcome
-                for outcome in outcomes
-                if model_version == "all"
-                or outcome.get("model_version") == model_version
-            ]
-        )
+        selected_outcomes = [
+            outcome for epoch in selected_epochs for outcome in directional_epoch_outcomes(epoch)
+        ]
         rows = outcome_export_rows(selected_outcomes)
         truncated = False
         fieldnames = [

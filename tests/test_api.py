@@ -184,10 +184,10 @@ def test_admin_reprocesses_one_explicit_stored_candidate(
     assert response.status_code == 200
     assert response.json()["meta"]["completed"] == 1
     assert response.json()["meta"]["batch_limit"] == 1
-    assert response.json()["meta"]["model_version"] == "news-baseline-0.3.0"
+    assert response.json()["meta"]["model_version"] == "news-baseline-0.4.0"
     assert response.json()["data"][0]["news_id"] == stored.id
     assert response.json()["data"][0]["result_ref"].startswith("sig_")
-    assert updated.source_metadata["reprocess_version"] == "news-baseline-0.3.0"
+    assert updated.source_metadata["reprocess_version"] == "news-baseline-0.4.0"
 
 
 def test_timer_event_dispatches_private_collector() -> None:
@@ -249,6 +249,44 @@ def test_fast_news_timer_dispatches_minute_collector() -> None:
     assert response.json()["collectors"]["fast_news"]["accepted"] == 1
 
 
+def test_maintenance_timer_refreshes_models_and_persisted_evals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_reprocess(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "data": [{"news_id": "news_1"}],
+            "meta": {"completed": 1, "remaining_candidates": 4},
+        }
+
+    async def fake_load(*args: object, **kwargs: object) -> tuple[object, ...]:
+        return ([{"signal_id": "sig_1"}], [], {}, {}, [])
+
+    monkeypatch.setattr(main_module, "reprocess_signal_candidates_batch", fake_reprocess)
+    monkeypatch.setattr(main_module, "_load_evaluation_material", fake_load)
+
+    response = client.post(
+        "/",
+        json={
+            "messages": [
+                {
+                    "event_metadata": {
+                        "event_type": "yandex.cloud.events.serverless.triggers.TimerMessage"
+                    },
+                    "details": {"payload": "maintenance"},
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["collectors"]["maintenance"] == {
+        "reprocessed": 1,
+        "remaining": 4,
+        "outcomes": 1,
+        "epochs": 0,
+    }
+
+
 def test_signal_list_has_contract_shape_and_etag() -> None:
     response = client.get("/v1/signals", params={"ticker": "SBER", "limit": 10})
 
@@ -262,7 +300,7 @@ def test_signal_list_has_contract_shape_and_etag() -> None:
             "model_scope": "news_event",
             "final_assessment_endpoint": "/v1/assessments",
             "final_assessment_model_version": "hybrid-market-0.1.0",
-            "model_version": "news-baseline-0.3.0",
+            "model_version": "news-baseline-0.4.0",
         },
     }
     assert response.headers["ETag"].startswith('"')
@@ -328,7 +366,7 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
     assert signal.json()["data"]["ticker"] == "SBER"
     assert signal.json()["data"]["direction"] == "up"
     assert signal.json()["data"]["action"] == "consider_buy"
-    assert signal.json()["data"]["model_version"] == "news-baseline-0.3.0"
+    assert signal.json()["data"]["model_version"] == "news-baseline-0.4.0"
     assert len(signal.json()["data"]["factor_contributions"]) == 5
 
     listed = client.get("/v1/signals", params={"ticker": "SBER", "direction": "up"})
@@ -674,6 +712,14 @@ def test_evals_endpoint_exposes_analysis_and_downloads() -> None:
     fake_market = FakeMarketDataClient()
     app.state.market_data_client = fake_market
     try:
+        asyncio.run(
+            main_module._load_evaluation_material(
+                app.state.news_repository,
+                fake_market,
+            )
+        )
+        assert fake_market.calls > 0
+        fake_market.calls = 0
         response = client.get("/v1/evals")
         csv_export = client.get(
             "/v1/evals/export",
@@ -696,7 +742,11 @@ def test_evals_endpoint_exposes_analysis_and_downloads() -> None:
     }
     assert len(response.json()["data"]["breakdowns"]["by_horizon"]) == 4
     assert response.json()["meta"]["primary_horizon"] == "4h"
+    assert response.json()["meta"]["evaluation_scope"] == "directional_signals_only"
     assert response.json()["meta"]["model_epochs"]
+    assert all(
+        outcome["direction"] in {"up", "down"} for outcome in response.json()["data"]["outcomes"]
+    )
     assert "point-in-time" in response.json()["meta"]["warning"]
     assert csv_export.status_code == 200
     assert csv_export.headers["content-type"].startswith("text/csv")
@@ -705,9 +755,7 @@ def test_evals_endpoint_exposes_analysis_and_downloads() -> None:
     assert timeseries_export.status_code == 200
     assert timeseries_export.json()["meta"]["dataset"] == "timeseries"
     assert timeseries_export.json()["meta"]["truncated"] is False
-    assert fake_market.calls == len(
-        {item["ticker"] for item in response.json()["data"]["outcomes"]}
-    )
+    assert fake_market.calls == 0
 
 
 def test_instrument_snapshot_does_not_revive_hidden_exchange_noise() -> None:

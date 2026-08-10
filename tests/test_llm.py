@@ -108,3 +108,44 @@ def test_yandexgpt_is_not_called_for_unrelated_news() -> None:
 def test_confident_llm_rule_polarity_conflict_is_neutralized() -> None:
     assert YandexGptNewsAnalyzer._reconcile_polarity(0.9, -1.0) == 0.0
     assert YandexGptNewsAnalyzer._reconcile_polarity(-0.9, 1.0) == 0.0
+
+
+def test_structured_financial_loss_keeps_negative_rule_evidence() -> None:
+    session = FakeSession(
+        json.dumps(
+            {
+                "event_type": "financial_results",
+                "facts": [
+                    {
+                        "kind": "money",
+                        "label": "Чистый убыток",
+                        "value": "10,7",
+                        "unit": "млрд руб.",
+                        "period": "РСБУ",
+                        "source_quote": "получила 10,7 млрд руб. чистого убытка",
+                    }
+                ],
+                "polarity": 0.9,
+                "materiality": 0.9,
+                "temporal_status": "past",
+                "rationale": "LLM ошибочно оценил событие позитивно.",
+            },
+            ensure_ascii=False,
+        )
+    )
+    analyzer = YandexGptNewsAnalyzer(
+        folder_id="folder-id",
+        session=session,  # type: ignore[arg-type]
+        token_provider=FakeTokenProvider(),  # type: ignore[arg-type]
+    )
+    document = NewsAnalysisInput(
+        source_id="interfax",
+        title="АЛРОСА получила 10,7 млрд руб. чистого убытка по РСБУ",
+        content="Компания отчиталась о чистом убытке за период.",
+    )
+
+    features = asyncio.run(analyzer.extract(document))
+
+    assert features.event_type.value == "financial_results"
+    assert features.facts
+    assert features.polarity == -1

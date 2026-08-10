@@ -111,6 +111,58 @@ def test_quant_layer_uses_all_requested_non_llm_factors() -> None:
     assert factors[-1]["contribution"] > 0
 
 
+def test_generic_market_digest_does_not_leak_reporting_score_between_companies() -> None:
+    timestamp = datetime(2026, 8, 3, 11, tzinfo=UTC)
+    digest = NewsRecord(
+        id="news_digest",
+        source_id="telegram_bcs_express",
+        external_id="digest-1",
+        published_at=timestamp,
+        received_at=timestamp,
+        title="Главное к открытию вторника",
+        url="https://example.com/digest",
+        content=(
+            "ЛУКОЙЛ торгуется без заметных корпоративных событий. "
+            "Сбербанк опубликовал отчётность: чистая прибыль выросла и превысила ожидания."
+        ),
+        language="ru",
+        source_metadata={"tickers": ["LKOH", "SBER"]},
+        created_at=timestamp,
+    )
+
+    lkoh_factors, _, _ = quant_factors("LKOH", market_snapshot(), [digest])
+    sber_factors, _, _ = quant_factors("SBER", market_snapshot(), [digest])
+
+    assert lkoh_factors[-1]["available"] is False
+    assert lkoh_factors[-1]["contribution"] == 0
+    assert sber_factors[-1]["available"] is True
+    assert sber_factors[-1]["contribution"] > 0
+
+
+def test_quant_bias_without_directional_news_stays_neutral() -> None:
+    assessment = build_assessment("SBER", market_snapshot(), [reporting_news()], None)
+
+    assert assessment["score"] > 18
+    assert assessment["bias_direction"] == "up"
+    assert assessment["direction"] == "neutral"
+    assert assessment["action"] == "no_action"
+
+
+def test_neutral_news_does_not_turn_quant_bias_into_green_signal() -> None:
+    neutral = replace(
+        signal_record(),
+        direction="neutral",
+        action="no_action",
+        score=0,
+    )
+
+    assessment = build_assessment("SBER", market_snapshot(), [reporting_news()], neutral)
+
+    assert assessment["bias_direction"] == "up"
+    assert assessment["direction"] == "neutral"
+    assert assessment["action"] == "no_action"
+
+
 def test_hybrid_assessment_is_not_an_llm_only_signal() -> None:
     assessment = build_assessment(
         "SBER",
@@ -173,6 +225,17 @@ def test_eval_analytics_and_exports_preserve_signal_outcomes() -> None:
     assert timeseries_rows[-1]["offset_minutes"] == 3 * 24 * 60
     assert timeseries_rows[-1]["signed_return_pct"] == 6.0
     assert truncated is False
+
+
+def test_eval_breakdowns_have_only_directional_signal_groups() -> None:
+    outcomes = [
+        {"direction": "up", "ticker": "SBER", "returns": {"4h": 1.0}},
+        {"direction": "down", "ticker": "LKOH", "returns": {"4h": -1.0}},
+    ]
+
+    breakdowns = eval_breakdowns(outcomes)
+
+    assert [item["direction"] for item in breakdowns["by_direction"]] == ["up", "down"]
 
 
 def test_eval_summary_separates_partial_results_from_pending_signals() -> None:
