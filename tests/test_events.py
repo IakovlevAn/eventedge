@@ -1,4 +1,4 @@
-from eventedge.events import classify_news_event, cluster_market_events
+from eventedge.events import classify_news_event, cluster_market_events, context_signal_specs
 
 
 def test_company_event_wins_when_a_traded_ticker_is_known() -> None:
@@ -34,6 +34,38 @@ def test_key_rate_is_market_context_without_automatic_company_signal() -> None:
 
     assert event["scope"] == "market"
     assert event["tickers"] == []
+
+
+def test_local_subsidy_does_not_become_whole_market_signal() -> None:
+    title = "Путин призвал расширить субсидии регионам на оснащение остановок"
+    event = classify_news_event(title=title, content=title, source_metadata={})
+
+    assert event["scope"] == "market"
+    assert context_signal_specs(event, title=title, content=title) == []
+
+
+def test_single_airport_delay_does_not_become_transport_sector_signal() -> None:
+    title = "Аэропорт Омска отменил один рейс и задержал еще несколько"
+    content = (
+        "Ограничения на прием самолетов затронули несколько рейсов, "
+        "сообщила транспортная прокуратура."
+    )
+    event = classify_news_event(title=title, content=content, source_metadata={})
+
+    assert event["scope"] == "sector"
+    assert context_signal_specs(event, title=title, content=content) == []
+
+
+def test_export_support_remains_sector_signal_eligible() -> None:
+    title = "Правительство расширяет господдержку экспорта сельхозпродукции"
+    content = "Субсидии затронут железнодорожную логистику и аграрных производителей."
+    event = classify_news_event(title=title, content=content, source_metadata={})
+
+    assert event["scope"] == "sector"
+    assert {ticker for ticker, _ in context_signal_specs(event, title=title, content=content)} == {
+        "RUAGRI",
+        "RUTRANS",
+    }
 
 
 def test_corroborating_publications_form_one_event() -> None:

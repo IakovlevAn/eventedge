@@ -33,7 +33,7 @@ runtime_caps:
     managed_telegram_poll_interval_seconds: 300
     llm_analysis: economic_candidates_only
   historical_backfill:
-    model_version: signal-engine-0.6.0
+    model_version: signal-engine-0.6.1
     batch_size: 12
     max_parallel_llm_requests: 4
     interval_seconds: 600

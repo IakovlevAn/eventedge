@@ -81,7 +81,6 @@ SECTOR_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "ozon",
             "маркетплейс",
             "склад",
-            "логистик",
             "ритейл",
         ),
     ),
@@ -153,6 +152,36 @@ MARKET_PRIORITY_MARKERS = (
     "санкци",
     "бюджет",
     "минфин",
+)
+
+# A context event may be worth storing and reading without being large enough
+# to justify a market- or sector-wide trading signal. These markers are a
+# deterministic scale guard applied after the semantic extraction. They keep
+# country/industry policy and material physical disruptions while rejecting a
+# single delayed flight or a local municipal subsidy as a proxy for the whole
+# sector/market.
+CONTEXT_SIGNAL_SCALE_MARKERS = (
+    "отрасл",
+    "сектор",
+    "рынок",
+    "по всей россии",
+    "федеральн",
+    "экспорт",
+    "импорт",
+    "пошлин",
+    "тариф",
+    "квот",
+    "санкци",
+    "господдерж",
+    "субсиди",
+    "для компаний",
+    "для производителей",
+    "поставк",
+    "бпла",
+    "дрон",
+    "обстрел",
+    "пожар",
+    "авари",
 )
 
 EVENT_STOP_WORDS = frozenset(
@@ -271,11 +300,23 @@ def signal_target(ticker: str) -> dict[str, str]:
     }
 
 
-def context_signal_specs(projection: Mapping[str, object]) -> list[tuple[str, str]]:
+def context_signal_specs(
+    projection: Mapping[str, object],
+    *,
+    title: str = "",
+    content: str = "",
+) -> list[tuple[str, str]]:
+    normalized = " ".join((title, content)).casefold()
     scope = projection.get("scope")
     if scope == "market":
-        return [(MARKET_SIGNAL_CODE, str(MARKET_SIGNAL_TARGET["label"]))]
+        return (
+            [(MARKET_SIGNAL_CODE, str(MARKET_SIGNAL_TARGET["label"]))]
+            if any(marker in normalized for marker in MARKET_MARKERS)
+            else []
+        )
     if scope != "sector":
+        return []
+    if not any(marker in normalized for marker in CONTEXT_SIGNAL_SCALE_MARKERS):
         return []
     sectors = projection.get("sectors", [])
     if not isinstance(sectors, list):
