@@ -1,8 +1,8 @@
 version: 1
 currency: RUB
 period: monthly
-monthly_budget: 10000
-monthly_soft_cap: 8500
+monthly_budget: 15000
+monthly_soft_cap: 12500
 notifications:
   thresholds_percent: [25, 50, 70, 85, 95]
   recipients:
@@ -31,7 +31,12 @@ runtime_caps:
     max_telegram_channels: 18
     priority_telegram_poll_interval_seconds: 60
     managed_telegram_poll_interval_seconds: 300
-    llm_analysis: signal_candidates_only
+    llm_analysis: economic_candidates_only
+  historical_backfill:
+    model_version: signal-engine-0.5.0
+    batch_size: 12
+    max_parallel_llm_requests: 4
+    interval_seconds: 600
 notes:
   - The Yandex Cloud billing budget sends alerts but does not stop resource consumption.
   - One provisioned API instance serves the normal UI load; a second instance is available only for bursts.
@@ -39,5 +44,6 @@ notes:
   - Market snapshot prefetch starts after application startup so a cold instance can serve static UI without waiting for YDB.
   - News collection and LLM analysis run in a separate non-provisioned worker so timer jobs cannot block the public API.
   - The pay-per-use worker processes one timer job at a time so collection waves cannot compete for YDB sessions.
-  - At 8500 RUB, freeze resource increases and review the current-month forecast.
+  - At 12500 RUB, freeze resource increases and review the current-month forecast.
+  - Historical reprocessing is capped at 12 candidates per maintenance run and 4 parallel LLM calls.
   - Automatic shutdown requires a separate explicitly approved runbook or trigger.

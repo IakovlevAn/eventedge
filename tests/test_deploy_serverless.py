@@ -42,6 +42,9 @@ def test_deployment_payload_has_budget_caps() -> None:
         "YANDEX_GPT_ENABLED": "true",
         "YANDEX_GPT_FOLDER_ID": "folder-id",
         "YANDEX_GPT_MODEL": "yandexgpt-lite",
+        "BACKFILL_BATCH_LIMIT": "12",
+        "BACKFILL_CONCURRENCY": "4",
+        "EVENTEDGE_MONTHLY_BUDGET_RUB": "15000",
     }
 
 
@@ -98,8 +101,8 @@ def test_budget_policy_matches_deployment_caps() -> None:
     runtime = policy["runtime_caps"]["serverless_container"]
 
     assert policy["currency"] == "RUB"
-    assert policy["monthly_budget"] == 10_000
-    assert policy["monthly_soft_cap"] == 8_500
+    assert policy["monthly_budget"] == 15_000
+    assert policy["monthly_soft_cap"] == 12_500
     assert policy["notifications"]["thresholds_percent"] == [25, 50, 70, 85, 95]
     assert policy["enforcement"] == {
         "billing_budget": "notification_only",

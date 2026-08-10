@@ -37,8 +37,10 @@ from eventedge.collectors import (
     collect_fast_news,
     collect_market_news,
     collect_slow_news,
+    is_market_event_candidate,
     is_market_signal_candidate,
     is_moex_equity_title,
+    is_semantic_analysis_candidate,
 )
 from eventedge.configs.collection import load_collection_config
 from eventedge.evals import (
@@ -93,6 +95,8 @@ NEWS_COLLECTION_INTERVAL_SECONDS = next(
 NEWS_CLIENT_REFRESH_INTERVAL_SECONDS = 30
 NEWS_DELIVERY_TARGET_SECONDS = 120
 EVALUATION_CACHE_TTL_SECONDS = 60
+BACKFILL_BATCH_LIMIT = min(20, max(1, int(os.environ.get("BACKFILL_BATCH_LIMIT", "12"))))
+BACKFILL_CONCURRENCY = min(4, max(1, int(os.environ.get("BACKFILL_CONCURRENCY", "4"))))
 CONTENT_SNAPSHOT_TTL_SECONDS = 60 if os.environ.get("APP_ENV") == "prod" else 0
 RECENT_REPOSITORY_SUCCESS_TTL_SECONDS = 120 if os.environ.get("APP_ENV") == "prod" else 0
 MAX_TELEGRAM_CHANNELS = 18
@@ -201,8 +205,8 @@ class TelegramSourceCreate(BaseModel):
 class SignalReprocessRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    limit: Annotated[int, Field(ge=1, le=3)] = 3
-    news_ids: list[str] = Field(default_factory=list, max_length=3)
+    limit: Annotated[int, Field(ge=1, le=20)] = 12
+    news_ids: list[str] = Field(default_factory=list, max_length=20)
 
 
 def repository_from_environment(environment: Mapping[str, str]) -> NewsRepository:
@@ -519,7 +523,11 @@ async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONRespons
     results: dict[str, dict[str, int]] = {}
     for collector_name in dict.fromkeys(message.details.payload for message in envelope.messages):
         if collector_name == "maintenance":
-            reprocess = await reprocess_signal_candidates_batch(repository, limit=3)
+            reprocess = await reprocess_signal_candidates_batch(
+                repository,
+                limit=BACKFILL_BATCH_LIMIT,
+                concurrency=BACKFILL_CONCURRENCY,
+            )
             outcomes, _, _, _, epochs = await _load_evaluation_material(
                 repository,
                 request.app.state.market_data_client,
@@ -889,6 +897,7 @@ async def reprocess_signal_candidates_batch(
     *,
     limit: int,
     news_ids: list[str] | None = None,
+    concurrency: int = BACKFILL_CONCURRENCY,
 ) -> dict[str, object]:
     """Re-run current candidate policy in a bounded, idempotent batch."""
     stored_news, stored_signals = await asyncio.gather(
@@ -911,10 +920,8 @@ async def reprocess_signal_candidates_batch(
     for item in public_news(stored_news):
         if requested_news_ids and item.id not in requested_news_ids:
             continue
-        if (
-            item.id in current_news_ids
-            or item.source_metadata.get("reprocess_version") == CURRENT_NEWS_MODEL_VERSION
-            or item.source_id in {"cbr_press", "market_background"}
+        if item.id in current_news_ids or (
+            item.source_metadata.get("reprocess_version") == CURRENT_NEWS_MODEL_VERSION
         ):
             continue
         categories = item.source_metadata.get("categories", [])
@@ -928,12 +935,17 @@ async def reprocess_signal_candidates_batch(
             if isinstance(categories, list | tuple)
             else (),
         )
-        if is_market_signal_candidate(candidate):
+        if is_semantic_analysis_candidate(candidate):
             candidates.append((item, candidate))
 
     selected = candidates[:limit]
+    semaphore = asyncio.Semaphore(min(max(concurrency, 1), 4))
 
-    async def reprocess_one(item: NewsRecord) -> dict[str, object]:
+    async def reprocess_one(item: NewsRecord, candidate: RssItem) -> dict[str, object]:
+        async with semaphore:
+            return await ingest_reprocessed(item, candidate)
+
+    async def ingest_reprocessed(item: NewsRecord, candidate: RssItem) -> dict[str, object]:
         features = RuleBasedNewsExtractor().extract(
             NewsAnalysisInput(
                 source_id=item.source_id,
@@ -942,11 +954,24 @@ async def reprocess_signal_candidates_batch(
                 language=item.language,
             )
         )
+        direct_signal_candidate = is_market_signal_candidate(candidate)
+        event_candidate = is_market_event_candidate(candidate)
         metadata = dict(item.source_metadata)
         metadata.update(
             {
-                "signal_candidate": True,
-                "classification_version": "candidate-gate-0.2.0",
+                "processing_status": "processed",
+                "signal_candidate": direct_signal_candidate,
+                "analysis_candidate": True,
+                "event_candidate": event_candidate,
+                "classification_status": (
+                    "signal_candidate" if direct_signal_candidate else "semantic_candidate"
+                ),
+                "classification_reason": (
+                    "eligible_for_direct_signal_analysis"
+                    if direct_signal_candidate
+                    else "eligible_for_semantic_signal_analysis"
+                ),
+                "classification_version": "candidate-gate-0.3.0",
                 "reprocess_version": CURRENT_NEWS_MODEL_VERSION,
                 "tickers": [
                     instrument.ticker
@@ -967,7 +992,7 @@ async def reprocess_signal_candidates_batch(
             "reprocess_version": CURRENT_NEWS_MODEL_VERSION,
         }
         result = await repository.ingest(
-            f"reprocess:v2:{item.id}:{CURRENT_NEWS_MODEL_VERSION}",
+            f"reprocess:v3:{item.id}:{CURRENT_NEWS_MODEL_VERSION}",
             NewsDocument(
                 source_id=item.source_id,
                 external_id=item.external_id,
@@ -990,7 +1015,7 @@ async def reprocess_signal_candidates_batch(
         }
 
     results = await asyncio.gather(
-        *(reprocess_one(item) for item, _ in selected),
+        *(reprocess_one(item, candidate) for item, candidate in selected),
         return_exceptions=True,
     )
     completed = [result for result in results if isinstance(result, dict)]
@@ -1005,6 +1030,8 @@ async def reprocess_signal_candidates_batch(
             "remaining_candidates": max(0, len(candidates) - len(completed)),
             "model_version": CURRENT_NEWS_MODEL_VERSION,
             "batch_limit": limit,
+            "concurrency": min(max(concurrency, 1), 4),
+            "candidate_policy": "semantic-economic-0.3.0",
         },
     }
 
