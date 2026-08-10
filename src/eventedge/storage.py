@@ -374,7 +374,11 @@ def process_document(
         )
         context_instruments = [
             InstrumentMention(ticker=code, relevance=1.0, matched_alias=label)
-            for code, label in context_signal_specs(projection)
+            for code, label in context_signal_specs(
+                projection,
+                title=document.title,
+                content=document.content,
+            )
         ]
         context_features = features.model_copy(update={"instruments": context_instruments})
         baseline_signals = score_features(

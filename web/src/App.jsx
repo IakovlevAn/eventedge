@@ -1142,8 +1142,8 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
 
         <div className="market-strip">
           <span><i className={marketStatus === "error" ? "is-error" : ""} /> MOEX ISS · {marketStatus === "loading" && !marketUpdatedAt ? "загружаем котировки" : marketUpdatedAt ? `обновлено ${formatRelative(marketUpdatedAt)}` : "данные временно недоступны"}</span>
-          <span>News engine <strong>signal-engine-0.6.0</strong></span>
-          <span>Live assessment <strong>hybrid-market-0.2.0</strong></span>
+          <span>News engine <strong>signal-engine-0.6.1</strong></span>
+          <span>Live assessment <strong>hybrid-market-0.2.1</strong></span>
           <span>Шкала сигнала <strong>от −100 до +100</strong></span>
           <span className="market-strip__right"><strong>{assessmentMeta.directed || 0}</strong> сильных · {assessmentMeta.market_biases || 0} с уклоном · {assessmentMeta.news_backed || 0} с новостью</span>
         </div>
@@ -1437,7 +1437,7 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
       analyzed: analyzed.length,
       withSignal,
       coverage: relevant.length ? Math.round(analyzed.length / relevant.length * 100) : 0,
-      modelVersion: "signal-engine-0.6.0",
+      modelVersion: "signal-engine-0.6.1",
     };
   }, [allNews, newsMeta.processing_coverage]);
   const activeFilterCount = [ticker, scope, sourceId, signalState, direction, period, sortMode]
@@ -1777,9 +1777,9 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
       </section>
 
       <section className="model-stack">
-        <article><span>01</span><div><strong>signal-engine-0.6.0</strong><small>Новостной сигнал</small><p>LLM извлекает событие, факты, полярность и существенность. Код отсекает сводки уже случившегося движения, выбирает target и рассчитывает score.</p></div></article>
+        <article><span>01</span><div><strong>signal-engine-0.6.1</strong><small>Новостной сигнал</small><p>LLM извлекает событие, факты, полярность и существенность. Код отсекает сводки уже случившегося движения, выбирает target и рассчитывает score.</p></div></article>
         <i><ArrowDownRight size={15} /></i>
-        <article><span>02</span><div><strong>hybrid-market-0.2.0</strong><small>Live оценка компании</small><p>Для конкретной акции объединяет последний направленный news-сигнал с ценой, объёмом, волатильностью, ликвидностью и доступной отчётностью. Нейтральный фон не стирает активную гипотезу.</p></div></article>
+        <article><span>02</span><div><strong>hybrid-market-0.2.1</strong><small>Live оценка компании</small><p>Для конкретной акции объединяет последний направленный news-сигнал с ценой, объёмом, волатильностью, ликвидностью и доступной отчётностью. Нейтральный фон не стирает активную гипотезу.</p></div></article>
         <i><ArrowDownRight size={15} /></i>
         <article><span>03</span><div><strong>Evals по эпохам</strong><small>Проверка после сигнала</small><p>Сохраняет результаты каждой версии отдельно и оценивает реакцию через 1 и 4 часа; сырые точки до 3 дней остаются в выгрузке.</p></div></article>
       </section>
@@ -1880,7 +1880,7 @@ const apiEndpoints = [
   { id: "assessments", method: "GET", path: "/v1/assessments", title: "Live‑оценки рынка", description: "Гибридная оценка направленных news-сигналов и отдельный quant-уклон для остальных компаний.", parameter: { name: "tickers", type: "string", description: "Опциональный список тикеров MOEX через запятую" } },
   { id: "evals", method: "GET", path: "/v1/evals", title: "Анализ качества сигналов", description: "Короткие 1ч/4ч метрики, Pearson и выбор сохранённой эпохи модели.", parameter: { name: "model_version", type: "string", description: "Версия news-модели; без параметра выбирается текущая эпоха" } },
   { id: "evals_export", method: "GET", path: "/v1/evals/export?format=csv&dataset=timeseries&model_version=all", title: "Выгрузка Evals", description: "CSV/JSON: все эпохи моделей и сырой event-time ряд свечей до +3 дней.", parameter: { name: "dataset", type: "string", description: "outcomes или timeseries; model_version — версия или all" } },
-  { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Сигналы Signal Engine", description: "Версия signal-engine-0.6.0: target может быть инструментом, отраслью или рынком. Шум и сводки уже случившегося движения не становятся новыми сигналами.", parameter: { name: "limit", type: "integer", description: "Количество записей, максимум 100" } },
+  { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Сигналы Signal Engine", description: "Версия signal-engine-0.6.1: target может быть инструментом, отраслью или рынком. Шум и сводки уже случившегося движения не становятся новыми сигналами.", parameter: { name: "limit", type: "integer", description: "Количество записей, максимум 100" } },
   { id: "news", method: "GET", path: "/v1/news?limit=20", title: "Лента новостей", description: "Исходные публикации, event-проекция и связанные сигналы.", parameter: { name: "limit", type: "integer", description: "Количество публикаций, максимум 500" } },
   { id: "events", method: "GET", path: "/v1/events?limit=20", title: "Рыночные события", description: "Публикации как события уровня рынок, отрасль или компания.", parameter: { name: "scope", type: "string", description: "market, sector или company" } },
   { id: "sources", method: "GET", path: "/v1/sources", title: "Реестр источников", description: "Подключённые RSS и Telegram-источники, свежесть и статистика сбора.", parameter: null },
@@ -1915,11 +1915,11 @@ function ApiScreen() {
     "summary": {"evaluated":12,"hit_rate_pct":58.3},
     "breakdowns": {"by_horizon":[{"horizon":"4h","hit_rate_pct":58.3}]},
     "relationships": [{"code":"signal_strength_vs_4h_return","value":0.21}],
-    "outcomes": [{"ticker":"SBER","model_version":"signal-engine-0.6.0","returns":{"1h":0.4,"4h":0.8,"1d":1.2,"3d":2.1},"verdict":true}]
+    "outcomes": [{"ticker":"SBER","model_version":"signal-engine-0.6.1","returns":{"1h":0.4,"4h":0.8,"1d":1.2,"3d":2.1},"verdict":true}]
   },
-  "meta": {"selected_model_version":"signal-engine-0.6.0","primary_horizon":"4h","evaluation_scope":"directional_signals_only"}
+  "meta": {"selected_model_version":"signal-engine-0.6.1","primary_horizon":"4h","evaluation_scope":"directional_signals_only"}
 }` : endpoint.id === "evals_export" ? `signal_id,ticker,signal_as_of,direction,score,confidence,model_version,config_version,observation_at,offset_minutes,return_pct
-sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,signal-engine-0.6.0,1,2026-08-08T08:00:00Z,60,0.42` : endpoint.id === "snapshot" ? `{
+sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,signal-engine-0.6.1,1,2026-08-08T08:00:00Z,60,0.42` : endpoint.id === "snapshot" ? `{
   "data": {
     "ticker": "SBER",
     "market": {
@@ -1976,7 +1976,7 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,signal-engine-0.6.0,1,2026-08-08T0
     "poll_interval_seconds":60,
     "client_refresh_interval_seconds":30,
     "delivery_target_seconds":120,
-    "processing_coverage":{"stored":84,"relevant":61,"analysis_candidates":54,"signaled":27,"candidate_coverage_pct":88.5,"signal_yield_pct":50.0,"signal_model_version":"signal-engine-0.6.0"},
+    "processing_coverage":{"stored":84,"relevant":61,"analysis_candidates":54,"signaled":27,"candidate_coverage_pct":88.5,"signal_yield_pct":50.0,"signal_model_version":"signal-engine-0.6.1"},
     "collection_lanes":[{"id":"fast","interval_seconds":60,"source_ids":["interfax","tass","rbc","moex_news"]}],
     "sources":[{"source_id":"interfax","count":24,"signal_count":5}]
   }
@@ -1990,7 +1990,7 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,signal-engine-0.6.0,1,2026-08-08T0
       "score": 42.7,
       "confidence": 0.76,
       "horizon": {"value": 3, "unit": "calendar_days"},
-      "model_version": "signal-engine-0.6.0"
+      "model_version": "signal-engine-0.6.1"
     }
   ],
   "meta": {
@@ -1999,7 +1999,7 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,signal-engine-0.6.0,1,2026-08-08T0
     "next_cursor": null,
     "model_scope": "news_event",
     "final_assessment_endpoint": "/v1/assessments",
-    "final_assessment_model_version": "hybrid-market-0.2.0"
+    "final_assessment_model_version": "hybrid-market-0.2.1"
   }
 }`;
 

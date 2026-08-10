@@ -536,6 +536,7 @@ async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONRespons
             assert isinstance(reprocess_meta, dict)
             results[collector_name] = {
                 "reprocessed": int(reprocess_meta["completed"]),
+                "failed": int(reprocess_meta.get("failed", 0)),
                 "remaining": int(reprocess_meta["remaining_candidates"]),
                 "outcomes": len(outcomes),
                 "epochs": len(epochs),
@@ -971,7 +972,16 @@ async def reprocess_signal_candidates_batch(
 
     async def reprocess_one(item: NewsRecord, candidate: RssItem) -> dict[str, object]:
         async with semaphore:
-            return await ingest_reprocessed(item, candidate)
+            for attempt in range(2):
+                try:
+                    return await ingest_reprocessed(item, candidate)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    if attempt == 1:
+                        raise
+                    await asyncio.sleep(1.5)
+            raise AssertionError("unreachable retry loop")
 
     async def ingest_reprocessed(item: NewsRecord, candidate: RssItem) -> dict[str, object]:
         features = RuleBasedNewsExtractor().extract(
