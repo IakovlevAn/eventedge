@@ -12,6 +12,7 @@ from eventedge.collectors import (
     RssItem,
     is_google_market_signal_candidate,
     is_market_signal_candidate,
+    is_semantic_analysis_candidate,
 )
 
 STOP_WORDS = {
@@ -74,11 +75,15 @@ def audit(news_payload: dict[str, object], eval_payload: dict[str, object]) -> d
     assert isinstance(news, list)
     news_by_id = {str(item["id"]): item for item in news if isinstance(item, dict)}
     new_candidates = []
+    semantic_candidates = []
     old_candidates = []
     old_signaled = []
+    rejected_old_signaled = []
     lags = []
     by_source: Counter[str] = Counter()
+    semantic_by_source: Counter[str] = Counter()
     newly_by_source: Counter[str] = Counter()
+    old_signal_directions: Counter[str] = Counter()
 
     for item in news_by_id.values():
         published = parse_time(str(item["published_at"]))
@@ -91,6 +96,11 @@ def audit(news_payload: dict[str, object], eval_payload: dict[str, object]) -> d
         related = item.get("related_signals", [])
         if isinstance(related, list) and related:
             old_signaled.append(item)
+            old_signal_directions.update(
+                str(signal.get("direction", "unknown"))
+                for signal in related
+                if isinstance(signal, dict)
+            )
 
         categories = metadata.get("categories", [])
         rss_item = RssItem(
@@ -115,6 +125,11 @@ def audit(news_payload: dict[str, object], eval_payload: dict[str, object]) -> d
             by_source[source_id] += 1
             if not metadata.get("signal_candidate"):
                 newly_by_source[source_id] += 1
+        if is_semantic_analysis_candidate(rss_item):
+            semantic_candidates.append(item)
+            semantic_by_source[source_id] += 1
+        elif isinstance(related, list) and related:
+            rejected_old_signaled.append(item)
 
     eval_data = eval_payload.get("data", {})
     eval_data = eval_data if isinstance(eval_data, dict) else {}
@@ -155,7 +170,13 @@ def audit(news_payload: dict[str, object], eval_payload: dict[str, object]) -> d
             "total": len(news_by_id),
             "old_candidates": len(old_candidates),
             "old_signaled_news": len(old_signaled),
+            "old_signal_directions": dict(old_signal_directions.most_common()),
             "current_gate_candidates": len(new_candidates),
+            "current_semantic_candidates": len(semantic_candidates),
+            "current_semantic_candidate_by_source": dict(
+                semantic_by_source.most_common()
+            ),
+            "old_signaled_rejected_by_current_gate": len(rejected_old_signaled),
             "newly_eligible": len(new_candidates) - len(
                 [item for item in new_candidates if item in old_candidates]
             ),
@@ -176,8 +197,30 @@ def audit(news_payload: dict[str, object], eval_payload: dict[str, object]) -> d
                 for item in new_candidates
                 if item not in old_candidates
             ][:20],
+            "rejected_old_signal_examples": [
+                {
+                    "source_id": item["source_id"],
+                    "published_at": item["published_at"],
+                    "title": item["title"],
+                    "directions": [
+                        signal.get("direction")
+                        for signal in item.get("related_signals", [])
+                        if isinstance(signal, dict)
+                    ],
+                }
+                for item in rejected_old_signaled[:20]
+            ],
         },
         "evals": {
+            "selected_model_version": eval_payload.get("meta", {}).get(
+                "selected_model_version"
+            )
+            if isinstance(eval_payload.get("meta"), dict)
+            else None,
+            "model_epochs": eval_payload.get("meta", {}).get("model_epochs", [])
+            if isinstance(eval_payload.get("meta"), dict)
+            else [],
+            "summary": eval_data.get("summary", {}),
             "raw_outcomes": len(comparable),
             "event_level_outcomes": len(groups),
             "duplicate_outcomes": len(comparable) - len(groups),

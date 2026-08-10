@@ -31,7 +31,7 @@ def build_payload(
         "YANDEX_GPT_ENABLED": "true",
         "YANDEX_GPT_FOLDER_ID": environment["YC_FOLDER_ID"],
         "YANDEX_GPT_MODEL": "yandexgpt-lite",
-        "BACKFILL_BATCH_LIMIT": "12",
+        "BACKFILL_BATCH_LIMIT": "24",
         "BACKFILL_CONCURRENCY": "4",
         "EVENTEDGE_MONTHLY_BUDGET_RUB": "15000",
     }

@@ -72,7 +72,7 @@ def test_yandexgpt_extracts_semantics_but_keeps_ticker_deterministic() -> None:
     features = asyncio.run(analyzer.extract(document))
 
     assert [item.ticker for item in features.instruments] == ["SBER"]
-    assert features.extractor_version == "yandexgpt-lite-0.3.0"
+    assert features.extractor_version == "yandexgpt-lite-0.4.0"
     assert features.polarity == 0.86
     request = session.calls[0]
     assert request["url"] == "https://ai.api.cloud.yandex.net/v1/chat/completions"

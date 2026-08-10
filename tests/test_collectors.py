@@ -176,7 +176,7 @@ def test_sector_news_without_ticker_is_analyzed_and_stored() -> None:
         "event_candidate": True,
         "signal_candidate": False,
         "analysis_candidate": True,
-        "classification_version": "candidate-gate-0.3.0",
+        "classification_version": "candidate-gate-0.4.0",
     }
     assert {signal["ticker"] for signal in signals} == {"RUAGRI", "RUTRANS"}
     assert {signal["target"]["type"] for signal in signals} == {"sector"}
@@ -291,7 +291,8 @@ def test_broad_economic_news_is_sent_to_semantic_analyzer() -> None:
     assert result["analysis_candidates"] == 2
     assert analyzer.calls == 2
     assert news_count == 2
-    assert signal_count == 2
+    # Semantic analysis is auditable, but neutral context is not published as a signal.
+    assert signal_count == 0
 
 
 def test_semantic_router_rejects_unrelated_post() -> None:
@@ -305,6 +306,66 @@ def test_semantic_router_rejects_unrelated_post() -> None:
     )
 
     assert is_semantic_analysis_candidate(item) is False
+
+
+def test_semantic_router_rejects_sports_story_with_market_words() -> None:
+    item = RssItem(
+        external_id="sports-visa",
+        published_at=datetime(2026, 8, 10, tzinfo=UTC),
+        title="Гимнастка рассказала о визовых ограничениях на чемпионате Европы",
+        url="https://example.com/sports-visa",
+        content="Решение о выдаче виз пересмотрели для части сборной.",
+        categories=("Спорт",),
+    )
+
+    assert is_market_event_candidate(item) is False
+    assert is_semantic_analysis_candidate(item) is False
+
+
+@pytest.mark.parametrize(
+    ("title", "content"),
+    [
+        (
+            "Акции Русала подскочили на 5% на фоне роста цен на алюминий",
+            "Движение уже произошло в ходе торгов.",
+        ),
+        (
+            "Динамика финансовых инструментов",
+            "Лидеры роста: SMLT +10%, RUAL +8%, MAGN +6%, CHMF +5%.",
+        ),
+    ],
+)
+def test_signal_router_rejects_realised_price_recap(
+    title: str,
+    content: str,
+) -> None:
+    item = RssItem(
+        external_id="price-recap",
+        published_at=datetime(2026, 8, 10, tzinfo=UTC),
+        title=title,
+        url="https://example.com/price-recap",
+        content=content,
+        categories=(),
+    )
+
+    assert is_market_signal_candidate(item) is False
+    assert is_semantic_analysis_candidate(item) is False
+
+
+def test_semantic_router_keeps_company_report_with_many_percentages() -> None:
+    item = RssItem(
+        external_id="company-report",
+        published_at=datetime(2026, 8, 10, tzinfo=UTC),
+        title="Рыбка идет, выручка растет",
+        url="https://example.com/company-report",
+        content=(
+            "Инарктика представила операционный отчет: выручка +38%, "
+            "объем реализации +57%, биомасса +33%. Динамика продаж улучшилась."
+        ),
+        categories=(),
+    )
+
+    assert is_semantic_analysis_candidate(item) is True
 
 
 def test_moex_equity_filter_rejects_mechanical_listing_notice() -> None:

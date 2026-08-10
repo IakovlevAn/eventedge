@@ -14,7 +14,6 @@ import {
   Database,
   Download,
   FileText,
-  Filter,
   Globe2,
   Info,
   Layers3,
@@ -476,6 +475,7 @@ function assessmentFromApi(item) {
   const [company, sector] = companyMeta[item.ticker] || [item.ticker, "Российский рынок"];
   return {
     ...item,
+    available: item.assessment_type === "hybrid",
     displayDirection: item.direction,
     marketBiasDirection: item.bias_direction,
     company,
@@ -653,7 +653,7 @@ function Direction({ direction, label = null }) {
   );
 }
 
-function FilterSelect({ label, value, options, onChange }) {
+function FilterSelect({ label, value, options, onChange, className = "" }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
   const selected = options.find((option) => option.value === value) || options[0];
@@ -675,7 +675,7 @@ function FilterSelect({ label, value, options, onChange }) {
   }, [open]);
 
   return (
-    <div className={`event-filter-select ${open ? "is-open" : ""}`} ref={rootRef}>
+    <div className={`event-filter-select ${className} ${open ? "is-open" : ""}`.trim()} ref={rootRef}>
       <button
         type="button"
         className="event-filter-select__trigger"
@@ -702,6 +702,11 @@ function FilterSelect({ label, value, options, onChange }) {
             aria-selected={option.value === value}
             className={option.value === value ? "is-selected" : ""}
             key={option.value}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              onChange(option.value);
+              setOpen(false);
+            }}
             onClick={() => {
               onChange(option.value);
               setOpen(false);
@@ -1066,9 +1071,7 @@ const signalSortOptions = [
 function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt, onSelect, onOpenNews, onMethodology, onReadNews }) {
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
-  const [filterOpen, setFilterOpen] = useState(false);
   const [sortMode, setSortMode] = useState("priority");
-  const [sortOpen, setSortOpen] = useState(false);
 
   const companyCards = useMemo(() => {
     const activeTickers = new Set(signals.map((signal) => signal.ticker));
@@ -1093,7 +1096,7 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
   const filteredSignals = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("ru-RU");
     const result = companyCards.filter((signal) => {
-      const matchesFilter = filter === "all" || (signal.displayDirection || signal.direction) === filter;
+      const matchesFilter = filter === "all" || (signal.available !== false && (signal.displayDirection || signal.direction) === filter);
       const matchesQuery = !normalized || `${signal.ticker} ${signal.company} ${signal.sector}`.toLocaleLowerCase("ru-RU").includes(normalized);
       return matchesFilter && matchesQuery;
     });
@@ -1113,36 +1116,18 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
     });
   }, [companyCards, filter, query, sortMode]);
 
-  const activeSortLabel = signalSortOptions.find(([value]) => value === sortMode)?.[1] || "Сортировка";
-
   return (
     <main className="screen screen--signals">
       <section className="terminal-window">
         <div className="terminal-toolbar">
           <div className="terminal-title">
             <div><h1>Компании в фокусе</h1></div>
-            <div className="filter-wrap">
-              <button type="button" className={`text-button ${filter !== "all" ? "is-active" : ""}`} onClick={() => { setFilterOpen((value) => !value); setSortOpen(false); }}>
-                <Filter size={14} />
-                {filter === "all" ? "Добавить фильтр" : directionMeta[filter].label}
-                <ChevronDown size={12} />
-              </button>
-              {filterOpen && (
-                <div className="filter-menu">
-                  {[
-                    ["all", "Все сигналы"],
-                    ["up", "Вверх"],
-                    ["neutral", "Нейтрально"],
-                    ["down", "Вниз"],
-                  ].map(([value, label]) => (
-                    <button key={value} type="button" className={filter === value ? "is-active" : ""} onClick={() => { setFilter(value); setFilterOpen(false); }}>
-                      {label}
-                      {filter === value && <Check size={13} />}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+            <FilterSelect className="terminal-filter-select" label="Направление" value={filter} onChange={setFilter} options={[
+              { value: "all", label: "Все компании" },
+              { value: "up", label: "Вверх" },
+              { value: "neutral", label: "Нейтрально" },
+              { value: "down", label: "Вниз" },
+            ]} />
           </div>
 
           <div className="terminal-actions">
@@ -1151,30 +1136,14 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
               <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Тикер или компания" aria-label="Найти сигнал" />
               {query && <button type="button" onClick={() => setQuery("")} aria-label="Очистить поиск"><X size={13} /></button>}
             </label>
-            <div className="filter-wrap sort-wrap">
-              <button className={`sort-button ${sortOpen || sortMode !== "priority" ? "is-active" : ""}`} type="button" aria-label="Выбрать сортировку" aria-expanded={sortOpen} onClick={() => { setSortOpen((value) => !value); setFilterOpen(false); }}>
-                <SlidersHorizontal size={15} />
-                <span>{activeSortLabel}</span>
-                <ChevronDown size={12} />
-              </button>
-              {sortOpen && (
-                <div className="filter-menu sort-menu">
-                  {signalSortOptions.map(([value, label]) => (
-                    <button key={value} type="button" className={sortMode === value ? "is-active" : ""} onClick={() => { setSortMode(value); setSortOpen(false); }}>
-                      {label}
-                      {sortMode === value && <Check size={13} />}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+            <FilterSelect className="terminal-filter-select terminal-filter-select--sort" label="Сортировка" value={sortMode} onChange={setSortMode} options={signalSortOptions.map(([value, label]) => ({ value, label }))} />
           </div>
         </div>
 
         <div className="market-strip">
           <span><i className={marketStatus === "error" ? "is-error" : ""} /> MOEX ISS · {marketStatus === "loading" && !marketUpdatedAt ? "загружаем котировки" : marketUpdatedAt ? `обновлено ${formatRelative(marketUpdatedAt)}` : "данные временно недоступны"}</span>
-          <span>News engine <strong>signal-engine-0.5.0</strong></span>
-          <span>Live assessment <strong>hybrid-market-0.1.0</strong></span>
+          <span>News engine <strong>signal-engine-0.6.0</strong></span>
+          <span>Live assessment <strong>hybrid-market-0.2.0</strong></span>
           <span>Шкала сигнала <strong>от −100 до +100</strong></span>
           <span className="market-strip__right"><strong>{assessmentMeta.directed || 0}</strong> сильных · {assessmentMeta.market_biases || 0} с уклоном · {assessmentMeta.news_backed || 0} с новостью</span>
         </div>
@@ -1186,7 +1155,7 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
               const displayDirection = signal.direction;
               const directionLabel = null;
               const evidence = signal.evidence?.[0];
-              const openCard = () => available ? onSelect(signal.ticker) : onOpenNews(signal.ticker);
+              const openCard = () => signal.assessment_type ? onSelect(signal.ticker) : onOpenNews(signal.ticker);
               return (
                 <article
                   className={`company-signal-card ${available ? `company-signal-card--${displayDirection}` : "company-signal-card--waiting"}`}
@@ -1468,7 +1437,7 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
       analyzed: analyzed.length,
       withSignal,
       coverage: relevant.length ? Math.round(analyzed.length / relevant.length * 100) : 0,
-      modelVersion: "signal-engine-0.5.0",
+      modelVersion: "signal-engine-0.6.0",
     };
   }, [allNews, newsMeta.processing_coverage]);
   const activeFilterCount = [ticker, scope, sourceId, signalState, direction, period, sortMode]
@@ -1585,6 +1554,11 @@ function EvalsScreen() {
   const latestQuality = qualitySeries.at(-1);
   const modelEpochs = payload.meta.model_epochs || [];
   const activeModelVersion = payload.meta.selected_model_version || selectedModelVersion;
+  const orderedModelEpochs = [...modelEpochs].sort((left, right) => {
+    if (left.model_version === activeModelVersion) return -1;
+    if (right.model_version === activeModelVersion) return 1;
+    return new Date(right.evaluated_at || 0) - new Date(left.evaluated_at || 0);
+  });
 
   return (
     <main className="screen section-screen evals-screen">
@@ -1592,7 +1566,7 @@ function EvalsScreen() {
         <div><span className="eyebrow"><Activity size={13} /> Проверка реальностью</span><h1>Evals: сигналы в цифрах</h1><p>Только направленные сигналы «вверх» и «вниз» сопоставляются с реальной ценой MOEX. Нейтральные события сохраняются в истории, но не искажают hit rate.</p></div>
         <div className="eval-hero-actions">
           <div className={`eval-live${error ? " is-stale" : ""}`}><i /><span><strong>{error ? "Показываем последний snapshot" : "Snapshot каждые 10 минут"}</strong><small>{payload.meta.generated_at ? `${formatRelative(payload.meta.generated_at)} · ` : "Расчёт новой эпохи ожидается · "}основной горизонт 4 часа</small></span></div>
-          <label className="eval-model-select"><span>Эпоха модели</span><select value={activeModelVersion || ""} onChange={(event) => setSelectedModelVersion(event.target.value)}>{modelEpochs.map((epoch) => <option value={epoch.model_version} key={epoch.epoch_id}>{epoch.model_version} · cfg {epoch.config_version} · n={epoch.signals}</option>)}</select><ChevronDown size={13} /></label>
+          <FilterSelect className="eval-model-filter" label="Эпоха модели" value={activeModelVersion || ""} onChange={setSelectedModelVersion} options={orderedModelEpochs.map((epoch) => ({ value: epoch.model_version, label: `${epoch.model_version} · cfg ${epoch.config_version} · n=${epoch.signals}` }))} />
           <div className="eval-exports">
             <a href={apiUrl("/v1/evals/export?format=csv&dataset=outcomes&model_version=all")} download><Download size={13} /> Все эпохи · outcomes</a>
             <a href={apiUrl("/v1/evals/export?format=csv&dataset=timeseries&model_version=all")} download><Download size={13} /> Все эпохи · raw</a>
@@ -1803,9 +1777,9 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
       </section>
 
       <section className="model-stack">
-        <article><span>01</span><div><strong>signal-engine-0.5.0</strong><small>Новостной сигнал</small><p>LLM извлекает событие, факты, полярность и существенность. Код выбирает target — компания, отрасль или рынок — и рассчитывает score.</p></div></article>
+        <article><span>01</span><div><strong>signal-engine-0.6.0</strong><small>Новостной сигнал</small><p>LLM извлекает событие, факты, полярность и существенность. Код отсекает сводки уже случившегося движения, выбирает target и рассчитывает score.</p></div></article>
         <i><ArrowDownRight size={15} /></i>
-        <article><span>02</span><div><strong>hybrid-market-0.1.0</strong><small>Live оценка компании</small><p>Для конкретной акции объединяет активный news-сигнал с ценой, объёмом, волатильностью, ликвидностью и доступной отчётностью.</p></div></article>
+        <article><span>02</span><div><strong>hybrid-market-0.2.0</strong><small>Live оценка компании</small><p>Для конкретной акции объединяет последний направленный news-сигнал с ценой, объёмом, волатильностью, ликвидностью и доступной отчётностью. Нейтральный фон не стирает активную гипотезу.</p></div></article>
         <i><ArrowDownRight size={15} /></i>
         <article><span>03</span><div><strong>Evals по эпохам</strong><small>Проверка после сигнала</small><p>Сохраняет результаты каждой версии отдельно и оценивает реакцию через 1 и 4 часа; сырые точки до 3 дней остаются в выгрузке.</p></div></article>
       </section>
@@ -1906,7 +1880,7 @@ const apiEndpoints = [
   { id: "assessments", method: "GET", path: "/v1/assessments", title: "Live‑оценки рынка", description: "Гибридная оценка направленных news-сигналов и отдельный quant-уклон для остальных компаний.", parameter: { name: "tickers", type: "string", description: "Опциональный список тикеров MOEX через запятую" } },
   { id: "evals", method: "GET", path: "/v1/evals", title: "Анализ качества сигналов", description: "Короткие 1ч/4ч метрики, Pearson и выбор сохранённой эпохи модели.", parameter: { name: "model_version", type: "string", description: "Версия news-модели; без параметра выбирается текущая эпоха" } },
   { id: "evals_export", method: "GET", path: "/v1/evals/export?format=csv&dataset=timeseries&model_version=all", title: "Выгрузка Evals", description: "CSV/JSON: все эпохи моделей и сырой event-time ряд свечей до +3 дней.", parameter: { name: "dataset", type: "string", description: "outcomes или timeseries; model_version — версия или all" } },
-  { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Сигналы Signal Engine", description: "Версия signal-engine-0.5.0: target может быть инструментом, отраслью или рынком. Live-оценка конкретной компании возвращается отдельно через /v1/assessments.", parameter: { name: "limit", type: "integer", description: "Количество записей, максимум 100" } },
+  { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Сигналы Signal Engine", description: "Версия signal-engine-0.6.0: target может быть инструментом, отраслью или рынком. Шум и сводки уже случившегося движения не становятся новыми сигналами.", parameter: { name: "limit", type: "integer", description: "Количество записей, максимум 100" } },
   { id: "news", method: "GET", path: "/v1/news?limit=20", title: "Лента новостей", description: "Исходные публикации, event-проекция и связанные сигналы.", parameter: { name: "limit", type: "integer", description: "Количество публикаций, максимум 500" } },
   { id: "events", method: "GET", path: "/v1/events?limit=20", title: "Рыночные события", description: "Публикации как события уровня рынок, отрасль или компания.", parameter: { name: "scope", type: "string", description: "market, sector или company" } },
   { id: "sources", method: "GET", path: "/v1/sources", title: "Реестр источников", description: "Подключённые RSS и Telegram-источники, свежесть и статистика сбора.", parameter: null },
@@ -1941,11 +1915,11 @@ function ApiScreen() {
     "summary": {"evaluated":12,"hit_rate_pct":58.3},
     "breakdowns": {"by_horizon":[{"horizon":"4h","hit_rate_pct":58.3}]},
     "relationships": [{"code":"signal_strength_vs_4h_return","value":0.21}],
-    "outcomes": [{"ticker":"SBER","model_version":"signal-engine-0.5.0","returns":{"1h":0.4,"4h":0.8,"1d":1.2,"3d":2.1},"verdict":true}]
+    "outcomes": [{"ticker":"SBER","model_version":"signal-engine-0.6.0","returns":{"1h":0.4,"4h":0.8,"1d":1.2,"3d":2.1},"verdict":true}]
   },
-  "meta": {"selected_model_version":"signal-engine-0.5.0","primary_horizon":"4h","evaluation_scope":"directional_signals_only"}
+  "meta": {"selected_model_version":"signal-engine-0.6.0","primary_horizon":"4h","evaluation_scope":"directional_signals_only"}
 }` : endpoint.id === "evals_export" ? `signal_id,ticker,signal_as_of,direction,score,confidence,model_version,config_version,observation_at,offset_minutes,return_pct
-sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,signal-engine-0.5.0,1,2026-08-08T08:00:00Z,60,0.42` : endpoint.id === "snapshot" ? `{
+sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,signal-engine-0.6.0,1,2026-08-08T08:00:00Z,60,0.42` : endpoint.id === "snapshot" ? `{
   "data": {
     "ticker": "SBER",
     "market": {
@@ -2002,7 +1976,7 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,signal-engine-0.5.0,1,2026-08-08T0
     "poll_interval_seconds":60,
     "client_refresh_interval_seconds":30,
     "delivery_target_seconds":120,
-    "processing_coverage":{"stored":84,"relevant":61,"analysis_candidates":54,"signaled":27,"candidate_coverage_pct":88.5,"signal_yield_pct":50.0,"signal_model_version":"signal-engine-0.5.0"},
+    "processing_coverage":{"stored":84,"relevant":61,"analysis_candidates":54,"signaled":27,"candidate_coverage_pct":88.5,"signal_yield_pct":50.0,"signal_model_version":"signal-engine-0.6.0"},
     "collection_lanes":[{"id":"fast","interval_seconds":60,"source_ids":["interfax","tass","rbc","moex_news"]}],
     "sources":[{"source_id":"interfax","count":24,"signal_count":5}]
   }
@@ -2016,7 +1990,7 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,signal-engine-0.5.0,1,2026-08-08T0
       "score": 42.7,
       "confidence": 0.76,
       "horizon": {"value": 3, "unit": "calendar_days"},
-      "model_version": "signal-engine-0.5.0"
+      "model_version": "signal-engine-0.6.0"
     }
   ],
   "meta": {
@@ -2025,7 +1999,7 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,signal-engine-0.5.0,1,2026-08-08T0
     "next_cursor": null,
     "model_scope": "news_event",
     "final_assessment_endpoint": "/v1/assessments",
-    "final_assessment_model_version": "hybrid-market-0.1.0"
+    "final_assessment_model_version": "hybrid-market-0.2.0"
   }
 }`;
 

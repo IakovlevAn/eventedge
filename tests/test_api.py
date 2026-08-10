@@ -184,10 +184,10 @@ def test_admin_reprocesses_one_explicit_stored_candidate(
     assert response.status_code == 200
     assert response.json()["meta"]["completed"] == 1
     assert response.json()["meta"]["batch_limit"] == 1
-    assert response.json()["meta"]["model_version"] == "signal-engine-0.5.0"
+    assert response.json()["meta"]["model_version"] == "signal-engine-0.6.0"
     assert response.json()["data"][0]["news_id"] == stored.id
     assert response.json()["data"][0]["result_ref"].startswith("sig_")
-    assert updated.source_metadata["reprocess_version"] == "signal-engine-0.5.0"
+    assert updated.source_metadata["reprocess_version"] == "signal-engine-0.6.0"
 
 
 def test_backfill_reclassifies_stored_sector_news_without_ticker(
@@ -247,9 +247,9 @@ def test_backfill_reclassifies_stored_sector_news_without_ticker(
         app.state.evaluation_material_cache = None
 
     assert response.status_code == 200
-    assert response.json()["meta"]["candidate_policy"] == "semantic-economic-0.3.0"
+    assert response.json()["meta"]["candidate_policy"] == "semantic-economic-0.4.0"
     assert {signal.ticker for signal in signals} == {"RUAGRI", "RUTRANS"}
-    assert {signal.model_version for signal in signals} == {"signal-engine-0.5.0"}
+    assert {signal.model_version for signal in signals} == {"signal-engine-0.6.0"}
     assert updated.source_metadata["classification_status"] == "semantic_candidate"
     assert updated.source_metadata["analysis_candidate"] is True
 
@@ -363,8 +363,8 @@ def test_signal_list_has_contract_shape_and_etag() -> None:
             "next_cursor": None,
             "model_scope": "news_event",
             "final_assessment_endpoint": "/v1/assessments",
-            "final_assessment_model_version": "hybrid-market-0.1.0",
-            "model_version": "signal-engine-0.5.0",
+            "final_assessment_model_version": "hybrid-market-0.2.0",
+            "model_version": "signal-engine-0.6.0",
         },
     }
     assert response.headers["ETag"].startswith('"')
@@ -430,7 +430,7 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
     assert signal.json()["data"]["ticker"] == "SBER"
     assert signal.json()["data"]["direction"] == "up"
     assert signal.json()["data"]["action"] == "consider_buy"
-    assert signal.json()["data"]["model_version"] == "signal-engine-0.5.0"
+    assert signal.json()["data"]["model_version"] == "signal-engine-0.6.0"
     assert len(signal.json()["data"]["factor_contributions"]) == 5
 
     listed = client.get("/v1/signals", params={"ticker": "SBER", "direction": "up"})
@@ -449,7 +449,7 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
         "signaled": 1,
         "candidate_coverage_pct": 100.0,
         "signal_yield_pct": 100.0,
-        "signal_model_version": "signal-engine-0.5.0",
+        "signal_model_version": "signal-engine-0.6.0",
     }
     assert news.json()["meta"]["collection_lanes"] == [
         {

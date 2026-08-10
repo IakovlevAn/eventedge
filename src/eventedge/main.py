@@ -95,7 +95,7 @@ NEWS_COLLECTION_INTERVAL_SECONDS = next(
 NEWS_CLIENT_REFRESH_INTERVAL_SECONDS = 30
 NEWS_DELIVERY_TARGET_SECONDS = 120
 EVALUATION_CACHE_TTL_SECONDS = 60
-BACKFILL_BATCH_LIMIT = min(20, max(1, int(os.environ.get("BACKFILL_BATCH_LIMIT", "12"))))
+BACKFILL_BATCH_LIMIT = min(40, max(1, int(os.environ.get("BACKFILL_BATCH_LIMIT", "24"))))
 BACKFILL_CONCURRENCY = min(4, max(1, int(os.environ.get("BACKFILL_CONCURRENCY", "4"))))
 CONTENT_SNAPSHOT_TTL_SECONDS = 60 if os.environ.get("APP_ENV") == "prod" else 0
 RECENT_REPOSITORY_SUCCESS_TTL_SECONDS = 120 if os.environ.get("APP_ENV") == "prod" else 0
@@ -647,6 +647,8 @@ async def list_news(
     signals = normalize_signal_freshness(stored_signals, news_by_id)
     signals_by_news: dict[str, list[dict[str, object]]] = {}
     for signal in latest_model_signal_per_news(deduplicate_signals(signals)):
+        if signal.model_version != CURRENT_NEWS_MODEL_VERSION:
+            continue
         signals_by_news.setdefault(signal.news_id, []).append(
             {
                 "id": signal.id,
@@ -997,7 +999,7 @@ async def reprocess_signal_candidates_batch(
                     if direct_signal_candidate
                     else "eligible_for_semantic_signal_analysis"
                 ),
-                "classification_version": "candidate-gate-0.3.0",
+                "classification_version": "candidate-gate-0.4.0",
                 "reprocess_version": CURRENT_NEWS_MODEL_VERSION,
                 "tickers": [
                     instrument.ticker
@@ -1057,7 +1059,7 @@ async def reprocess_signal_candidates_batch(
             "model_version": CURRENT_NEWS_MODEL_VERSION,
             "batch_limit": limit,
             "concurrency": min(max(concurrency, 1), 4),
-            "candidate_policy": "semantic-economic-0.3.0",
+            "candidate_policy": "semantic-economic-0.4.0",
         },
     }
 
@@ -1271,9 +1273,12 @@ async def active_signals_by_ticker(repository: NewsRepository) -> dict[str, Sign
         if (
             signal.model_version == CURRENT_NEWS_MODEL_VERSION
             and signal.news_id not in hidden_ids
-            and signal.ticker not in result
         ):
-            result[signal.ticker] = signal
+            current = result.get(signal.ticker)
+            if current is None or (
+                current.direction == "neutral" and signal.direction in {"up", "down"}
+            ):
+                result[signal.ticker] = signal
     return result
 
 
@@ -1331,9 +1336,12 @@ async def list_assessments(
         if (
             signal.model_version == CURRENT_NEWS_MODEL_VERSION
             and signal.news_id not in hidden_ids
-            and signal.ticker not in active_by_ticker
         ):
-            active_by_ticker[signal.ticker] = signal
+            current = active_by_ticker.get(signal.ticker)
+            if current is None or (
+                current.direction == "neutral" and signal.direction in {"up", "down"}
+            ):
+                active_by_ticker[signal.ticker] = signal
     visible_news = public_news(stored_news)
     data = []
     errors = []

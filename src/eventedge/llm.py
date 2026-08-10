@@ -79,7 +79,7 @@ class MetadataIamTokenProvider:
 class YandexGptNewsAnalyzer:
     """Target-neutral semantic extractor with a deterministic rule fallback."""
 
-    version = "yandexgpt-lite-0.3.0"
+    version = "yandexgpt-lite-0.4.0"
 
     def __init__(
         self,
@@ -183,7 +183,12 @@ class YandexGptNewsAnalyzer:
                             "polarity: -1 негативно, 0 без направленного эффекта, +1 позитивно "
                             "для указанной компании, а если тикера нет — для затронутого "
                             "российского рынка или отрасли. materiality: 0..1 для "
-                            "краткосрочного движения. Цель сигнала будет выбрана кодом."
+                            "краткосрочного движения. Если публикация относится к спорту, "
+                            "культуре или частной жизни, только перечисляет лидеров роста/падения "
+                            "либо описывает уже случившееся движение котировок без нового факта, "
+                            "верни event_type=other, polarity=0 и materiality не выше 0.1. "
+                            "Не считай позитивной саму фразу о росте цены. Цель сигнала будет "
+                            "выбрана и проверена кодом."
                         ),
                     },
                     {

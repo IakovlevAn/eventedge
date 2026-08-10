@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from eventedge.analysis import DEFAULT_MOEX_ALIASES
 from eventedge.storage import NewsRecord, SignalRecord, to_rfc3339
 
-ASSESSMENT_MODEL_VERSION = "hybrid-market-0.1.0"
+ASSESSMENT_MODEL_VERSION = "hybrid-market-0.2.0"
 ASSESSMENT_CONFIG_VERSION = 2
 POSITIVE_THRESHOLD = 18.0
 NEGATIVE_THRESHOLD = -18.0
