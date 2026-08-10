@@ -23,3 +23,13 @@ def test_production_smoke_retries_cold_evals_and_checks_new_routes() -> None:
     assert "Smoke test source registry and market events" in workflow
     assert '"${EVENTEDGE_API_URL}/v1/sources"' in workflow
     assert '"${EVENTEDGE_API_URL}/v1/events?limit=1"' in workflow
+
+
+def test_trusted_auto_merge_accepts_codex_and_agent_branches() -> None:
+    workflow = Path(".github/workflows/auto-merge.yml").read_text(encoding="utf-8")
+
+    assert "startsWith(github.event.workflow_run.head_branch, 'codex/')" in workflow
+    assert '"$head_ref" != codex/*' in workflow
+    assert '"$head_ref" != agent/*' in workflow
+    assert '"$head_repo" != "$REPOSITORY"' in workflow
+    assert '"$base_ref" != "main"' in workflow

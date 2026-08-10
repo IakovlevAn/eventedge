@@ -1363,7 +1363,7 @@ async def _load_evaluation_material(
     dict[str, NewsRecord],
     list[EvaluationEpochRecord],
 ]:
-    stored_signals, stored_news = await asyncio.gather(
+    stored_signals, stored_news, stored_epochs = await asyncio.gather(
         repository.list_signals(
             ticker=None,
             directions=None,
@@ -1372,6 +1372,7 @@ async def _load_evaluation_material(
             limit=1000,
         ),
         repository.list_news(source_id=None, limit=1000),
+        repository.list_evaluation_epochs(),
     )
     news_by_id = {item.id: item for item in public_news(stored_news)}
     signals = deduplicate_eval_events(
@@ -1385,7 +1386,17 @@ async def _load_evaluation_material(
         news_by_id,
         preserve_model_epochs=True,
     )[:200]
-    tickers = list(dict.fromkeys(signal.ticker for signal in signals))
+    epoch_by_model = {
+        (epoch.model_version, epoch.config_version): epoch for epoch in stored_epochs
+    }
+    complete_outcomes = {
+        str(outcome["signal_id"]): dict(outcome)
+        for epoch in stored_epochs
+        for outcome in epoch.outcomes
+        if _is_complete_eval_outcome(outcome)
+    }
+    refresh_signals = [signal for signal in signals if signal.id not in complete_outcomes]
+    tickers = list(dict.fromkeys(signal.ticker for signal in refresh_signals))
     candle_results = await asyncio.gather(
         *(market_data_client.candles(ticker, interval=10, lookback_days=14) for ticker in tickers),
         return_exceptions=True,
@@ -1396,7 +1407,8 @@ async def _load_evaluation_material(
         if isinstance(result, dict)
     }
     outcomes = [
-        evaluate_signal(
+        complete_outcomes.get(signal.id)
+        or evaluate_signal(
             signal,
             candles_by_ticker.get(signal.ticker, []),
             news_by_id.get(signal.news_id),
@@ -1415,10 +1427,28 @@ async def _load_evaluation_material(
         ]
         signal_ids = {signal.id for signal in epoch_signals}
         epoch_outcomes = [outcome for outcome in outcomes if outcome["signal_id"] in signal_ids]
-        observations, observations_truncated = event_time_export_rows(
-            epoch_signals,
+        previous_epoch = epoch_by_model.get((model_version, config_version))
+        complete_signal_ids = {
+            signal.id for signal in epoch_signals if signal.id in complete_outcomes
+        }
+        preserved_observations = [
+            dict(row)
+            for row in previous_epoch.observations
+            if row.get("signal_id") in complete_signal_ids
+        ] if previous_epoch else []
+        refreshed_epoch_signals = [
+            signal for signal in epoch_signals if signal.id not in complete_signal_ids
+        ]
+        fresh_observations, fresh_truncated = event_time_export_rows(
+            refreshed_epoch_signals,
             candles_by_ticker,
             news_by_id,
+        )
+        observations, observations_truncated = _merge_eval_observations(
+            preserved_observations,
+            fresh_observations,
+            already_truncated=bool(previous_epoch and previous_epoch.observations_truncated)
+            or fresh_truncated,
         )
         epoch_records.append(
             EvaluationEpochRecord(
@@ -1440,6 +1470,37 @@ async def _load_evaluation_material(
         )
     stored_epochs = await repository.list_evaluation_epochs()
     return outcomes, signals, candles_by_ticker, news_by_id, stored_epochs
+
+
+def _is_complete_eval_outcome(outcome: Mapping[str, object]) -> bool:
+    returns = outcome.get("returns")
+    return (
+        outcome.get("status") == "evaluated"
+        and isinstance(returns, dict)
+        and returns.get("3d") is not None
+    )
+
+
+def _merge_eval_observations(
+    preserved: list[dict[str, object]],
+    fresh: list[dict[str, object]],
+    *,
+    already_truncated: bool,
+    max_rows: int = 5000,
+) -> tuple[list[dict[str, object]], bool]:
+    unique = {
+        (str(row.get("signal_id")), str(row.get("observation_at"))): row
+        for row in [*preserved, *fresh]
+    }
+    ordered = sorted(
+        unique.values(),
+        key=lambda row: (
+            str(row.get("signal_as_of", "")),
+            str(row.get("signal_id", "")),
+            str(row.get("observation_at", "")),
+        ),
+    )
+    return ordered[:max_rows], already_truncated or len(ordered) > max_rows
 
 
 async def evaluation_material(

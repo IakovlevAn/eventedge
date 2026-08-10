@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 import eventedge.main as main_module
 from eventedge.main import app
-from eventedge.storage import MemoryNewsRepository, NewsDocument
+from eventedge.storage import EvaluationEpochRecord, MemoryNewsRepository, NewsDocument
 
 client = TestClient(app)
 
@@ -820,6 +820,73 @@ def test_evals_endpoint_exposes_analysis_and_downloads() -> None:
     assert timeseries_export.json()["meta"]["dataset"] == "timeseries"
     assert timeseries_export.json()["meta"]["truncated"] is False
     assert fake_market.calls == 0
+
+
+def test_complete_eval_outcome_is_reused_without_moex_request() -> None:
+    async def scenario() -> None:
+        repository = MemoryNewsRepository()
+        document = NewsDocument(
+            source_id="interfax",
+            external_id="incremental-eval-sber",
+            published_at=datetime(2026, 8, 1, 10, tzinfo=UTC),
+            received_at=datetime(2026, 8, 1, 10, 1, tzinfo=UTC),
+            title="Сбербанк опубликовал сильную отчётность",
+            url="https://example.com/incremental-eval-sber",
+            content="Чистая прибыль выросла на 20% и оказалась выше ожиданий.",
+            language="ru",
+            source_metadata={"signal_candidate": True},
+            payload_hash="incremental-eval-sber-payload",
+        )
+        await repository.ingest("incremental-eval-sber-key", document)
+        signal = (
+            await repository.list_signals(
+                ticker=None,
+                directions=None,
+                status=None,
+                min_confidence=None,
+                limit=10,
+            )
+        )[0]
+        cached_outcome = {
+            "signal_id": signal.id,
+            "ticker": signal.ticker,
+            "direction": signal.direction,
+            "status": "evaluated",
+            "returns": {"1h": 0.2, "4h": 0.5, "1d": 0.8, "3d": 1.1},
+            "verdict": True,
+        }
+        cached_observation = {
+            "signal_id": signal.id,
+            "signal_as_of": signal.as_of.isoformat(),
+            "observation_at": "2026-08-01T11:00:00Z",
+            "return_pct": 0.2,
+        }
+        await repository.upsert_evaluation_epoch(
+            EvaluationEpochRecord(
+                epoch_id="eval_cached_current",
+                model_version=signal.model_version,
+                config_version=signal.config_version,
+                evaluated_at=datetime(2026, 8, 5, tzinfo=UTC),
+                outcomes=(cached_outcome,),
+                observations=(cached_observation,),
+            )
+        )
+
+        class NoMoexExpected:
+            async def candles(self, *args: object, **kwargs: object) -> dict[str, object]:
+                raise AssertionError("settled signal must reuse its persisted outcome")
+
+        outcomes, _, candles, _, epochs = await main_module._load_evaluation_material(
+            repository,
+            NoMoexExpected(),  # type: ignore[arg-type]
+        )
+
+        assert outcomes == [cached_outcome]
+        assert candles == {}
+        current = next(epoch for epoch in epochs if epoch.model_version == signal.model_version)
+        assert current.observations == (cached_observation,)
+
+    asyncio.run(scenario())
 
 
 def test_instrument_snapshot_does_not_revive_hidden_exchange_noise() -> None:
