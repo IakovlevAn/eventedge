@@ -224,10 +224,19 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     await repository.start()
     application.state.repository_last_success_at = time.monotonic()
     if CONTENT_SNAPSHOT_TTL_SECONDS > 0:
-        await refresh_content_snapshot(application)
+        application.state.content_snapshot_inflight = asyncio.create_task(
+            refresh_content_snapshot_in_background(application)
+        )
     try:
         yield
     finally:
+        inflight = application.state.content_snapshot_inflight
+        if inflight is not None and not inflight.done():
+            inflight.cancel()
+            try:
+                await inflight
+            except asyncio.CancelledError:
+                pass
         await repository.stop()
 
 
@@ -980,7 +989,7 @@ async def reprocess_signal_candidates(
                 "failure_types": failed,
                 "remaining_candidates": max(0, len(candidates) - len(completed)),
                 "model_version": CURRENT_NEWS_MODEL_VERSION,
-                "batch_limit": 3,
+                "batch_limit": payload.limit,
             },
         }
     )

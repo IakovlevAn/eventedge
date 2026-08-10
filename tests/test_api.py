@@ -182,6 +182,7 @@ def test_admin_reprocesses_one_explicit_stored_candidate(
 
     assert response.status_code == 200
     assert response.json()["meta"]["completed"] == 1
+    assert response.json()["meta"]["batch_limit"] == 1
     assert response.json()["meta"]["model_version"] == "news-baseline-0.3.0"
     assert response.json()["data"][0]["news_id"] == stored.id
     assert response.json()["data"][0]["result_ref"].startswith("sig_")
