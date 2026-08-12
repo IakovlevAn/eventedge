@@ -15,7 +15,7 @@ SOURCE_DETAILS: dict[str, dict[str, object]] = {
         "name": "Московская биржа",
         "kind": "Первичный",
         "quality": 95,
-        "freshness": "цель ≤ 2 мин",
+        "freshness": "до 5 мин",
         "role": "Сообщения биржи и раскрытия эмитентов",
         "url": "https://www.moex.com/ru/news/",
     },

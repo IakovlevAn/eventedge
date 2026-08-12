@@ -669,16 +669,15 @@ def test_fast_collector_uses_only_direct_feeds_and_isolates_failures(
         ("interfax", 5, False, 10.0),
         ("tass", 5, False, 10.0),
         ("rbc", 5, False, 10.0),
-        ("moex_news", 5, False, 10.0),
     ]
     assert telegram_called == []
     assert result == {
-        "fetched": 3,
-        "matched": 3,
+        "fetched": 2,
+        "matched": 2,
         "filtered": 0,
         "signal_candidates": 0,
         "analysis_candidates": 0,
-        "accepted": 3,
+        "accepted": 2,
         "replayed": 0,
         "failed": 1,
     }
@@ -754,6 +753,7 @@ def test_cancelled_child_is_counted_as_source_failure() -> None:
 def test_ui_managed_telegram_runs_in_five_minute_discovery_lane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(collectors_module, "DISCOVERY_BUCKET_COUNT", 1)
     repository = MemoryNewsRepository()
     source = TelegramSourceRecord(
         source_id="telegram_private_news",
@@ -797,6 +797,7 @@ def test_ui_managed_telegram_runs_in_five_minute_discovery_lane(
 def test_discovery_continues_when_managed_source_registry_times_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(collectors_module, "DISCOVERY_BUCKET_COUNT", 1)
     repository = MemoryNewsRepository()
     telegram_called: list[str] = []
 
@@ -831,3 +832,20 @@ def test_discovery_continues_when_managed_source_registry_times_out(
         "telegram_russianmacro",
     ]
     assert result["accepted"] == 7
+
+
+def test_discovery_sources_have_stable_staggered_buckets() -> None:
+    source_ids = [
+        *(config.config_key for config in collectors_module.DISCOVERY_NEWS_FEEDS),
+        *(config.source_id for config in collectors_module.TELEGRAM_CHANNELS),
+    ]
+
+    first = {
+        source_id: collectors_module.discovery_source_bucket(source_id) for source_id in source_ids
+    }
+    second = {
+        source_id: collectors_module.discovery_source_bucket(source_id) for source_id in source_ids
+    }
+
+    assert first == second
+    assert set(first.values()) == set(range(collectors_module.DISCOVERY_BUCKET_COUNT))

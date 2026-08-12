@@ -29,7 +29,7 @@ runtime_caps:
     execution_timeout_seconds: 180
   source_collection:
     max_telegram_channels: 18
-    priority_telegram_poll_interval_seconds: 60
+    static_telegram_poll_interval_seconds: 300
     managed_telegram_poll_interval_seconds: 300
     llm_analysis: economic_candidates_only
   historical_backfill:
@@ -44,6 +44,7 @@ notes:
   - Market snapshot prefetch starts after application startup so a cold instance can serve static UI without waiting for YDB.
   - News collection and LLM analysis run in a separate non-provisioned worker so timer jobs cannot block the public API.
   - The pay-per-use worker accepts up to four overlapping timer lanes on one instance; collection is raw-only, YDB has a four-session pool, and semantic LLM work remains single-flight in maintenance.
+  - Broad RSS and Telegram sources use five stable minute buckets so each source keeps a five-minute interval without a connection burst.
   - At 12500 RUB, freeze resource increases and review the current-month forecast.
   - Historical reprocessing is capped at one targetable candidate per five-minute maintenance run so even a cold batch fits the trigger's 30-second request window without cancellation.
   - Automatic shutdown requires a separate explicitly approved runbook or trigger.

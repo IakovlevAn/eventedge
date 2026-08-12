@@ -103,6 +103,8 @@ BACKFILL_CONCURRENCY = min(4, max(1, int(os.environ.get("BACKFILL_CONCURRENCY", 
 MAINTENANCE_DEADLINE_SECONDS = 20.0
 CONTENT_SNAPSHOT_TTL_SECONDS = 60 if os.environ.get("APP_ENV") == "prod" else 0
 RECENT_REPOSITORY_SUCCESS_TTL_SECONDS = 120 if os.environ.get("APP_ENV") == "prod" else 0
+SOURCE_REGISTRY_TTL_SECONDS = 60.0
+SOURCE_REGISTRY_TIMEOUT_SECONDS = 2.0
 MAX_TELEGRAM_CHANNELS = 18
 DEFAULT_ASSESSMENT_TICKERS = (
     "SBER",
@@ -308,6 +310,7 @@ app.state.content_snapshot_lock = asyncio.Lock()
 app.state.content_snapshot_inflight = None
 app.state.news_response_cache = None
 app.state.repository_last_success_at = None
+app.state.source_registry_cache = None
 app.state.collectors = {
     "cbr_press": collect_cbr_press,
     "fast_news": collect_fast_news,
@@ -937,9 +940,39 @@ async def list_sources(request: Request) -> JSONResponse:
         )
         stat["count"] = int(stat["count"]) + 1
 
+    now = time.monotonic()
+    registry_cache = request.app.state.source_registry_cache
+    if (
+        registry_cache is not None
+        and registry_cache["repository"] is repository
+        and registry_cache["expires_at"] > now
+    ):
+        dynamic_sources = registry_cache["sources"]
+        registry_status = "cached"
+    else:
+        try:
+            dynamic_sources = await asyncio.wait_for(
+                repository.list_telegram_sources(),
+                timeout=SOURCE_REGISTRY_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            if registry_cache is not None and registry_cache["repository"] is repository:
+                dynamic_sources = registry_cache["sources"]
+                registry_status = "stale"
+            else:
+                dynamic_sources = []
+                registry_status = "unavailable"
+        else:
+            request.app.state.source_registry_cache = {
+                "repository": repository,
+                "expires_at": now + SOURCE_REGISTRY_TTL_SECONDS,
+                "sources": dynamic_sources,
+            }
+            registry_status = "live"
+
     sources = configured_sources()
     configured_ids = {str(source["source_id"]) for source in sources}
-    for source in await repository.list_telegram_sources():
+    for source in dynamic_sources:
         if source.source_id not in configured_ids:
             sources.append(source.as_api_dict())
     for source in sources:
@@ -953,6 +986,7 @@ async def list_sources(request: Request) -> JSONResponse:
                     source.get("kind") == "Telegram" and source.get("enabled") for source in sources
                 ),
                 "poll_interval_seconds": NEWS_COLLECTION_INTERVAL_SECONDS,
+                "registry_status": registry_status,
             },
         }
     )
@@ -1019,6 +1053,7 @@ async def create_telegram_source(
         created_at=datetime.now(UTC),
     )
     await repository.upsert_telegram_source(source)
+    request.app.state.source_registry_cache = None
     return JSONResponse(status_code=201, content={"data": source.as_api_dict()})
 
 

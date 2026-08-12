@@ -45,7 +45,6 @@ def default_collection_config() -> CollectionConfig:
                     "interfax",
                     "tass",
                     "rbc",
-                    "moex_news",
                 ),
                 trigger_name="eventedge-fast-news",
                 description="Priority market news every minute",
@@ -58,6 +57,7 @@ def default_collection_config() -> CollectionConfig:
                 source_ids=(
                     "google_news",
                     "market_background",
+                    "moex_news",
                     "telegram_ak47pfl",
                     "telegram_markettwits",
                     "telegram_centralbank_russia",
@@ -66,8 +66,8 @@ def default_collection_config() -> CollectionConfig:
                     "telegram_russianmacro",
                 ),
                 trigger_name="eventedge-discovery-news",
-                description="Broad market news discovery every five minutes",
-                cron_expression="0/5 * ? * * *",
+                description="Staggered broad discovery; each source every five minutes",
+                cron_expression="* * ? * * *",
                 payload="discovery_news",
             ),
             CollectionLaneConfig(
