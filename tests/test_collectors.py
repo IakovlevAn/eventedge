@@ -719,6 +719,32 @@ def test_collection_deadline_returns_partial_success_and_cancels_late_source() -
     assert result["failed"] == 1
 
 
+def test_per_source_deadline_prevents_one_feed_from_holding_lane() -> None:
+    cancelled = False
+
+    async def scenario() -> dict[str, int]:
+        async def slow() -> dict[str, int]:
+            nonlocal cancelled
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            return {"accepted": 1}
+
+        return await collectors_module.collect_source_tasks(
+            [("slow", slow())],
+            deadline_seconds=1,
+            task_timeout_seconds=0.01,
+        )
+
+    result = asyncio.run(scenario())
+
+    assert cancelled is True
+    assert result["accepted"] == 0
+    assert result["failed"] == 1
+
+
 def test_ui_managed_telegram_runs_in_five_minute_discovery_lane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

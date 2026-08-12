@@ -38,6 +38,8 @@ RSS_CONTENT_TAG = "{http://purl.org/rss/1.0/modules/content/}encoded"
 LOGGER = logging.getLogger(__name__)
 COLLECTION_LANE_DEADLINE_SECONDS = 20.0
 FAST_SOURCE_TIMEOUT_SECONDS = 5.0
+FAST_SOURCE_DEADLINE_SECONDS = 6.0
+DISCOVERY_SOURCE_DEADLINE_SECONDS = 12.0
 HTML_VOID_TAGS = frozenset(
     {
         "area",
@@ -930,9 +932,20 @@ async def collect_source_tasks(
     tasks: list[tuple[str, Awaitable[dict[str, int]]]],
     *,
     deadline_seconds: float | None = None,
+    task_timeout_seconds: float | None = None,
 ) -> dict[str, int]:
     """Run independent sources without allowing one lane to exceed its trigger window."""
-    scheduled = [(source_id, asyncio.create_task(task)) for source_id, task in tasks]
+    scheduled = [
+        (
+            source_id,
+            asyncio.create_task(
+                asyncio.wait_for(task, timeout=task_timeout_seconds)
+                if task_timeout_seconds is not None
+                else task
+            ),
+        )
+        for source_id, task in tasks
+    ]
     try:
         _, pending = await asyncio.wait(
             [task for _, task in scheduled],
@@ -983,6 +996,7 @@ async def collect_feed_group(
     stop_after_replays: int | None,
     analyze_signals: bool = True,
     timeout_seconds: float | None = None,
+    task_timeout_seconds: float | None = None,
 ) -> dict[str, int]:
     return await collect_source_tasks(
         [
@@ -1000,6 +1014,7 @@ async def collect_feed_group(
             )
             for config in feeds
         ],
+        task_timeout_seconds=task_timeout_seconds,
     )
 
 
@@ -1015,6 +1030,7 @@ async def collect_fast_news(repository: NewsRepository) -> dict[str, int]:
                     stop_after_replays=5,
                     analyze_signals=False,
                     timeout_seconds=FAST_SOURCE_TIMEOUT_SECONDS,
+                    task_timeout_seconds=FAST_SOURCE_DEADLINE_SECONDS,
                 ),
             ),
             *[
@@ -1034,6 +1050,7 @@ async def collect_fast_news(repository: NewsRepository) -> dict[str, int]:
             ],
         ],
         deadline_seconds=COLLECTION_LANE_DEADLINE_SECONDS,
+        task_timeout_seconds=FAST_SOURCE_DEADLINE_SECONDS + 1,
     )
 
 
@@ -1060,6 +1077,7 @@ async def collect_discovery_news(repository: NewsRepository) -> dict[str, int]:
                     DISCOVERY_NEWS_FEEDS,
                     stop_after_replays=10,
                     analyze_signals=False,
+                    task_timeout_seconds=DISCOVERY_SOURCE_DEADLINE_SECONDS,
                 ),
             ),
             *[
@@ -1078,6 +1096,7 @@ async def collect_discovery_news(repository: NewsRepository) -> dict[str, int]:
             ],
         ],
         deadline_seconds=COLLECTION_LANE_DEADLINE_SECONDS,
+        task_timeout_seconds=DISCOVERY_SOURCE_DEADLINE_SECONDS + 1,
     )
 
 
@@ -1098,6 +1117,7 @@ async def collect_slow_news(repository: NewsRepository) -> dict[str, int]:
             )
         ],
         deadline_seconds=COLLECTION_LANE_DEADLINE_SECONDS,
+        task_timeout_seconds=DISCOVERY_SOURCE_DEADLINE_SECONDS,
     )
 
 

@@ -86,11 +86,11 @@ def test_worker_payload_has_no_provisioned_instances() -> None:
     )
 
     assert payload["containerId"] == "worker-container-id"
-    assert payload["concurrency"] == "1"
+    assert payload["concurrency"] == "4"
     assert payload["provisionPolicy"] == {"minInstances": "0"}
     assert payload["scalingPolicy"] == {
         "zoneInstancesLimit": "1",
-        "zoneRequestsLimit": "1",
+        "zoneRequestsLimit": "4",
     }
     assert payload["imageSpec"]["environment"]["EVENTEDGE_COMPONENT"] == "worker"
     assert payload["imageSpec"]["environment"]["YDB_POOL_SIZE"] == "4"
@@ -120,9 +120,9 @@ def test_budget_policy_matches_deployment_caps() -> None:
     assert policy["runtime_caps"]["collection_worker"] == {
         "memory_mb": 1024,
         "cores": 1,
-        "concurrency": 1,
+        "concurrency": 4,
         "min_instances": 0,
         "zone_instances_limit": 1,
-        "zone_requests_limit": 1,
+        "zone_requests_limit": 4,
         "execution_timeout_seconds": 180,
     }
