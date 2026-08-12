@@ -671,21 +671,14 @@ def test_fast_collector_uses_only_direct_feeds_and_isolates_failures(
         ("rbc", 5, False, 5.0),
         ("moex_news", 5, False, 5.0),
     ]
-    assert telegram_called == [
-        ("telegram_ak47pfl", 5, False, 5.0),
-        ("telegram_markettwits", 5, False, 5.0),
-        ("telegram_centralbank_russia", 5, False, 5.0),
-        ("telegram_moscowexchangeofficial", 5, False, 5.0),
-        ("telegram_bcs_express", 5, False, 5.0),
-        ("telegram_russianmacro", 5, False, 5.0),
-    ]
+    assert telegram_called == []
     assert result == {
-        "fetched": 9,
-        "matched": 9,
+        "fetched": 3,
+        "matched": 3,
         "filtered": 0,
         "signal_candidates": 0,
         "analysis_candidates": 0,
-        "accepted": 9,
+        "accepted": 3,
         "replayed": 0,
         "failed": 1,
     }
@@ -789,8 +782,16 @@ def test_ui_managed_telegram_runs_in_five_minute_discovery_lane(
 
     result = asyncio.run(collectors_module.collect_discovery_news(repository))
 
-    assert telegram_called == ["telegram_private_news"]
-    assert result["accepted"] == 2
+    assert telegram_called == [
+        "telegram_ak47pfl",
+        "telegram_markettwits",
+        "telegram_centralbank_russia",
+        "telegram_moscowexchangeofficial",
+        "telegram_bcs_express",
+        "telegram_russianmacro",
+        "telegram_private_news",
+    ]
+    assert result["accepted"] == 8
 
 
 def test_discovery_continues_when_managed_source_registry_times_out(
@@ -806,8 +807,12 @@ def test_discovery_continues_when_managed_source_registry_times_out(
     async def fake_feed_group(*args: object, **kwargs: object) -> dict[str, int]:
         return {"accepted": 1}
 
-    async def fake_telegram_collect(*args: object, **kwargs: object) -> dict[str, int]:
-        telegram_called.append("unexpected")
+    async def fake_telegram_collect(
+        repository: object,
+        config: TelegramChannelConfig,
+        **kwargs: object,
+    ) -> dict[str, int]:
+        telegram_called.append(config.source_id)
         return {"accepted": 1}
 
     monkeypatch.setattr(repository, "list_telegram_sources", slow_registry)
@@ -817,5 +822,12 @@ def test_discovery_continues_when_managed_source_registry_times_out(
 
     result = asyncio.run(collectors_module.collect_discovery_news(repository))
 
-    assert telegram_called == []
-    assert result["accepted"] == 1
+    assert telegram_called == [
+        "telegram_ak47pfl",
+        "telegram_markettwits",
+        "telegram_centralbank_russia",
+        "telegram_moscowexchangeofficial",
+        "telegram_bcs_express",
+        "telegram_russianmacro",
+    ]
+    assert result["accepted"] == 7

@@ -572,6 +572,14 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
                 "tass",
                 "rbc",
                 "moex_news",
+            ],
+        },
+        {
+            "id": "discovery",
+            "interval_seconds": 300,
+            "source_ids": [
+                "google_news",
+                "market_background",
                 "telegram_ak47pfl",
                 "telegram_markettwits",
                 "telegram_centralbank_russia",
@@ -579,11 +587,6 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
                 "telegram_bcs_express",
                 "telegram_russianmacro",
             ],
-        },
-        {
-            "id": "discovery",
-            "interval_seconds": 300,
-            "source_ids": ["google_news", "market_background"],
         },
         {
             "id": "slow",
