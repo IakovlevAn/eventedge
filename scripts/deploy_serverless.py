@@ -59,13 +59,16 @@ def build_payload(
             "imageUrl": environment["IMAGE_URL"],
             "environment": runtime_environment,
         },
-        "concurrency": "1" if is_worker else "4",
+        # Collection is raw-only; only maintenance uses the single-flight LLM.
+        # Accept all timer lanes on one warm worker instead of spawning cold
+        # instances when schedules overlap.
+        "concurrency": "4",
         "provisionPolicy": {"minInstances": "0" if is_worker else "1"},
         "scalingPolicy": {
-            # One serial worker prevents overlapping timer waves from competing
-            # for YDB sessions. The API keeps a second instance as burst capacity.
+            # One worker instance with a four-session YDB pool absorbs overlapping
+            # timer lanes. The API keeps a second instance as burst capacity.
             "zoneInstancesLimit": "1" if is_worker else "2",
-            "zoneRequestsLimit": "1" if is_worker else "8",
+            "zoneRequestsLimit": "4" if is_worker else "8",
         },
         "runtime": {"http": {}},
     }
