@@ -114,7 +114,12 @@ def test_news_response_cache_reuses_only_the_same_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(main_module, "CONTENT_SNAPSHOT_TTL_SECONDS", 60)
-    application = SimpleNamespace(state=SimpleNamespace(news_response_cache=None))
+    application = SimpleNamespace(
+        state=SimpleNamespace(
+            news_response_cache=None,
+            content_snapshot_inflight=None,
+        )
+    )
     first_news: list[object] = []
     first_signals: list[object] = []
     second_news: list[object] = []
@@ -125,6 +130,61 @@ def test_news_response_cache_reuses_only_the_same_snapshot(
 
     assert main_module.cached_news_response(application, first_news, first_signals, key) is payload
     assert main_module.cached_news_response(application, second_news, first_signals, key) is None
+
+
+def test_news_response_cache_serves_stale_payload_during_projection_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "CONTENT_SNAPSHOT_TTL_SECONDS", 60)
+    old_news: list[object] = []
+    old_signals: list[object] = []
+    new_news: list[object] = []
+    new_signals: list[object] = []
+    key = (None, None, 20)
+    payload = {"data": [], "meta": {"limit": 20}}
+    inflight = SimpleNamespace(done=lambda: False)
+    application = SimpleNamespace(
+        state=SimpleNamespace(
+            news_response_cache={
+                "news": old_news,
+                "signals": old_signals,
+                "responses": {key: payload},
+            },
+            content_snapshot_inflight=inflight,
+        )
+    )
+
+    result = main_module.cached_news_response(application, new_news, new_signals, key)
+
+    assert result is payload
+    assert application.state.news_response_cache["news"] is old_news
+
+
+def test_background_snapshot_refresh_precomputes_default_news_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "CONTENT_SNAPSHOT_TTL_SECONDS", 60)
+    news: list[NewsRecord] = []
+    signals: list[SignalRecord] = []
+    payload = {"data": [], "meta": {"limit": 20}}
+    refresh = AsyncMock(return_value=(news, signals))
+    monkeypatch.setattr(main_module, "refresh_content_snapshot", refresh)
+    monkeypatch.setattr(main_module, "build_news_response_payload", lambda *args, **kwargs: payload)
+    application = SimpleNamespace(
+        state=SimpleNamespace(
+            content_snapshot_inflight=None,
+            news_response_cache=None,
+        )
+    )
+
+    async def scenario() -> None:
+        application.state.content_snapshot_inflight = asyncio.current_task()
+        await main_module.refresh_content_snapshot_in_background(application)
+
+    asyncio.run(scenario())
+
+    assert application.state.news_response_cache["responses"][(None, None, 20)] is payload
+    assert application.state.content_snapshot_inflight is None
 
 
 def test_source_registry_and_protected_telegram_addition(
