@@ -1478,17 +1478,11 @@ def instrument_data(
     }
 
 
-async def active_signals_by_ticker(repository: NewsRepository) -> dict[str, SignalRecord]:
-    signals, news = await asyncio.gather(
-        repository.list_signals(
-            ticker=None,
-            directions=None,
-            status=None,
-            min_confidence=None,
-            limit=1000,
-        ),
-        repository.list_news(source_id=None, limit=1000),
-    )
+def active_signals_from_content(
+    news: list[NewsRecord],
+    signals: list[SignalRecord],
+) -> dict[str, SignalRecord]:
+    """Project current instrument signals from the shared content snapshot."""
     hidden_ids = hidden_news_ids(news)
     news_by_id = {item.id: item for item in news}
     active = filter_signals(
@@ -1511,6 +1505,20 @@ async def active_signals_by_ticker(repository: NewsRepository) -> dict[str, Sign
             ):
                 result[signal.ticker] = signal
     return result
+
+
+async def active_signals_by_ticker(repository: NewsRepository) -> dict[str, SignalRecord]:
+    signals, news = await asyncio.gather(
+        repository.list_signals(
+            ticker=None,
+            directions=None,
+            status=None,
+            min_confidence=None,
+            limit=1000,
+        ),
+        repository.list_news(source_id=None, limit=1000),
+    )
+    return active_signals_from_content(news, signals)
 
 
 def _requested_assessment_tickers(value: str | None) -> list[str] | None:
@@ -2046,15 +2054,15 @@ async def list_instrument_snapshots(
             detail="tickers must contain 1 to 20 comma-separated MOEX tickers.",
         )
 
-    repository: NewsRepository = request.app.state.news_repository
     market_data_client: MoexMarketDataClient = request.app.state.market_data_client
-    active_by_ticker, market_results = await asyncio.gather(
-        active_signals_by_ticker(repository),
+    content, market_results = await asyncio.gather(
+        load_content_snapshot(request),
         asyncio.gather(
             *(market_data_client.snapshot(ticker) for ticker in normalized),
             return_exceptions=True,
         ),
     )
+    active_by_ticker = active_signals_from_content(*content)
     data = []
     errors = []
     for ticker, result in zip(normalized, market_results, strict=True):
@@ -2172,8 +2180,8 @@ async def get_instrument_snapshot(
             detail="The MOEX ISS market-data source did not return a usable snapshot.",
         )
 
-    repository: NewsRepository = request.app.state.news_repository
-    active_signal = (await active_signals_by_ticker(repository)).get(normalized_ticker)
+    news, signals = await load_content_snapshot(request)
+    active_signal = active_signals_from_content(news, signals).get(normalized_ticker)
     data = instrument_data(normalized_ticker, market_snapshot, active_signal)
     etag = f'"{canonical_payload_hash(data)[:24]}"'
     if if_none_match == etag:

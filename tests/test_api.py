@@ -883,6 +883,49 @@ def test_batch_instrument_snapshots_return_partial_results() -> None:
     }
 
 
+def test_batch_instrument_snapshots_reuse_content_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = app.state.market_data_client
+
+    class FakeMarketDataClient:
+        async def snapshot(self, ticker: str) -> dict[str, object]:
+            return {
+                "ticker": ticker,
+                "name": ticker,
+                "last_price": "100.0",
+                "currency": "RUB",
+                "observed_at": "2026-08-08T16:00:08Z",
+                "daily_change_pct": 0.2,
+                "volume_shares": 10,
+                "value_rub": 1000.0,
+                "lot_size": 1,
+                "liquidity_status": "limited",
+                "daily_volatility_pct": 1.0,
+                "annualized_volatility_pct": 15.87,
+                "candles": [],
+                "source": {"name": "MOEX ISS", "url": "https://iss.moex.com/iss/"},
+            }
+
+    load_content = AsyncMock(return_value=([], []))
+    monkeypatch.setattr(main_module, "load_content_snapshot", load_content)
+    repository_read = AsyncMock(side_effect=AssertionError("must reuse content snapshot"))
+    monkeypatch.setattr(main_module, "active_signals_by_ticker", repository_read)
+    app.state.market_data_client = FakeMarketDataClient()
+    try:
+        response = client.get(
+            "/v1/instruments/snapshots",
+            params={"tickers": "SBER"},
+        )
+    finally:
+        app.state.market_data_client = original
+
+    assert response.status_code == 200
+    assert response.json()["meta"]["returned"] == 1
+    load_content.assert_awaited_once()
+    repository_read.assert_not_awaited()
+
+
 def test_intraday_candles_endpoint_returns_ten_minute_series() -> None:
     original = app.state.market_data_client
 
