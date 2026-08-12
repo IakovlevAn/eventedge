@@ -21,13 +21,14 @@ def build_payload(
 ) -> dict[str, object]:
     if component not in {"api", "worker"}:
         raise ValueError(f"Unsupported EventEdge component: {component}")
+    is_worker = component == "worker"
     runtime_environment = {
         "APP_ENV": "prod",
         "APP_REVISION": environment["DEPLOY_SHA"],
         "EVENTEDGE_COMPONENT": component,
         "YDB_ENDPOINT": environment["YDB_ENDPOINT"],
         "YDB_DATABASE": environment["YDB_DATABASE"],
-        "YDB_POOL_SIZE": "4" if component == "worker" else "8",
+        "YDB_POOL_SIZE": "8",
         "YANDEX_GPT_ENABLED": "true",
         "YANDEX_GPT_FOLDER_ID": environment["YC_FOLDER_ID"],
         "YANDEX_GPT_MODEL": "yandexgpt-lite",
@@ -38,19 +39,21 @@ def build_payload(
         # to finish in later idempotent waves.
         "BACKFILL_BATCH_LIMIT": "1",
         "BACKFILL_CONCURRENCY": "1",
-        "EVENTEDGE_MONTHLY_BUDGET_RUB": "15000",
+        "EVENTEDGE_MONTHLY_BUDGET_RUB": "12000",
     }
     if admin_key := environment.get("EVENTEDGE_ADMIN_KEY"):
         runtime_environment["EVENTEDGE_ADMIN_KEY"] = admin_key
-    is_worker = component == "worker"
     return {
         "containerId": (
             environment["YC_WORKER_CONTAINER_ID"] if is_worker else environment["YC_CONTAINER_ID"]
         ),
         "description": f"GitHub {environment['DEPLOY_SHA']} ({component})",
         "resources": {
-            "memory": "1073741824",
-            "cores": "1",
+            # Yandex Cloud requires at least 4 GiB to allocate 2 full vCPUs.
+            # The collection worker gets that CPU tier; the cached read API
+            # scales horizontally and only needs additional memory headroom.
+            "memory": "4294967296" if is_worker else "2147483648",
+            "cores": "2" if is_worker else "1",
             "coreFraction": "100",
         },
         "executionTimeout": "180s",
@@ -59,16 +62,16 @@ def build_payload(
             "imageUrl": environment["IMAGE_URL"],
             "environment": runtime_environment,
         },
-        # Collection is raw-only; only maintenance uses the single-flight LLM.
-        # Accept all timer lanes on one warm worker instead of spawning cold
-        # instances when schedules overlap.
-        "concurrency": "4",
+        # Each worker request owns an instance, so overlapping timer lanes can
+        # scale independently instead of contending inside one Python process.
+        "concurrency": "1" if is_worker else "4",
         "provisionPolicy": {"minInstances": "0" if is_worker else "1"},
         "scalingPolicy": {
-            # One worker instance with a four-session YDB pool absorbs overlapping
-            # timer lanes. The API keeps a second instance as burst capacity.
-            "zoneInstancesLimit": "1" if is_worker else "2",
-            "zoneRequestsLimit": "4" if is_worker else "8",
+            # Peak allocation is quota-safe: API 3x(1 CPU, 2 GiB) plus worker
+            # 3x(2 CPU, 4 GiB) = 9 CPU and 18 GiB out of 10 CPU / 20 GiB.
+            # Request caps also total the cloud quota of ten concurrent calls.
+            "zoneInstancesLimit": "3",
+            "zoneRequestsLimit": "3" if is_worker else "7",
         },
         "runtime": {"http": {}},
     }
