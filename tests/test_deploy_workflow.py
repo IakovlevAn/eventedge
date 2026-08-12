@@ -19,10 +19,10 @@ def test_production_smoke_accounts_for_partial_moex_and_checks_new_routes() -> N
     workflow = (repository_root / ".github/workflows/deploy.yml").read_text()
 
     assert workflow.count("for attempt in {1..6}; do") >= 5
-    assert ".meta.requested == 20" in workflow
-    assert ".meta.returned >= 12" in workflow
-    assert '((.meta.returned + (.errors | length)) == .meta.requested)' in workflow
-    assert '([.data[].ticker, .errors[].ticker] | unique | length) == 20' in workflow
+    assert workflow.count(".meta.requested == 20") == 2
+    assert workflow.count(".meta.returned >= 12") == 2
+    assert workflow.count('((.meta.returned + (.errors | length)) == .meta.requested)') == 2
+    assert workflow.count('([.data[].ticker, .errors[].ticker] | unique | length) == 20') == 2
     assert '"MARKET_DATA_UNAVAILABLE"' in workflow
     assert "Smoke test source registry and market events" in workflow
     assert '"${EVENTEDGE_API_URL}/v1/sources"' in workflow
