@@ -109,6 +109,23 @@ def test_expired_content_snapshot_is_served_while_refresh_runs(
     list_signals.assert_not_awaited()
 
 
+def test_news_response_cache_reuses_only_the_same_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "CONTENT_SNAPSHOT_TTL_SECONDS", 60)
+    application = SimpleNamespace(state=SimpleNamespace(news_response_cache=None))
+    first_news: list[object] = []
+    first_signals: list[object] = []
+    second_news: list[object] = []
+    key = (None, None, 5)
+    payload = {"data": [], "meta": {"limit": 5}}
+
+    main_module.store_news_response(application, first_news, first_signals, key, payload)
+
+    assert main_module.cached_news_response(application, first_news, first_signals, key) is payload
+    assert main_module.cached_news_response(application, second_news, first_signals, key) is None
+
+
 def test_source_registry_and_protected_telegram_addition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

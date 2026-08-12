@@ -306,6 +306,7 @@ app.state.evaluation_material_lock = asyncio.Lock()
 app.state.content_snapshot_cache = None
 app.state.content_snapshot_lock = asyncio.Lock()
 app.state.content_snapshot_inflight = None
+app.state.news_response_cache = None
 app.state.repository_last_success_at = None
 app.state.collectors = {
     "cbr_press": collect_cbr_press,
@@ -425,6 +426,54 @@ def invalidate_content_snapshot(request: Request) -> None:
         inflight.cancel()
     request.app.state.content_snapshot_inflight = None
     request.app.state.content_snapshot_cache = None
+    request.app.state.news_response_cache = None
+
+
+def cached_news_response(
+    application: FastAPI,
+    stored_news: list[NewsRecord],
+    stored_signals: list[SignalRecord],
+    key: tuple[str | None, str | None, int],
+) -> dict[str, object] | None:
+    if CONTENT_SNAPSHOT_TTL_SECONDS <= 0:
+        return None
+    cached = application.state.news_response_cache
+    if (
+        cached is None
+        or cached["news"] is not stored_news
+        or cached["signals"] is not stored_signals
+    ):
+        application.state.news_response_cache = {
+            "news": stored_news,
+            "signals": stored_signals,
+            "responses": {},
+        }
+        return None
+    return cached["responses"].get(key)
+
+
+def store_news_response(
+    application: FastAPI,
+    stored_news: list[NewsRecord],
+    stored_signals: list[SignalRecord],
+    key: tuple[str | None, str | None, int],
+    payload: dict[str, object],
+) -> None:
+    if CONTENT_SNAPSHOT_TTL_SECONDS <= 0:
+        return
+    cached = application.state.news_response_cache
+    if (
+        cached is None
+        or cached["news"] is not stored_news
+        or cached["signals"] is not stored_signals
+    ):
+        cached = {
+            "news": stored_news,
+            "signals": stored_signals,
+            "responses": {},
+        }
+        application.state.news_response_cache = cached
+    cached["responses"][key] = payload
 
 
 def health_payload() -> dict[str, str]:
@@ -676,6 +725,17 @@ async def list_news(
     limit: Annotated[int, Query(ge=1, le=500)] = 20,
 ) -> JSONResponse:
     stored_news, stored_signals = await load_content_snapshot(request)
+    snapshot_news = stored_news
+    snapshot_signals = stored_signals
+    cache_key = (source_id, scope, limit)
+    cached_response = cached_news_response(
+        request.app,
+        stored_news,
+        stored_signals,
+        cache_key,
+    )
+    if cached_response is not None:
+        return JSONResponse(content=cached_response)
     if source_id is not None:
         stored_news = [item for item in stored_news if item.source_id == source_id]
     visible_news = public_news(stored_news)
@@ -757,37 +817,43 @@ async def list_news(
     scope_counts = {"market": 0, "sector": 0, "company": 0}
     for event in event_by_news.values():
         scope_counts[str(event["scope"])] += 1
-    return JSONResponse(
-        content={
-            "data": data,
-            "meta": {
-                "limit": limit,
-                "total": len(scoped_news),
-                "has_more": len(scoped_news) > limit,
-                "next_cursor": None,
-                "scope": scope,
-                "scope_counts": scope_counts,
-                "processing_coverage": processing_coverage,
-                "last_ingested_at": (
-                    max(item.received_at for item in visible_news)
-                    .astimezone(UTC)
-                    .isoformat()
-                    .replace("+00:00", "Z")
-                    if visible_news
-                    else None
-                ),
-                "poll_interval_seconds": NEWS_COLLECTION_INTERVAL_SECONDS,
-                "managed_telegram_poll_interval_seconds": 300,
-                "client_refresh_interval_seconds": NEWS_CLIENT_REFRESH_INTERVAL_SECONDS,
-                "delivery_target_seconds": NEWS_DELIVERY_TARGET_SECONDS,
-                "collection_lanes": NEWS_COLLECTION_LANES,
-                "sources": sorted(
-                    source_stats.values(),
-                    key=lambda item: (-int(item["count"]), str(item["source_id"])),
-                ),
-            },
-        }
+    response_content: dict[str, object] = {
+        "data": data,
+        "meta": {
+            "limit": limit,
+            "total": len(scoped_news),
+            "has_more": len(scoped_news) > limit,
+            "next_cursor": None,
+            "scope": scope,
+            "scope_counts": scope_counts,
+            "processing_coverage": processing_coverage,
+            "last_ingested_at": (
+                max(item.received_at for item in visible_news)
+                .astimezone(UTC)
+                .isoformat()
+                .replace("+00:00", "Z")
+                if visible_news
+                else None
+            ),
+            "poll_interval_seconds": NEWS_COLLECTION_INTERVAL_SECONDS,
+            "managed_telegram_poll_interval_seconds": 300,
+            "client_refresh_interval_seconds": NEWS_CLIENT_REFRESH_INTERVAL_SECONDS,
+            "delivery_target_seconds": NEWS_DELIVERY_TARGET_SECONDS,
+            "collection_lanes": NEWS_COLLECTION_LANES,
+            "sources": sorted(
+                source_stats.values(),
+                key=lambda item: (-int(item["count"]), str(item["source_id"])),
+            ),
+        },
+    }
+    store_news_response(
+        request.app,
+        snapshot_news,
+        snapshot_signals,
+        cache_key,
+        response_content,
     )
+    return JSONResponse(content=response_content)
 
 
 @app.get("/v1/events", tags=["Events"])
