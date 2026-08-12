@@ -20,7 +20,7 @@ def test_deployment_payload_has_budget_caps() -> None:
     )
 
     assert payload["resources"] == {
-        "memory": "1073741824",
+        "memory": "2147483648",
         "cores": "1",
         "coreFraction": "100",
     }
@@ -28,8 +28,8 @@ def test_deployment_payload_has_budget_caps() -> None:
     assert payload["provisionPolicy"] == {"minInstances": "1"}
     assert payload["executionTimeout"] == "180s"
     assert payload["scalingPolicy"] == {
-        "zoneInstancesLimit": "2",
-        "zoneRequestsLimit": "8",
+        "zoneInstancesLimit": "3",
+        "zoneRequestsLimit": "7",
     }
     assert payload["runtime"] == {"http": {}}
     assert payload["imageSpec"]["environment"] == {
@@ -44,7 +44,7 @@ def test_deployment_payload_has_budget_caps() -> None:
         "YANDEX_GPT_MODEL": "yandexgpt-lite",
         "BACKFILL_BATCH_LIMIT": "1",
         "BACKFILL_CONCURRENCY": "1",
-        "EVENTEDGE_MONTHLY_BUDGET_RUB": "15000",
+        "EVENTEDGE_MONTHLY_BUDGET_RUB": "12000",
     }
 
 
@@ -86,14 +86,19 @@ def test_worker_payload_has_no_provisioned_instances() -> None:
     )
 
     assert payload["containerId"] == "worker-container-id"
-    assert payload["concurrency"] == "4"
+    assert payload["resources"] == {
+        "memory": "4294967296",
+        "cores": "2",
+        "coreFraction": "100",
+    }
+    assert payload["concurrency"] == "1"
     assert payload["provisionPolicy"] == {"minInstances": "0"}
     assert payload["scalingPolicy"] == {
-        "zoneInstancesLimit": "1",
-        "zoneRequestsLimit": "4",
+        "zoneInstancesLimit": "3",
+        "zoneRequestsLimit": "3",
     }
     assert payload["imageSpec"]["environment"]["EVENTEDGE_COMPONENT"] == "worker"
-    assert payload["imageSpec"]["environment"]["YDB_POOL_SIZE"] == "4"
+    assert payload["imageSpec"]["environment"]["YDB_POOL_SIZE"] == "8"
 
 
 def test_budget_policy_matches_deployment_caps() -> None:
@@ -101,29 +106,29 @@ def test_budget_policy_matches_deployment_caps() -> None:
     runtime = policy["runtime_caps"]["serverless_container"]
 
     assert policy["currency"] == "RUB"
-    assert policy["monthly_budget"] == 15_000
-    assert policy["monthly_soft_cap"] == 12_500
+    assert policy["monthly_budget"] == 12_000
+    assert policy["monthly_soft_cap"] == 10_500
     assert policy["notifications"]["thresholds_percent"] == [25, 50, 70, 85, 95]
     assert policy["enforcement"] == {
         "billing_budget": "notification_only",
         "automatic_shutdown": False,
     }
     assert runtime == {
-        "memory_mb": 1024,
+        "memory_mb": 2048,
         "cores": 1,
         "concurrency": 4,
         "min_instances": 1,
-        "zone_instances_limit": 2,
-        "zone_requests_limit": 8,
+        "zone_instances_limit": 3,
+        "zone_requests_limit": 7,
         "execution_timeout_seconds": 180,
     }
     assert policy["runtime_caps"]["collection_worker"] == {
-        "memory_mb": 1024,
-        "cores": 1,
-        "concurrency": 4,
+        "memory_mb": 4096,
+        "cores": 2,
+        "concurrency": 1,
         "min_instances": 0,
-        "zone_instances_limit": 1,
-        "zone_requests_limit": 4,
+        "zone_instances_limit": 3,
+        "zone_requests_limit": 3,
         "execution_timeout_seconds": 180,
     }
     source_collection = policy["runtime_caps"]["source_collection"]
