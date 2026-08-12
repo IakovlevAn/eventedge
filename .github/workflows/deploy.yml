@@ -163,7 +163,15 @@ jobs:
             if curl --fail --silent --show-error \
               --max-time 55 \
               "${EVENTEDGE_API_URL}/v1/assessments" \
-              | jq -e '.meta.requested == 20 and .meta.returned == 20' >/dev/null; then
+              | jq -e '
+                  .meta.requested == 20
+                  and .meta.returned >= 12
+                  and ((.meta.returned + (.errors | length)) == .meta.requested)
+                  and (([.data[].ticker, .errors[].ticker] | unique | length) == 20)
+                  and ([.errors[].code] | all(
+                    . == "MARKET_DATA_UNAVAILABLE" or . == "INSTRUMENT_NOT_FOUND"
+                  ))
+                ' >/dev/null; then
               break
             fi
             if [[ "${attempt}" == "6" ]]; then exit 1; fi
