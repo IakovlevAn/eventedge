@@ -243,9 +243,10 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     await repository.start()
     application.state.repository_last_success_at = time.monotonic()
     if CONTENT_SNAPSHOT_TTL_SECONDS > 0:
-        application.state.content_snapshot_inflight = asyncio.create_task(
-            refresh_content_snapshot_in_background(application)
-        )
+        # A provisioned API instance must not report startup complete before
+        # its default read model is ready. Otherwise the first request races
+        # the background projection and concurrent callers duplicate CPU work.
+        await refresh_content_snapshot_in_background(application)
     try:
         yield
     finally:
@@ -309,6 +310,7 @@ app.state.content_snapshot_cache = None
 app.state.content_snapshot_lock = asyncio.Lock()
 app.state.content_snapshot_inflight = None
 app.state.news_response_cache = None
+app.state.news_response_inflight = {}
 app.state.repository_last_success_at = None
 app.state.source_registry_cache = None
 app.state.collectors = {
@@ -614,6 +616,63 @@ def build_news_response_payload(
     }
 
 
+async def get_or_build_news_response(
+    application: FastAPI,
+    stored_news: list[NewsRecord],
+    stored_signals: list[SignalRecord],
+    *,
+    source_id: str | None,
+    scope: Literal["market", "sector", "company"] | None,
+    limit: int,
+) -> dict[str, object]:
+    """Build one projection per snapshot/query while concurrent callers wait."""
+    cache_key = (source_id, scope, limit)
+    cached_response = cached_news_response(
+        application,
+        stored_news,
+        stored_signals,
+        cache_key,
+    )
+    if cached_response is not None:
+        return cached_response
+
+    task_key = (id(stored_news), id(stored_signals), *cache_key)
+    task = application.state.news_response_inflight.get(task_key)
+    if task is None:
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                build_news_response_payload,
+                stored_news,
+                stored_signals,
+                source_id=source_id,
+                scope=scope,
+                limit=limit,
+            )
+        )
+        application.state.news_response_inflight[task_key] = task
+
+        def clear_inflight(done: asyncio.Task[dict[str, object]]) -> None:
+            if application.state.news_response_inflight.get(task_key) is done:
+                application.state.news_response_inflight.pop(task_key, None)
+
+        task.add_done_callback(clear_inflight)
+
+    response_content = await asyncio.shield(task)
+    current_snapshot = application.state.content_snapshot_cache
+    if current_snapshot is None or (
+        current_snapshot["news"] is stored_news
+        and current_snapshot["signals"] is stored_signals
+    ):
+        store_news_response(
+            application,
+            stored_news,
+            stored_signals,
+            cache_key,
+            response_content,
+        )
+    return response_content
+
+
 def health_payload() -> dict[str, str]:
     payload = {"status": "ok", "checked_at": utc_now()}
     if revision := os.environ.get("APP_REVISION"):
@@ -863,31 +922,13 @@ async def list_news(
     limit: Annotated[int, Query(ge=1, le=500)] = 20,
 ) -> JSONResponse:
     stored_news, stored_signals = await load_content_snapshot(request)
-    snapshot_news = stored_news
-    snapshot_signals = stored_signals
-    cache_key = (source_id, scope, limit)
-    cached_response = cached_news_response(
+    response_content = await get_or_build_news_response(
         request.app,
-        stored_news,
-        stored_signals,
-        cache_key,
-    )
-    if cached_response is not None:
-        return JSONResponse(content=cached_response)
-    response_content = await asyncio.to_thread(
-        build_news_response_payload,
         stored_news,
         stored_signals,
         source_id=source_id,
         scope=scope,
         limit=limit,
-    )
-    store_news_response(
-        request.app,
-        snapshot_news,
-        snapshot_signals,
-        cache_key,
-        response_content,
     )
     return JSONResponse(content=response_content)
 

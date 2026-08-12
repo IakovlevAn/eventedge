@@ -50,10 +50,10 @@ def build_payload(
         "description": f"GitHub {environment['DEPLOY_SHA']} ({component})",
         "resources": {
             # Yandex Cloud requires at least 4 GiB to allocate 2 full vCPUs.
-            # The collection worker gets that CPU tier; the cached read API
-            # scales horizontally and only needs additional memory headroom.
-            "memory": "4294967296" if is_worker else "2147483648",
-            "cores": "2" if is_worker else "1",
+            # Both contours use the 2-vCPU tier. This prevents cold read-model
+            # projection and timer collection from saturating a single core.
+            "memory": "4294967296",
+            "cores": "2",
             "coreFraction": "100",
         },
         "executionTimeout": "180s",
@@ -67,10 +67,10 @@ def build_payload(
         "concurrency": "1" if is_worker else "4",
         "provisionPolicy": {"minInstances": "0" if is_worker else "1"},
         "scalingPolicy": {
-            # Peak allocation is quota-safe: API 3x(1 CPU, 2 GiB) plus worker
-            # 3x(2 CPU, 4 GiB) = 9 CPU and 18 GiB out of 10 CPU / 20 GiB.
+            # Peak allocation is quota-safe: API 2x(2 CPU, 4 GiB) plus worker
+            # 3x(2 CPU, 4 GiB) = 10 CPU and 20 GiB, matching live quotas.
             # Request caps also total the cloud quota of ten concurrent calls.
-            "zoneInstancesLimit": "3",
+            "zoneInstancesLimit": "3" if is_worker else "2",
             "zoneRequestsLimit": "3" if is_worker else "7",
         },
         "runtime": {"http": {}},

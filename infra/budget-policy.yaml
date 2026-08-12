@@ -12,11 +12,11 @@ enforcement:
   automatic_shutdown: false
 runtime_caps:
   serverless_container:
-    memory_mb: 2048
-    cores: 1
+    memory_mb: 4096
+    cores: 2
     concurrency: 4
     min_instances: 1
-    zone_instances_limit: 3
+    zone_instances_limit: 2
     zone_requests_limit: 7
     execution_timeout_seconds: 180
   collection_worker:
@@ -39,9 +39,9 @@ runtime_caps:
     interval_seconds: 600
 notes:
   - The Yandex Cloud billing budget sends alerts but does not stop resource consumption.
-  - One provisioned API instance serves the normal UI load; up to three instances are available for bursts.
+  - One provisioned 2-vCPU API instance serves the normal UI load; a second instance is available for bursts.
   - Public endpoints serve the last successful market snapshot immediately and refresh it every 60 seconds in the background.
-  - Market snapshot prefetch starts after application startup so a cold instance can serve static UI without waiting for YDB.
+  - A cold API instance finishes the default news projection before reporting startup complete, and concurrent projection misses share one single-flight task.
   - News collection and LLM analysis run in a separate non-provisioned worker so timer jobs cannot block the public API.
   - The pay-per-use worker uses 2 vCPU and 4 GiB per instance and scales overlapping timer lanes across up to three isolated instances; collection is raw-only, YDB has an eight-session pool, and semantic LLM work remains single-flight in maintenance.
   - Broad RSS and Telegram sources use five stable minute buckets so each source keeps a five-minute interval without a connection burst.
