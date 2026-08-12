@@ -6,6 +6,7 @@ import re
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -40,6 +41,11 @@ COLLECTION_LANE_DEADLINE_SECONDS = 20.0
 FAST_SOURCE_TIMEOUT_SECONDS = 5.0
 FAST_SOURCE_DEADLINE_SECONDS = 6.0
 DISCOVERY_SOURCE_DEADLINE_SECONDS = 12.0
+DISCOVERY_REGISTRY_DEADLINE_SECONDS = 3.0
+FEED_FETCH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=32,
+    thread_name_prefix="eventedge-feed",
+)
 HTML_VOID_TAGS = frozenset(
     {
         "area",
@@ -435,7 +441,8 @@ async def collect_rss_feed(
     analyze_signals: bool = True,
     timeout_seconds: float | None = None,
 ) -> dict[str, int]:
-    feed = await asyncio.to_thread(
+    feed = await asyncio.get_running_loop().run_in_executor(
+        FEED_FETCH_EXECUTOR,
         fetcher,
         config.url,
         timeout_seconds if timeout_seconds is not None else config.timeout_seconds,
@@ -466,7 +473,8 @@ async def collect_telegram_channel(
     analyze_signals: bool = True,
     timeout_seconds: float | None = None,
 ) -> dict[str, int]:
-    page = await asyncio.to_thread(
+    page = await asyncio.get_running_loop().run_in_executor(
+        FEED_FETCH_EXECUTOR,
         fetcher,
         config.url,
         timeout_seconds if timeout_seconds is not None else config.timeout_seconds,
@@ -946,46 +954,37 @@ async def collect_source_tasks(
         )
         for source_id, task in tasks
     ]
+    scheduled_tasks = [task for _, task in scheduled]
+    pending: set[asyncio.Task[dict[str, int]]] = set()
     try:
         _, pending = await asyncio.wait(
-            [task for _, task in scheduled],
+            scheduled_tasks,
             timeout=deadline_seconds,
         )
-    except asyncio.CancelledError:
-        for _, task in scheduled:
-            task.cancel()
-        await asyncio.gather(
-            *(task for _, task in scheduled),
-            return_exceptions=True,
-        )
-        raise
-    if pending:
         for task in pending:
             task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
+        outcomes = await asyncio.gather(*scheduled_tasks, return_exceptions=True)
+    except asyncio.CancelledError:
+        for task in scheduled_tasks:
+            task.cancel()
+        await asyncio.gather(*scheduled_tasks, return_exceptions=True)
+        raise
 
     results: list[dict[str, int] | BaseException] = []
-    for source_id, task in scheduled:
-        if task in pending:
-            error: BaseException = TimeoutError("collection lane deadline exceeded")
-            LOGGER.warning(
-                "Market feed collection failed source_id=%s error=%s",
-                source_id,
-                type(error).__name__,
-            )
-            results.append(error)
+    for (source_id, task), outcome in zip(scheduled, outcomes, strict=True):
+        if task in pending or isinstance(outcome, asyncio.CancelledError):
+            error: BaseException = TimeoutError("collection source deadline exceeded")
+        elif isinstance(outcome, BaseException):
+            error = outcome
+        else:
+            results.append(outcome)
             continue
-        try:
-            results.append(task.result())
-        except asyncio.CancelledError:
-            raise
-        except BaseException as error:
-            LOGGER.warning(
-                "Market feed collection failed source_id=%s error=%s",
-                source_id,
-                type(error).__name__,
-            )
-            results.append(error)
+        LOGGER.warning(
+            "Market feed collection failed source_id=%s error=%s",
+            source_id,
+            type(error).__name__,
+        )
+        results.append(error)
     return aggregate_collection_results(results)
 
 
@@ -1056,7 +1055,17 @@ async def collect_fast_news(repository: NewsRepository) -> dict[str, int]:
 
 async def collect_discovery_news(repository: NewsRepository) -> dict[str, int]:
     """Refresh broad discovery and UI-managed Telegram every five minutes."""
-    managed_sources = await repository.list_telegram_sources()
+    try:
+        managed_sources = await asyncio.wait_for(
+            repository.list_telegram_sources(),
+            timeout=DISCOVERY_REGISTRY_DEADLINE_SECONDS,
+        )
+    except Exception as error:
+        LOGGER.warning(
+            "Managed Telegram registry unavailable; continuing without it error=%s",
+            type(error).__name__,
+        )
+        managed_sources = []
     dynamic_channels = tuple(
         TelegramChannelConfig(
             source_id=source.source_id,

@@ -20,8 +20,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from eventedge import __version__
 from eventedge.analysis import (
@@ -263,6 +265,39 @@ app = FastAPI(
     redoc_url=None,
     lifespan=lifespan,
 )
+
+
+class RequestIdMiddleware:
+    """Attach trace and cache headers without BaseHTTPMiddleware disconnect races."""
+
+    def __init__(self, application: ASGIApp) -> None:
+        self.application = application
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.application(scope, receive, send)
+            return
+
+        supplied = Headers(scope=scope).get("X-Request-Id", "")
+        request_id = (
+            supplied if REQUEST_ID_PATTERN.fullmatch(supplied) else f"req_{uuid.uuid4().hex}"
+        )
+        scope.setdefault("state", {})["request_id"] = request_id
+        path = str(scope.get("path", ""))
+
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["X-Request-Id"] = request_id
+                if path.startswith("/assets/"):
+                    headers["Cache-Control"] = "public, max-age=31536000, immutable"
+                elif path.startswith(("/brands/", "/favicon", "/apple-touch-icon")):
+                    headers["Cache-Control"] = "public, max-age=86400"
+            await send(message)
+
+        await self.application(scope, receive, send_with_headers)
+
+
 app.state.news_repository = repository_from_environment(os.environ)
 app.state.market_data_client = MoexMarketDataClient()
 app.state.evaluation_material_cache = None
@@ -283,6 +318,7 @@ app.state.collectors = {
     "market_news": collect_market_news,
 }
 app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=5)
+app.add_middleware(RequestIdMiddleware)
 
 
 def utc_now() -> str:
@@ -429,21 +465,6 @@ def problem_response(
         media_type="application/problem+json",
         headers={"X-Request-Id": request_id},
     )
-
-
-@app.middleware("http")
-async def attach_request_id(request: Request, call_next):
-    supplied = request.headers.get("X-Request-Id", "")
-    request.state.request_id = (
-        supplied if REQUEST_ID_PATTERN.fullmatch(supplied) else f"req_{uuid.uuid4().hex}"
-    )
-    response = await call_next(request)
-    response.headers["X-Request-Id"] = request.state.request_id
-    if request.url.path.startswith("/assets/"):
-        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-    elif request.url.path.startswith(("/brands/", "/favicon", "/apple-touch-icon")):
-        response.headers["Cache-Control"] = "public, max-age=86400"
-    return response
 
 
 @app.exception_handler(RequestValidationError)

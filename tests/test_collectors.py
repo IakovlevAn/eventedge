@@ -745,6 +745,19 @@ def test_per_source_deadline_prevents_one_feed_from_holding_lane() -> None:
     assert result["failed"] == 1
 
 
+def test_cancelled_child_is_counted_as_source_failure() -> None:
+    async def scenario() -> dict[str, int]:
+        async def cancelled() -> dict[str, int]:
+            raise asyncio.CancelledError
+
+        return await collectors_module.collect_source_tasks([("cancelled", cancelled())])
+
+    result = asyncio.run(scenario())
+
+    assert result["accepted"] == 0
+    assert result["failed"] == 1
+
+
 def test_ui_managed_telegram_runs_in_five_minute_discovery_lane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -778,3 +791,31 @@ def test_ui_managed_telegram_runs_in_five_minute_discovery_lane(
 
     assert telegram_called == ["telegram_private_news"]
     assert result["accepted"] == 2
+
+
+def test_discovery_continues_when_managed_source_registry_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = MemoryNewsRepository()
+    telegram_called: list[str] = []
+
+    async def slow_registry() -> list[TelegramSourceRecord]:
+        await asyncio.sleep(60)
+        return []
+
+    async def fake_feed_group(*args: object, **kwargs: object) -> dict[str, int]:
+        return {"accepted": 1}
+
+    async def fake_telegram_collect(*args: object, **kwargs: object) -> dict[str, int]:
+        telegram_called.append("unexpected")
+        return {"accepted": 1}
+
+    monkeypatch.setattr(repository, "list_telegram_sources", slow_registry)
+    monkeypatch.setattr(collectors_module, "DISCOVERY_REGISTRY_DEADLINE_SECONDS", 0.01)
+    monkeypatch.setattr(collectors_module, "collect_feed_group", fake_feed_group)
+    monkeypatch.setattr(collectors_module, "collect_telegram_channel", fake_telegram_collect)
+
+    result = asyncio.run(collectors_module.collect_discovery_news(repository))
+
+    assert telegram_called == []
+    assert result["accepted"] == 1
