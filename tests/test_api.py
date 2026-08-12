@@ -187,6 +187,53 @@ def test_background_snapshot_refresh_precomputes_default_news_response(
     assert application.state.content_snapshot_inflight is None
 
 
+def test_concurrent_news_projection_is_single_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "CONTENT_SNAPSHOT_TTL_SECONDS", 60)
+    news: list[NewsRecord] = []
+    signals: list[SignalRecord] = []
+    payload = {"data": [], "meta": {"limit": 100}}
+    build_calls = 0
+
+    def build(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal build_calls
+        build_calls += 1
+        time.sleep(0.02)
+        return payload
+
+    monkeypatch.setattr(main_module, "build_news_response_payload", build)
+    application = SimpleNamespace(
+        state=SimpleNamespace(
+            news_response_cache=None,
+            news_response_inflight={},
+            content_snapshot_inflight=None,
+            content_snapshot_cache={"news": news, "signals": signals},
+        )
+    )
+
+    async def scenario() -> list[dict[str, object]]:
+        return await asyncio.gather(
+            *(
+                main_module.get_or_build_news_response(
+                    application,
+                    news,
+                    signals,
+                    source_id=None,
+                    scope=None,
+                    limit=100,
+                )
+                for _ in range(10)
+            )
+        )
+
+    results = asyncio.run(scenario())
+
+    assert results == [payload] * 10
+    assert build_calls == 1
+    assert application.state.news_response_inflight == {}
+
+
 def test_source_registry_and_protected_telegram_addition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
