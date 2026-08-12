@@ -666,9 +666,9 @@ def test_fast_collector_uses_only_direct_feeds_and_isolates_failures(
     result = asyncio.run(collectors_module.collect_fast_news(repository))
 
     assert called == [
-        ("interfax", 5, False, 10.0),
-        ("tass", 5, False, 10.0),
-        ("rbc", 5, False, 10.0),
+        ("interfax", 1, False, 10.0),
+        ("tass", 1, False, 10.0),
+        ("rbc", 1, False, 10.0),
     ]
     assert telegram_called == []
     assert result == {

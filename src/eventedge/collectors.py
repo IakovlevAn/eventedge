@@ -1041,7 +1041,7 @@ async def collect_fast_news(repository: NewsRepository) -> dict[str, int]:
                 collect_feed_group(
                     repository,
                     FAST_NEWS_FEEDS,
-                    stop_after_replays=5,
+                    stop_after_replays=1,
                     analyze_signals=False,
                     timeout_seconds=FAST_SOURCE_TIMEOUT_SECONDS,
                     task_timeout_seconds=FAST_SOURCE_DEADLINE_SECONDS,
