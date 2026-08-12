@@ -5,7 +5,7 @@ import logging
 import re
 import urllib.request
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -36,6 +36,8 @@ MAX_FEED_BYTES = 8_000_000
 MAX_CONTENT_LENGTH = 200_000
 RSS_CONTENT_TAG = "{http://purl.org/rss/1.0/modules/content/}encoded"
 LOGGER = logging.getLogger(__name__)
+COLLECTION_LANE_DEADLINE_SECONDS = 20.0
+FAST_SOURCE_TIMEOUT_SECONDS = 5.0
 HTML_VOID_TAGS = frozenset(
     {
         "area",
@@ -287,6 +289,7 @@ async def collect_news_items(
     item_filter: Callable[[RssItem], bool] | None = None,
     signal_filter: Callable[[RssItem], bool] | None = None,
     stop_after_replays: int | None = None,
+    analyze_signals: bool = True,
 ) -> dict[str, int]:
     accepted = 0
     replayed = 0
@@ -307,8 +310,8 @@ async def collect_news_items(
         )
         if direct_signal_candidate:
             signal_candidates += 1
-        generate_signals = direct_signal_candidate or is_signal_analysis_candidate(item)
-        if generate_signals:
+        analysis_candidate = direct_signal_candidate or is_signal_analysis_candidate(item)
+        if analysis_candidate:
             analysis_candidates += 1
         features = RuleBasedNewsExtractor().extract(
             NewsAnalysisInput(
@@ -342,7 +345,7 @@ async def collect_news_items(
             "signal_candidate"
             if direct_signal_candidate
             else "semantic_candidate"
-            if generate_signals
+            if analysis_candidate
             else "event_candidate"
             if event_candidate
             else "unclassified"
@@ -351,19 +354,21 @@ async def collect_news_items(
             "eligible_for_direct_signal_analysis"
             if direct_signal_candidate
             else "eligible_for_semantic_signal_analysis"
-            if generate_signals
+            if analysis_candidate
             else "stored_as_market_context"
             if event_candidate
             else "stored_for_future_reclassification"
         )
         source_metadata = {
             **hash_metadata,
-            "processing_status": "processed",
+            "processing_status": (
+                "processed" if analyze_signals or not analysis_candidate else "pending"
+            ),
             "classification_status": classification_status,
             "classification_reason": classification_reason,
             "classification_version": "candidate-gate-0.4.0",
             "event_candidate": event_candidate,
-            "analysis_candidate": generate_signals,
+            "analysis_candidate": analysis_candidate,
         }
         hash_payload = {
             "source_id": source_id,
@@ -395,7 +400,7 @@ async def collect_news_items(
         result = await repository.ingest(
             idempotency_key,
             document,
-            generate_signals=generate_signals,
+            generate_signals=analyze_signals and analysis_candidate,
         )
         if result.replayed:
             replayed += 1
@@ -425,8 +430,14 @@ async def collect_rss_feed(
     item_filter: Callable[[RssItem], bool] | None = None,
     signal_filter: Callable[[RssItem], bool] | None = None,
     stop_after_replays: int | None = None,
+    analyze_signals: bool = True,
+    timeout_seconds: float | None = None,
 ) -> dict[str, int]:
-    feed = await asyncio.to_thread(fetcher, config.url, config.timeout_seconds)
+    feed = await asyncio.to_thread(
+        fetcher,
+        config.url,
+        timeout_seconds if timeout_seconds is not None else config.timeout_seconds,
+    )
     items = parse_rss(feed, max_items=config.max_items)
     return await collect_news_items(
         repository,
@@ -438,6 +449,7 @@ async def collect_rss_feed(
         item_filter=item_filter,
         signal_filter=signal_filter,
         stop_after_replays=stop_after_replays,
+        analyze_signals=analyze_signals,
     )
 
 
@@ -449,8 +461,14 @@ async def collect_telegram_channel(
     item_filter: Callable[[RssItem], bool] | None = None,
     signal_filter: Callable[[RssItem], bool] | None = None,
     stop_after_replays: int | None = None,
+    analyze_signals: bool = True,
+    timeout_seconds: float | None = None,
 ) -> dict[str, int]:
-    page = await asyncio.to_thread(fetcher, config.url, config.timeout_seconds)
+    page = await asyncio.to_thread(
+        fetcher,
+        config.url,
+        timeout_seconds if timeout_seconds is not None else config.timeout_seconds,
+    )
     items = parse_telegram_channel(page, max_items=config.max_items)
     return await collect_news_items(
         repository,
@@ -462,6 +480,7 @@ async def collect_telegram_channel(
         item_filter=item_filter,
         signal_filter=signal_filter,
         stop_after_replays=stop_after_replays,
+        analyze_signals=analyze_signals,
     )
 
 
@@ -901,14 +920,60 @@ def aggregate_collection_results(
             raise result
         if isinstance(result, BaseException):
             totals["failed"] += 1
-            LOGGER.warning(
-                "Market feed collection failed: %s",
-                type(result).__name__,
-            )
             continue
         for key in totals:
             totals[key] += result.get(key, 0)
     return totals
+
+
+async def collect_source_tasks(
+    tasks: list[tuple[str, Awaitable[dict[str, int]]]],
+    *,
+    deadline_seconds: float | None = None,
+) -> dict[str, int]:
+    """Run independent sources without allowing one lane to exceed its trigger window."""
+    scheduled = [(source_id, asyncio.create_task(task)) for source_id, task in tasks]
+    try:
+        _, pending = await asyncio.wait(
+            [task for _, task in scheduled],
+            timeout=deadline_seconds,
+        )
+    except asyncio.CancelledError:
+        for _, task in scheduled:
+            task.cancel()
+        await asyncio.gather(
+            *(task for _, task in scheduled),
+            return_exceptions=True,
+        )
+        raise
+    if pending:
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    results: list[dict[str, int] | BaseException] = []
+    for source_id, task in scheduled:
+        if task in pending:
+            error: BaseException = TimeoutError("collection lane deadline exceeded")
+            LOGGER.warning(
+                "Market feed collection failed source_id=%s error=%s",
+                source_id,
+                type(error).__name__,
+            )
+            results.append(error)
+            continue
+        try:
+            results.append(task.result())
+        except asyncio.CancelledError:
+            raise
+        except BaseException as error:
+            LOGGER.warning(
+                "Market feed collection failed source_id=%s error=%s",
+                source_id,
+                type(error).__name__,
+            )
+            results.append(error)
+    return aggregate_collection_results(results)
 
 
 async def collect_feed_group(
@@ -916,44 +981,60 @@ async def collect_feed_group(
     feeds: tuple[RssFeedConfig, ...],
     *,
     stop_after_replays: int | None,
+    analyze_signals: bool = True,
+    timeout_seconds: float | None = None,
 ) -> dict[str, int]:
-    results = await asyncio.gather(
-        *(
-            collect_rss_feed(
-                repository,
-                config,
-                item_filter=collection_filters(config)[0],
-                signal_filter=collection_filters(config)[1],
-                stop_after_replays=stop_after_replays,
+    return await collect_source_tasks(
+        [
+            (
+                config.source_id,
+                collect_rss_feed(
+                    repository,
+                    config,
+                    item_filter=collection_filters(config)[0],
+                    signal_filter=collection_filters(config)[1],
+                    stop_after_replays=stop_after_replays,
+                    analyze_signals=analyze_signals,
+                    timeout_seconds=timeout_seconds,
+                ),
             )
             for config in feeds
-        ),
-        return_exceptions=True,
+        ],
     )
-    return aggregate_collection_results(results)
 
 
 async def collect_fast_news(repository: NewsRepository) -> dict[str, int]:
     """Refresh direct priority feeds every minute without discovery latency."""
-    results = await asyncio.gather(
-        collect_feed_group(
-            repository,
-            FAST_NEWS_FEEDS,
-            stop_after_replays=5,
-        ),
-        *(
-            collect_telegram_channel(
-                repository,
-                config,
-                item_filter=is_market_event_candidate,
-                signal_filter=is_market_signal_candidate,
-                stop_after_replays=5,
-            )
-            for config in TELEGRAM_CHANNELS
-        ),
-        return_exceptions=True,
+    return await collect_source_tasks(
+        [
+            (
+                "fast_rss",
+                collect_feed_group(
+                    repository,
+                    FAST_NEWS_FEEDS,
+                    stop_after_replays=5,
+                    analyze_signals=False,
+                    timeout_seconds=FAST_SOURCE_TIMEOUT_SECONDS,
+                ),
+            ),
+            *[
+                (
+                    config.source_id,
+                    collect_telegram_channel(
+                        repository,
+                        config,
+                        item_filter=is_market_event_candidate,
+                        signal_filter=is_market_signal_candidate,
+                        stop_after_replays=5,
+                        analyze_signals=False,
+                        timeout_seconds=FAST_SOURCE_TIMEOUT_SECONDS,
+                    ),
+                )
+                for config in TELEGRAM_CHANNELS
+            ],
+        ],
+        deadline_seconds=COLLECTION_LANE_DEADLINE_SECONDS,
     )
-    return aggregate_collection_results(results)
 
 
 async def collect_discovery_news(repository: NewsRepository) -> dict[str, int]:
@@ -970,40 +1051,54 @@ async def collect_discovery_news(repository: NewsRepository) -> dict[str, int]:
         for source in managed_sources
         if source.enabled
     )
-    results = await asyncio.gather(
-        collect_feed_group(
-            repository,
-            DISCOVERY_NEWS_FEEDS,
-            stop_after_replays=10,
-        ),
-        *(
-            collect_telegram_channel(
-                repository,
-                config,
-                item_filter=is_market_event_candidate,
-                signal_filter=is_market_signal_candidate,
-                stop_after_replays=5,
-            )
-            for config in dynamic_channels
-        ),
-        return_exceptions=True,
+    return await collect_source_tasks(
+        [
+            (
+                "discovery_rss",
+                collect_feed_group(
+                    repository,
+                    DISCOVERY_NEWS_FEEDS,
+                    stop_after_replays=10,
+                    analyze_signals=False,
+                ),
+            ),
+            *[
+                (
+                    config.source_id,
+                    collect_telegram_channel(
+                        repository,
+                        config,
+                        item_filter=is_market_event_candidate,
+                        signal_filter=is_market_signal_candidate,
+                        stop_after_replays=5,
+                        analyze_signals=False,
+                    ),
+                )
+                for config in dynamic_channels
+            ],
+        ],
+        deadline_seconds=COLLECTION_LANE_DEADLINE_SECONDS,
     )
-    return aggregate_collection_results(results)
 
 
 async def collect_slow_news(repository: NewsRepository) -> dict[str, int]:
     """Refresh macro context that does not require minute-level polling."""
-    result = await asyncio.gather(
-        collect_rss_feed(
-            repository,
-            CBR_PRESS_FEED,
-            item_filter=is_cbr_market_news,
-            signal_filter=lambda item: False,
-            stop_after_replays=5,
-        ),
-        return_exceptions=True,
+    return await collect_source_tasks(
+        [
+            (
+                CBR_PRESS_FEED.source_id,
+                collect_rss_feed(
+                    repository,
+                    CBR_PRESS_FEED,
+                    item_filter=is_cbr_market_news,
+                    signal_filter=lambda item: False,
+                    stop_after_replays=5,
+                    analyze_signals=False,
+                ),
+            )
+        ],
+        deadline_seconds=COLLECTION_LANE_DEADLINE_SECONDS,
     )
-    return aggregate_collection_results(result)
 
 
 async def collect_moex_news(repository: NewsRepository) -> dict[str, int]:

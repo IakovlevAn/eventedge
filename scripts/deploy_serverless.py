@@ -33,7 +33,10 @@ def build_payload(
         "YANDEX_GPT_MODEL": "yandexgpt-lite",
         # Keep one LLM request in flight: concurrent calls share the runtime
         # client and were cancelled by the serverless request lifecycle.
-        "BACKFILL_BATCH_LIMIT": "4",
+        # Keep semantic maintenance below the timer's 30-second request window.
+        # Raw news collection is independent, so deferred candidates are safe
+        # to finish in later idempotent waves.
+        "BACKFILL_BATCH_LIMIT": "1",
         "BACKFILL_CONCURRENCY": "1",
         "EVENTEDGE_MONTHLY_BUDGET_RUB": "15000",
     }

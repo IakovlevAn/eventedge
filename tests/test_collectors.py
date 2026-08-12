@@ -185,6 +185,41 @@ def test_sector_news_without_ticker_is_analyzed_and_stored() -> None:
     assert {signal["action"] for signal in signals} == {"risk_on"}
 
 
+def test_timer_collection_persists_candidate_before_semantic_analysis() -> None:
+    class UnexpectedAnalyzer:
+        async def extract(self, document: object) -> object:
+            raise AssertionError("timer collection must not wait for semantic analysis")
+
+    repository = MemoryNewsRepository(analyzer=UnexpectedAnalyzer())  # type: ignore[arg-type]
+    config = TelegramChannelConfig(source_id="telegram_bbbreaking", channel="bbbreaking")
+
+    async def scenario() -> tuple[dict[str, int], dict[str, object], int]:
+        result = await collect_telegram_channel(
+            repository,
+            config,
+            fetcher=lambda url, timeout: BBBREAKING_SECTOR_FIXTURE,
+            item_filter=is_market_event_candidate,
+            signal_filter=is_market_signal_candidate,
+            analyze_signals=False,
+        )
+        news = await repository.list_news(source_id="telegram_bbbreaking", limit=10)
+        signals = await repository.list_signals(
+            ticker=None,
+            directions=None,
+            status=None,
+            min_confidence=None,
+            limit=10,
+        )
+        return result, news[0].as_api_dict(), len(signals)
+
+    result, stored, signal_count = asyncio.run(scenario())
+
+    assert result["accepted"] == 1
+    assert result["analysis_candidates"] == 1
+    assert stored["processing"]["status"] == "pending"
+    assert signal_count == 0
+
+
 def test_rss_collection_is_idempotent() -> None:
     repository = MemoryNewsRepository()
     config = RssFeedConfig(
@@ -585,15 +620,22 @@ def test_fast_collector_uses_only_direct_feeds_and_isolates_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = MemoryNewsRepository()
-    called: list[tuple[str, int | None]] = []
-    telegram_called: list[tuple[str, int | None]] = []
+    called: list[tuple[str, int | None, bool | None, float | None]] = []
+    telegram_called: list[tuple[str, int | None, bool | None, float | None]] = []
 
     async def fake_collect(
         repository: object,
         config: RssFeedConfig,
         **kwargs: object,
     ) -> dict[str, int]:
-        called.append((config.source_id, kwargs.get("stop_after_replays")))
+        called.append(
+            (
+                config.source_id,
+                kwargs.get("stop_after_replays"),
+                kwargs.get("analyze_signals"),
+                kwargs.get("timeout_seconds"),
+            )
+        )
         if config.source_id == "rbc":
             raise TimeoutError("feed unavailable")
         return {"fetched": 1, "matched": 1, "accepted": 1, "replayed": 0}
@@ -605,7 +647,14 @@ def test_fast_collector_uses_only_direct_feeds_and_isolates_failures(
         config: TelegramChannelConfig,
         **kwargs: object,
     ) -> dict[str, int]:
-        telegram_called.append((config.source_id, kwargs.get("stop_after_replays")))
+        telegram_called.append(
+            (
+                config.source_id,
+                kwargs.get("stop_after_replays"),
+                kwargs.get("analyze_signals"),
+                kwargs.get("timeout_seconds"),
+            )
+        )
         return {"fetched": 1, "matched": 1, "accepted": 1, "replayed": 0}
 
     monkeypatch.setattr(
@@ -617,18 +666,18 @@ def test_fast_collector_uses_only_direct_feeds_and_isolates_failures(
     result = asyncio.run(collectors_module.collect_fast_news(repository))
 
     assert called == [
-        ("interfax", 5),
-        ("tass", 5),
-        ("rbc", 5),
-        ("moex_news", 5),
+        ("interfax", 5, False, 5.0),
+        ("tass", 5, False, 5.0),
+        ("rbc", 5, False, 5.0),
+        ("moex_news", 5, False, 5.0),
     ]
     assert telegram_called == [
-        ("telegram_ak47pfl", 5),
-        ("telegram_markettwits", 5),
-        ("telegram_centralbank_russia", 5),
-        ("telegram_moscowexchangeofficial", 5),
-        ("telegram_bcs_express", 5),
-        ("telegram_russianmacro", 5),
+        ("telegram_ak47pfl", 5, False, 5.0),
+        ("telegram_markettwits", 5, False, 5.0),
+        ("telegram_centralbank_russia", 5, False, 5.0),
+        ("telegram_moscowexchangeofficial", 5, False, 5.0),
+        ("telegram_bcs_express", 5, False, 5.0),
+        ("telegram_russianmacro", 5, False, 5.0),
     ]
     assert result == {
         "fetched": 9,
@@ -640,6 +689,34 @@ def test_fast_collector_uses_only_direct_feeds_and_isolates_failures(
         "replayed": 0,
         "failed": 1,
     }
+
+
+def test_collection_deadline_returns_partial_success_and_cancels_late_source() -> None:
+    cancelled = False
+
+    async def scenario() -> dict[str, int]:
+        async def quick() -> dict[str, int]:
+            return {"accepted": 1}
+
+        async def slow() -> dict[str, int]:
+            nonlocal cancelled
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            return {"accepted": 1}
+
+        return await collectors_module.collect_source_tasks(
+            [("quick", quick()), ("slow", slow())],
+            deadline_seconds=0.01,
+        )
+
+    result = asyncio.run(scenario())
+
+    assert cancelled is True
+    assert result["accepted"] == 1
+    assert result["failed"] == 1
 
 
 def test_ui_managed_telegram_runs_in_five_minute_discovery_lane(

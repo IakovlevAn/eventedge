@@ -24,7 +24,7 @@ client = TestClient(app)
 NEWS_PAYLOAD = {
     "source_id": "interfax",
     "external_id": "news-2026-08-08-001",
-    "published_at": "2026-08-08T10:18:00Z",
+    "published_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     "title": "Сбербанк опубликовал результаты за семь месяцев",
     "url": "https://example.com/news/001",
     "content": "Чистая прибыль выросла быстрее рыночного консенсуса.",
@@ -412,6 +412,37 @@ def test_maintenance_timer_refreshes_models_and_persisted_evals(
         "remaining": 4,
         "outcomes": 1,
         "epochs": 0,
+    }
+
+
+def test_maintenance_timer_defers_work_before_trigger_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def slow_reprocess(*args: object, **kwargs: object) -> dict[str, object]:
+        await asyncio.sleep(60)
+        raise AssertionError("maintenance should have been cancelled")
+
+    monkeypatch.setattr(main_module, "MAINTENANCE_DEADLINE_SECONDS", 0.01)
+    monkeypatch.setattr(main_module, "reprocess_signal_candidates_batch", slow_reprocess)
+
+    response = client.post(
+        "/",
+        json={
+            "messages": [
+                {
+                    "event_metadata": {
+                        "event_type": "yandex.cloud.events.serverless.triggers.TimerMessage"
+                    },
+                    "details": {"payload": "maintenance"},
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["collectors"]["maintenance"] == {
+        "status": "deferred",
+        "deadline_seconds": 0.01,
     }
 
 
