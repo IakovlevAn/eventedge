@@ -168,11 +168,12 @@ def test_legacy_signal_copies_are_collapsed() -> None:
 def test_concurrent_retries_create_one_job() -> None:
     async def scenario() -> None:
         repository = MemoryNewsRepository()
+        current_time = datetime.now(UTC)
         document = NewsDocument(
             source_id="interfax",
             external_id="external-1",
-            published_at=datetime(2026, 8, 8, 10, 18, tzinfo=UTC),
-            received_at=datetime(2026, 8, 8, 10, 19, tzinfo=UTC),
+            published_at=current_time,
+            received_at=current_time,
             title="Сбербанк опубликовал отчётность",
             url="https://example.com/news/1",
             content="Чистая прибыль выросла на 15% и оказалась выше ожиданий.",

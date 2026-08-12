@@ -98,6 +98,7 @@ NEWS_DELIVERY_TARGET_SECONDS = 120
 EVALUATION_CACHE_TTL_SECONDS = 60
 BACKFILL_BATCH_LIMIT = min(40, max(1, int(os.environ.get("BACKFILL_BATCH_LIMIT", "4"))))
 BACKFILL_CONCURRENCY = min(4, max(1, int(os.environ.get("BACKFILL_CONCURRENCY", "1"))))
+MAINTENANCE_DEADLINE_SECONDS = 20.0
 CONTENT_SNAPSHOT_TTL_SECONDS = 60 if os.environ.get("APP_ENV") == "prod" else 0
 RECENT_REPOSITORY_SUCCESS_TTL_SECONDS = 120 if os.environ.get("APP_ENV") == "prod" else 0
 MAX_TELEGRAM_CHANNELS = 18
@@ -524,15 +525,26 @@ async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONRespons
     results: dict[str, dict[str, object]] = {}
     for collector_name in dict.fromkeys(message.details.payload for message in envelope.messages):
         if collector_name == "maintenance":
-            reprocess = await reprocess_signal_candidates_batch(
-                repository,
-                limit=BACKFILL_BATCH_LIMIT,
-                concurrency=BACKFILL_CONCURRENCY,
-            )
-            outcomes, _, _, _, epochs = await _load_evaluation_material(
-                repository,
-                request.app.state.market_data_client,
-            )
+            try:
+                async with asyncio.timeout(MAINTENANCE_DEADLINE_SECONDS):
+                    reprocess = await reprocess_signal_candidates_batch(
+                        repository,
+                        limit=BACKFILL_BATCH_LIMIT,
+                        concurrency=BACKFILL_CONCURRENCY,
+                    )
+                    outcomes, _, _, _, epochs = await _load_evaluation_material(
+                        repository,
+                        request.app.state.market_data_client,
+                    )
+            except TimeoutError:
+                logger.warning(
+                    "Maintenance deadline exceeded; unfinished idempotent work was deferred"
+                )
+                results[collector_name] = {
+                    "status": "deferred",
+                    "deadline_seconds": MAINTENANCE_DEADLINE_SECONDS,
+                }
+                continue
             reprocess_meta = reprocess["meta"]
             assert isinstance(reprocess_meta, dict)
             results[collector_name] = {
@@ -736,7 +748,7 @@ async def list_news(
                 "scope_counts": scope_counts,
                 "processing_coverage": processing_coverage,
                 "last_ingested_at": (
-                    max(item.created_at for item in visible_news)
+                    max(item.received_at for item in visible_news)
                     .astimezone(UTC)
                     .isoformat()
                     .replace("+00:00", "Z")
