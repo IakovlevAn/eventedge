@@ -116,7 +116,7 @@ def configured_sources() -> list[dict[str, object]]:
                 "name": details.get("name", f"@{channel.channel}"),
                 "kind": "Telegram",
                 "quality": details.get("quality", 65),
-                "freshness": "цель ≤ 2 мин",
+                "freshness": "до 5 мин",
                 "role": details.get("role", "Публичный Telegram-канал"),
                 "url": channel.url,
                 "enabled": True,

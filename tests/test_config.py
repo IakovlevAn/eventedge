@@ -74,7 +74,8 @@ source_quality:
     scoring = load_scoring_config(tmp_path)
 
     assert collection.lanes[0].interval_seconds == 120
-    assert collection.lanes[0].source_ids[-1] == "telegram_russianmacro"
+    assert collection.lanes[0].source_ids[-1] == "moex_news"
+    assert collection.lanes[1].source_ids[-1] == "telegram_russianmacro"
     assert scoring.default_source_quality == 0.6
     assert scoring.source_quality["telegram_markettwits"] == 0.72
     assert scoring.source_quality["interfax"] == 0.9

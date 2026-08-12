@@ -6,7 +6,7 @@ import re
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Executor, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -42,9 +42,13 @@ FAST_SOURCE_TIMEOUT_SECONDS = 5.0
 FAST_SOURCE_DEADLINE_SECONDS = 6.0
 DISCOVERY_SOURCE_DEADLINE_SECONDS = 12.0
 DISCOVERY_REGISTRY_DEADLINE_SECONDS = 3.0
-FEED_FETCH_EXECUTOR = ThreadPoolExecutor(
-    max_workers=32,
-    thread_name_prefix="eventedge-feed",
+PRIORITY_FEED_FETCH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="eventedge-priority-feed",
+)
+BACKGROUND_FEED_FETCH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=12,
+    thread_name_prefix="eventedge-background-feed",
 )
 HTML_VOID_TAGS = frozenset(
     {
@@ -440,9 +444,10 @@ async def collect_rss_feed(
     stop_after_replays: int | None = None,
     analyze_signals: bool = True,
     timeout_seconds: float | None = None,
+    executor: Executor = BACKGROUND_FEED_FETCH_EXECUTOR,
 ) -> dict[str, int]:
     feed = await asyncio.get_running_loop().run_in_executor(
-        FEED_FETCH_EXECUTOR,
+        executor,
         fetcher,
         config.url,
         timeout_seconds if timeout_seconds is not None else config.timeout_seconds,
@@ -472,9 +477,10 @@ async def collect_telegram_channel(
     stop_after_replays: int | None = None,
     analyze_signals: bool = True,
     timeout_seconds: float | None = None,
+    executor: Executor = BACKGROUND_FEED_FETCH_EXECUTOR,
 ) -> dict[str, int]:
     page = await asyncio.get_running_loop().run_in_executor(
-        FEED_FETCH_EXECUTOR,
+        executor,
         fetcher,
         config.url,
         timeout_seconds if timeout_seconds is not None else config.timeout_seconds,
@@ -996,6 +1002,7 @@ async def collect_feed_group(
     analyze_signals: bool = True,
     timeout_seconds: float | None = None,
     task_timeout_seconds: float | None = None,
+    executor: Executor = BACKGROUND_FEED_FETCH_EXECUTOR,
 ) -> dict[str, int]:
     return await collect_source_tasks(
         [
@@ -1009,6 +1016,7 @@ async def collect_feed_group(
                     stop_after_replays=stop_after_replays,
                     analyze_signals=analyze_signals,
                     timeout_seconds=timeout_seconds,
+                    executor=executor,
                 ),
             )
             for config in feeds
@@ -1030,23 +1038,9 @@ async def collect_fast_news(repository: NewsRepository) -> dict[str, int]:
                     analyze_signals=False,
                     timeout_seconds=FAST_SOURCE_TIMEOUT_SECONDS,
                     task_timeout_seconds=FAST_SOURCE_DEADLINE_SECONDS,
+                    executor=PRIORITY_FEED_FETCH_EXECUTOR,
                 ),
             ),
-            *[
-                (
-                    config.source_id,
-                    collect_telegram_channel(
-                        repository,
-                        config,
-                        item_filter=is_market_event_candidate,
-                        signal_filter=is_market_signal_candidate,
-                        stop_after_replays=5,
-                        analyze_signals=False,
-                        timeout_seconds=FAST_SOURCE_TIMEOUT_SECONDS,
-                    ),
-                )
-                for config in TELEGRAM_CHANNELS
-            ],
         ],
         deadline_seconds=COLLECTION_LANE_DEADLINE_SECONDS,
         task_timeout_seconds=FAST_SOURCE_DEADLINE_SECONDS + 1,
@@ -1077,6 +1071,9 @@ async def collect_discovery_news(repository: NewsRepository) -> dict[str, int]:
         for source in managed_sources
         if source.enabled
     )
+    telegram_channels = {
+        config.source_id: config for config in (*TELEGRAM_CHANNELS, *dynamic_channels)
+    }
     return await collect_source_tasks(
         [
             (
@@ -1099,9 +1096,10 @@ async def collect_discovery_news(repository: NewsRepository) -> dict[str, int]:
                         signal_filter=is_market_signal_candidate,
                         stop_after_replays=5,
                         analyze_signals=False,
+                        executor=BACKGROUND_FEED_FETCH_EXECUTOR,
                     ),
                 )
-                for config in dynamic_channels
+                for config in telegram_channels.values()
             ],
         ],
         deadline_seconds=COLLECTION_LANE_DEADLINE_SECONDS,
