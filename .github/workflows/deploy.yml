@@ -243,7 +243,12 @@ jobs:
               && jq -e '.meta.evaluation_scope == "directional_signals_only"' \
                 "${check_dir}/evals.json" >/dev/null \
               && jq -e '.data | length >= 6' "${check_dir}/sources.json" >/dev/null \
-              && jq -e '.meta.returned == 20' "${check_dir}/assessments.json" >/dev/null; then
+              && jq -e '
+                  .meta.requested == 20
+                  and .meta.returned >= 12
+                  and ((.meta.returned + (.errors | length)) == .meta.requested)
+                  and (([.data[].ticker, .errors[].ticker] | unique | length) == 20)
+                ' "${check_dir}/assessments.json" >/dev/null; then
               echo "Concurrent production dashboard reads are ready"
               exit 0
             fi
