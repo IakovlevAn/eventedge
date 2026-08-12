@@ -30,10 +30,10 @@ def test_fast_news_timer_runs_every_minute() -> None:
     }
 
 
-def test_collection_lanes_have_distinct_schedules_and_payloads() -> None:
+def test_collection_lanes_have_expected_schedules_and_payloads() -> None:
     assert [(spec.cron_expression, spec.payload) for spec in TIMER_SPECS] == [
         ("* * ? * * *", "fast_news"),
-        ("0/5 * ? * * *", "discovery_news"),
+        ("* * ? * * *", "discovery_news"),
         ("0/15 * ? * * *", "slow_news"),
         ("2/5 * ? * * *", "maintenance"),
     ]

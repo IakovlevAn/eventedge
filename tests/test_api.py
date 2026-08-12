@@ -17,6 +17,7 @@ from eventedge.storage import (
     NewsDocument,
     NewsRecord,
     SignalRecord,
+    TelegramSourceRecord,
 )
 
 client = TestClient(app)
@@ -134,6 +135,7 @@ def test_source_registry_and_protected_telegram_addition(
     assert registry.status_code == 200
     assert registry.json()["meta"]["telegram_limit"] == 18
     assert registry.json()["meta"]["telegram_active"] >= 6
+    assert registry.json()["meta"]["registry_status"] in {"live", "cached"}
     assert any(source["source_id"] == "telegram_bcs_express" for source in registry.json()["data"])
 
     unavailable = client.post(
@@ -163,6 +165,32 @@ def test_source_registry_and_protected_telegram_addition(
     assert created.json()["data"]["source_id"] == "telegram_eventedge_test_one"
     assert created.json()["data"]["managed"] is True
     assert created.json()["data"]["role"] == "Тестовый источник событий российского рынка."
+
+
+def test_source_registry_timeout_serves_static_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = MemoryNewsRepository()
+    original_repository = app.state.news_repository
+    original_cache = app.state.source_registry_cache
+
+    async def slow_registry() -> list[TelegramSourceRecord]:
+        await asyncio.sleep(60)
+        return []
+
+    monkeypatch.setattr(repository, "list_telegram_sources", slow_registry)
+    monkeypatch.setattr(main_module, "SOURCE_REGISTRY_TIMEOUT_SECONDS", 0.01)
+    app.state.news_repository = repository
+    app.state.source_registry_cache = None
+    try:
+        response = client.get("/v1/sources")
+    finally:
+        app.state.news_repository = original_repository
+        app.state.source_registry_cache = original_cache
+
+    assert response.status_code == 200
+    assert response.json()["meta"]["registry_status"] == "unavailable"
+    assert any(source["source_id"] == "interfax" for source in response.json()["data"])
 
 
 def test_admin_reprocesses_one_explicit_stored_candidate(
@@ -571,7 +599,6 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
                 "interfax",
                 "tass",
                 "rbc",
-                "moex_news",
             ],
         },
         {
@@ -580,6 +607,7 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
             "source_ids": [
                 "google_news",
                 "market_background",
+                "moex_news",
                 "telegram_ak47pfl",
                 "telegram_markettwits",
                 "telegram_centralbank_russia",

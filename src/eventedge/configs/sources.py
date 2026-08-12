@@ -63,27 +63,26 @@ class SourceConfig:
 
     @property
     def fast_news_feeds(self) -> tuple[RssFeedConfig, ...]:
-        direct = tuple(
+        return tuple(
             config
             for config in self.market_news_feeds
             if config.source_id in {"interfax", "tass", "rbc"}
         )
-        return (
-            *direct,
-            replace(
-                self.moex_news,
-                name="moex_news_fast",
-                max_items=100,
-                timeout_seconds=10,
-            ),
-        )
 
     @property
     def discovery_news_feeds(self) -> tuple[RssFeedConfig, ...]:
-        return tuple(
-            config
-            for config in self.market_news_feeds
-            if config.source_id in {"google_news", "market_background"}
+        return (
+            *(
+                config
+                for config in self.market_news_feeds
+                if config.source_id in {"google_news", "market_background"}
+            ),
+            replace(
+                self.moex_news,
+                name="moex_news_discovery",
+                max_items=100,
+                timeout_seconds=10,
+            ),
         )
 
 

@@ -126,3 +126,5 @@ def test_budget_policy_matches_deployment_caps() -> None:
         "zone_requests_limit": 4,
         "execution_timeout_seconds": 180,
     }
+    source_collection = policy["runtime_caps"]["source_collection"]
+    assert source_collection["static_telegram_poll_interval_seconds"] == 300

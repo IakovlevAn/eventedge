@@ -5,6 +5,7 @@ import logging
 import re
 import urllib.request
 import xml.etree.ElementTree as ET
+import zlib
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Executor, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ FAST_SOURCE_TIMEOUT_SECONDS = 10.0
 FAST_SOURCE_DEADLINE_SECONDS = 15.0
 DISCOVERY_SOURCE_DEADLINE_SECONDS = 12.0
 DISCOVERY_REGISTRY_DEADLINE_SECONDS = 3.0
+DISCOVERY_BUCKET_COUNT = 5
 PRIORITY_FEED_FETCH_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="eventedge-priority-feed",
@@ -927,6 +929,11 @@ def empty_collection_totals() -> dict[str, int]:
     }
 
 
+def discovery_source_bucket(source_id: str) -> int:
+    """Keep a source on one stable minute within every five-minute window."""
+    return zlib.crc32(source_id.encode("utf-8")) % DISCOVERY_BUCKET_COUNT
+
+
 def aggregate_collection_results(
     results: list[dict[str, int] | BaseException],
 ) -> dict[str, int]:
@@ -1048,7 +1055,7 @@ async def collect_fast_news(repository: NewsRepository) -> dict[str, int]:
 
 
 async def collect_discovery_news(repository: NewsRepository) -> dict[str, int]:
-    """Refresh broad discovery and UI-managed Telegram every five minutes."""
+    """Refresh one stable fifth of broad sources each minute."""
     try:
         managed_sources = await asyncio.wait_for(
             repository.list_telegram_sources(),
@@ -1074,34 +1081,53 @@ async def collect_discovery_news(repository: NewsRepository) -> dict[str, int]:
     telegram_channels = {
         config.source_id: config for config in (*TELEGRAM_CHANNELS, *dynamic_channels)
     }
-    return await collect_source_tasks(
-        [
+    bucket = datetime.now(UTC).minute % DISCOVERY_BUCKET_COUNT
+    discovery_sources = (
+        *(("rss", config.config_key, config) for config in DISCOVERY_NEWS_FEEDS),
+        *(("telegram", config.source_id, config) for config in telegram_channels.values()),
+    )
+    selected_sources = [
+        source
+        for source in discovery_sources
+        if discovery_source_bucket(source[1]) == bucket
+    ]
+    selected_feeds = tuple(
+        config for kind, _, config in selected_sources if kind == "rss"
+    )
+    selected_channels = tuple(
+        config for kind, _, config in selected_sources if kind == "telegram"
+    )
+    tasks: list[tuple[str, Awaitable[dict[str, int]]]] = []
+    if selected_feeds:
+        tasks.append(
             (
                 "discovery_rss",
                 collect_feed_group(
                     repository,
-                    DISCOVERY_NEWS_FEEDS,
+                    selected_feeds,
                     stop_after_replays=10,
                     analyze_signals=False,
                     task_timeout_seconds=DISCOVERY_SOURCE_DEADLINE_SECONDS,
                 ),
+            )
+        )
+    tasks.extend(
+        (
+            config.source_id,
+            collect_telegram_channel(
+                repository,
+                config,
+                item_filter=is_market_event_candidate,
+                signal_filter=is_market_signal_candidate,
+                stop_after_replays=5,
+                analyze_signals=False,
+                executor=BACKGROUND_FEED_FETCH_EXECUTOR,
             ),
-            *[
-                (
-                    config.source_id,
-                    collect_telegram_channel(
-                        repository,
-                        config,
-                        item_filter=is_market_event_candidate,
-                        signal_filter=is_market_signal_candidate,
-                        stop_after_replays=5,
-                        analyze_signals=False,
-                        executor=BACKGROUND_FEED_FETCH_EXECUTOR,
-                    ),
-                )
-                for config in telegram_channels.values()
-            ],
-        ],
+        )
+        for config in selected_channels
+    )
+    return await collect_source_tasks(
+        tasks,
         deadline_seconds=COLLECTION_LANE_DEADLINE_SECONDS,
         task_timeout_seconds=DISCOVERY_SOURCE_DEADLINE_SECONDS + 1,
     )
