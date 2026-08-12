@@ -242,10 +242,13 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     repository: NewsRepository = application.state.news_repository
     await repository.start()
     application.state.repository_last_success_at = time.monotonic()
-    if CONTENT_SNAPSHOT_TTL_SECONDS > 0:
+    component = os.environ.get("EVENTEDGE_COMPONENT", "api")
+    if component != "worker" and CONTENT_SNAPSHOT_TTL_SECONDS > 0:
         # A provisioned API instance must not report startup complete before
         # its default read model is ready. Otherwise the first request races
         # the background projection and concurrent callers duplicate CPU work.
+        # Timer workers do not serve public reads, so building this model on
+        # every cold worker only delays collection and increases billed time.
         await refresh_content_snapshot_in_background(application)
     try:
         yield

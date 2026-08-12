@@ -68,6 +68,33 @@ def test_readiness_reuses_recent_repository_success(
     ready.assert_not_awaited()
 
 
+def test_worker_startup_skips_public_read_model_prewarm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+    application = SimpleNamespace(
+        state=SimpleNamespace(
+            news_repository=repository,
+            repository_last_success_at=None,
+            content_snapshot_inflight=None,
+        )
+    )
+    prewarm = AsyncMock()
+    monkeypatch.setenv("EVENTEDGE_COMPONENT", "worker")
+    monkeypatch.setattr(main_module, "CONTENT_SNAPSHOT_TTL_SECONDS", 60)
+    monkeypatch.setattr(main_module, "refresh_content_snapshot_in_background", prewarm)
+
+    async def scenario() -> None:
+        async with main_module.lifespan(application):
+            pass
+
+    asyncio.run(scenario())
+
+    repository.start.assert_awaited_once()
+    repository.stop.assert_awaited_once()
+    prewarm.assert_not_awaited()
+
+
 def test_expired_content_snapshot_is_served_while_refresh_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
