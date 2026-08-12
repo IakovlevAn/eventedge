@@ -193,7 +193,7 @@ def test_background_snapshot_refresh_precomputes_default_news_response(
     monkeypatch.setattr(main_module, "CONTENT_SNAPSHOT_TTL_SECONDS", 60)
     news: list[NewsRecord] = []
     signals: list[SignalRecord] = []
-    payload = {"data": [], "meta": {"limit": 20}}
+    payload = {"data": [], "meta": {"limit": 500}}
     refresh = AsyncMock(return_value=(news, signals))
     monkeypatch.setattr(main_module, "refresh_content_snapshot", refresh)
     monkeypatch.setattr(main_module, "build_news_response_payload", lambda *args, **kwargs: payload)
@@ -210,8 +210,36 @@ def test_background_snapshot_refresh_precomputes_default_news_response(
 
     asyncio.run(scenario())
 
-    assert application.state.news_response_cache["responses"][(None, None, 20)] is payload
+    assert application.state.news_response_cache["responses"][(None, None, 500)] is payload
     assert application.state.content_snapshot_inflight is None
+
+
+def test_news_response_cache_derives_limits_from_canonical_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "CONTENT_SNAPSHOT_TTL_SECONDS", 60)
+    news: list[object] = []
+    signals: list[object] = []
+    canonical = {
+        "data": [{"id": index} for index in range(500)],
+        "meta": {"limit": 500, "total": 994, "has_more": True, "next_cursor": None},
+    }
+    responses = {(None, None, 500): canonical}
+    application = SimpleNamespace(
+        state=SimpleNamespace(
+            news_response_cache={"news": news, "signals": signals, "responses": responses},
+            content_snapshot_inflight=None,
+        )
+    )
+
+    result = main_module.cached_news_response(application, news, signals, (None, None, 100))
+
+    assert result is not None
+    assert len(result["data"]) == 100
+    assert result["meta"]["limit"] == 100
+    assert result["meta"]["total"] == 994
+    assert result["meta"]["has_more"] is True
+    assert responses[(None, None, 100)] is result
 
 
 def test_concurrent_news_projection_is_single_flight(
