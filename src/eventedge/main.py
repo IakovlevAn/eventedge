@@ -397,7 +397,16 @@ async def refresh_content_snapshot(
 async def refresh_content_snapshot_in_background(application: FastAPI) -> None:
     current_task = asyncio.current_task()
     try:
-        await refresh_content_snapshot(application)
+        news, signals = await refresh_content_snapshot(application)
+        payload = await asyncio.to_thread(
+            build_news_response_payload,
+            news,
+            signals,
+            source_id=None,
+            scope=None,
+            limit=20,
+        )
+        store_news_response(application, news, signals, (None, None, 20), payload)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -446,6 +455,11 @@ def cached_news_response(
         or cached["news"] is not stored_news
         or cached["signals"] is not stored_signals
     ):
+        inflight = application.state.content_snapshot_inflight
+        if cached is not None and inflight is not None and not inflight.done():
+            stale_response = cached["responses"].get(key)
+            if stale_response is not None:
+                return stale_response
         application.state.news_response_cache = {
             "news": stored_news,
             "signals": stored_signals,
@@ -477,6 +491,127 @@ def store_news_response(
         }
         application.state.news_response_cache = cached
     cached["responses"][key] = payload
+
+
+def build_news_response_payload(
+    stored_news: list[NewsRecord],
+    stored_signals: list[SignalRecord],
+    *,
+    source_id: str | None,
+    scope: Literal["market", "sector", "company"] | None,
+    limit: int,
+) -> dict[str, object]:
+    """Render the expensive news projection independently of the request loop."""
+    if source_id is not None:
+        stored_news = [item for item in stored_news if item.source_id == source_id]
+    visible_news = public_news(stored_news)
+    news_by_id = {item.id: item for item in stored_news}
+    signals = normalize_signal_freshness(stored_signals, news_by_id)
+    signals_by_news: dict[str, list[dict[str, object]]] = {}
+    for signal in latest_model_signal_per_news(deduplicate_signals(signals)):
+        if signal.model_version != CURRENT_NEWS_MODEL_VERSION:
+            continue
+        signals_by_news.setdefault(signal.news_id, []).append(
+            {
+                "id": signal.id,
+                "ticker": signal.ticker,
+                "target": signal_target(signal.ticker),
+                "direction": signal.direction,
+                "action": signal.action,
+                "score": signal.score,
+                "confidence": signal.confidence,
+                "status": signal.status,
+            }
+        )
+    event_by_news = {
+        item.id: classify_news_event(
+            title=item.title,
+            content=item.content,
+            source_metadata=item.source_metadata,
+            related_signals=signals_by_news.get(item.id, []),
+        )
+        for item in visible_news
+    }
+    scoped_news = [
+        item for item in visible_news if scope is None or event_by_news[item.id]["scope"] == scope
+    ]
+    processing_rows = [item.as_api_dict()["processing"] for item in scoped_news]
+    signaled_count = sum(bool(signals_by_news.get(item.id)) for item in scoped_news)
+    relevant_count = sum(
+        bool(row["event_candidate"] or row["analysis_candidate"] or signals_by_news.get(item.id))
+        for item, row in zip(scoped_news, processing_rows, strict=True)
+    )
+    analysis_candidate_count = sum(
+        bool(row["analysis_candidate"] or signals_by_news.get(item.id))
+        for item, row in zip(scoped_news, processing_rows, strict=True)
+    )
+    processing_coverage = {
+        "stored": len(scoped_news),
+        "relevant": relevant_count,
+        "analysis_candidates": analysis_candidate_count,
+        "signaled": signaled_count,
+        "candidate_coverage_pct": (
+            round(analysis_candidate_count / relevant_count * 100, 1) if relevant_count else 0.0
+        ),
+        "signal_yield_pct": (
+            round(signaled_count / analysis_candidate_count * 100, 1)
+            if analysis_candidate_count
+            else 0.0
+        ),
+        "signal_model_version": CURRENT_NEWS_MODEL_VERSION,
+    }
+    news = scoped_news[:limit]
+    source_stats: dict[str, dict[str, object]] = {}
+    for item in scoped_news:
+        stat = source_stats.setdefault(
+            item.source_id,
+            {
+                "source_id": item.source_id,
+                "count": 0,
+                "signal_count": 0,
+                "last_published_at": item.as_api_dict()["published_at"],
+            },
+        )
+        stat["count"] = int(stat["count"]) + 1
+        stat["signal_count"] = int(stat["signal_count"]) + len(signals_by_news.get(item.id, []))
+    data = []
+    for item in news:
+        record = item.as_api_dict()
+        record["related_signals"] = signals_by_news.get(item.id, [])
+        record["event"] = event_by_news[item.id]
+        data.append(record)
+    scope_counts = {"market": 0, "sector": 0, "company": 0}
+    for event in event_by_news.values():
+        scope_counts[str(event["scope"])] += 1
+    return {
+        "data": data,
+        "meta": {
+            "limit": limit,
+            "total": len(scoped_news),
+            "has_more": len(scoped_news) > limit,
+            "next_cursor": None,
+            "scope": scope,
+            "scope_counts": scope_counts,
+            "processing_coverage": processing_coverage,
+            "last_ingested_at": (
+                max(item.received_at for item in visible_news)
+                .astimezone(UTC)
+                .isoformat()
+                .replace("+00:00", "Z")
+                if visible_news
+                else None
+            ),
+            "poll_interval_seconds": NEWS_COLLECTION_INTERVAL_SECONDS,
+            "managed_telegram_poll_interval_seconds": 300,
+            "client_refresh_interval_seconds": NEWS_CLIENT_REFRESH_INTERVAL_SECONDS,
+            "delivery_target_seconds": NEWS_DELIVERY_TARGET_SECONDS,
+            "collection_lanes": NEWS_COLLECTION_LANES,
+            "sources": sorted(
+                source_stats.values(),
+                key=lambda item: (-int(item["count"]), str(item["source_id"])),
+            ),
+        },
+    }
 
 
 def health_payload() -> dict[str, str]:
@@ -739,116 +874,14 @@ async def list_news(
     )
     if cached_response is not None:
         return JSONResponse(content=cached_response)
-    if source_id is not None:
-        stored_news = [item for item in stored_news if item.source_id == source_id]
-    visible_news = public_news(stored_news)
-    news_by_id = {item.id: item for item in stored_news}
-    signals = normalize_signal_freshness(stored_signals, news_by_id)
-    signals_by_news: dict[str, list[dict[str, object]]] = {}
-    for signal in latest_model_signal_per_news(deduplicate_signals(signals)):
-        if signal.model_version != CURRENT_NEWS_MODEL_VERSION:
-            continue
-        signals_by_news.setdefault(signal.news_id, []).append(
-            {
-                "id": signal.id,
-                "ticker": signal.ticker,
-                "target": signal_target(signal.ticker),
-                "direction": signal.direction,
-                "action": signal.action,
-                "score": signal.score,
-                "confidence": signal.confidence,
-                "status": signal.status,
-            }
-        )
-    event_by_news = {
-        item.id: classify_news_event(
-            title=item.title,
-            content=item.content,
-            source_metadata=item.source_metadata,
-            related_signals=signals_by_news.get(item.id, []),
-        )
-        for item in visible_news
-    }
-    scoped_news = [
-        item for item in visible_news if scope is None or event_by_news[item.id]["scope"] == scope
-    ]
-    processing_rows = [item.as_api_dict()["processing"] for item in scoped_news]
-    signaled_count = sum(bool(signals_by_news.get(item.id)) for item in scoped_news)
-    relevant_count = sum(
-        bool(row["event_candidate"] or row["analysis_candidate"] or signals_by_news.get(item.id))
-        for item, row in zip(scoped_news, processing_rows, strict=True)
+    response_content = await asyncio.to_thread(
+        build_news_response_payload,
+        stored_news,
+        stored_signals,
+        source_id=source_id,
+        scope=scope,
+        limit=limit,
     )
-    analysis_candidate_count = sum(
-        bool(row["analysis_candidate"] or signals_by_news.get(item.id))
-        for item, row in zip(scoped_news, processing_rows, strict=True)
-    )
-    processing_coverage = {
-        "stored": len(scoped_news),
-        "relevant": relevant_count,
-        "analysis_candidates": analysis_candidate_count,
-        "signaled": signaled_count,
-        "candidate_coverage_pct": (
-            round(analysis_candidate_count / relevant_count * 100, 1) if relevant_count else 0.0
-        ),
-        "signal_yield_pct": (
-            round(signaled_count / analysis_candidate_count * 100, 1)
-            if analysis_candidate_count
-            else 0.0
-        ),
-        "signal_model_version": CURRENT_NEWS_MODEL_VERSION,
-    }
-    news = scoped_news[:limit]
-    source_stats: dict[str, dict[str, object]] = {}
-    for item in scoped_news:
-        stat = source_stats.setdefault(
-            item.source_id,
-            {
-                "source_id": item.source_id,
-                "count": 0,
-                "signal_count": 0,
-                "last_published_at": item.as_api_dict()["published_at"],
-            },
-        )
-        stat["count"] = int(stat["count"]) + 1
-        stat["signal_count"] = int(stat["signal_count"]) + len(signals_by_news.get(item.id, []))
-    data = []
-    for item in news:
-        record = item.as_api_dict()
-        record["related_signals"] = signals_by_news.get(item.id, [])
-        record["event"] = event_by_news[item.id]
-        data.append(record)
-    scope_counts = {"market": 0, "sector": 0, "company": 0}
-    for event in event_by_news.values():
-        scope_counts[str(event["scope"])] += 1
-    response_content: dict[str, object] = {
-        "data": data,
-        "meta": {
-            "limit": limit,
-            "total": len(scoped_news),
-            "has_more": len(scoped_news) > limit,
-            "next_cursor": None,
-            "scope": scope,
-            "scope_counts": scope_counts,
-            "processing_coverage": processing_coverage,
-            "last_ingested_at": (
-                max(item.received_at for item in visible_news)
-                .astimezone(UTC)
-                .isoformat()
-                .replace("+00:00", "Z")
-                if visible_news
-                else None
-            ),
-            "poll_interval_seconds": NEWS_COLLECTION_INTERVAL_SECONDS,
-            "managed_telegram_poll_interval_seconds": 300,
-            "client_refresh_interval_seconds": NEWS_CLIENT_REFRESH_INTERVAL_SECONDS,
-            "delivery_target_seconds": NEWS_DELIVERY_TARGET_SECONDS,
-            "collection_lanes": NEWS_COLLECTION_LANES,
-            "sources": sorted(
-                source_stats.values(),
-                key=lambda item: (-int(item["count"]), str(item["source_id"])),
-            ),
-        },
-    }
     store_news_response(
         request.app,
         snapshot_news,
