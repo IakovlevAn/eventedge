@@ -102,6 +102,7 @@ BACKFILL_BATCH_LIMIT = min(40, max(1, int(os.environ.get("BACKFILL_BATCH_LIMIT",
 BACKFILL_CONCURRENCY = min(4, max(1, int(os.environ.get("BACKFILL_CONCURRENCY", "1"))))
 MAINTENANCE_DEADLINE_SECONDS = 20.0
 CONTENT_SNAPSHOT_TTL_SECONDS = 60 if os.environ.get("APP_ENV") == "prod" else 0
+CANONICAL_NEWS_RESPONSE_LIMIT = 500
 RECENT_REPOSITORY_SUCCESS_TTL_SECONDS = 120 if os.environ.get("APP_ENV") == "prod" else 0
 SOURCE_REGISTRY_TTL_SECONDS = 60.0
 SOURCE_REGISTRY_TIMEOUT_SECONDS = 2.0
@@ -409,9 +410,15 @@ async def refresh_content_snapshot_in_background(application: FastAPI) -> None:
             signals,
             source_id=None,
             scope=None,
-            limit=20,
+            limit=CANONICAL_NEWS_RESPONSE_LIMIT,
         )
-        store_news_response(application, news, signals, (None, None, 20), payload)
+        store_news_response(
+            application,
+            news,
+            signals,
+            (None, None, CANONICAL_NEWS_RESPONSE_LIMIT),
+            payload,
+        )
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -462,7 +469,7 @@ def cached_news_response(
     ):
         inflight = application.state.content_snapshot_inflight
         if cached is not None and inflight is not None and not inflight.done():
-            stale_response = cached["responses"].get(key)
+            stale_response = cached_news_response_for_key(cached["responses"], key)
             if stale_response is not None:
                 return stale_response
         application.state.news_response_cache = {
@@ -471,7 +478,28 @@ def cached_news_response(
             "responses": {},
         }
         return None
-    return cached["responses"].get(key)
+    return cached_news_response_for_key(cached["responses"], key)
+
+
+def cached_news_response_for_key(
+    responses: dict[tuple[str | None, str | None, int], dict[str, object]],
+    key: tuple[str | None, str | None, int],
+) -> dict[str, object] | None:
+    response = responses.get(key)
+    if response is not None:
+        return response
+    source_id, scope, limit = key
+    if source_id is not None or scope is not None:
+        return None
+    canonical = responses.get((None, None, CANONICAL_NEWS_RESPONSE_LIMIT))
+    if canonical is None:
+        return None
+    meta = dict(canonical["meta"])
+    total = int(meta["total"])
+    meta.update({"limit": limit, "has_more": total > limit, "next_cursor": None})
+    derived = {"data": list(canonical["data"][:limit]), "meta": meta}
+    responses[key] = derived
+    return derived
 
 
 def store_news_response(
