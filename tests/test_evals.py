@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from eventedge.evals import (
+    EVALUATION_METHODOLOGY_VERSION,
     build_assessment,
     deduplicate_eval_events,
     deduplicate_eval_signals,
@@ -48,7 +49,7 @@ def market_snapshot() -> dict[str, object]:
 
 
 def reporting_news() -> NewsRecord:
-    timestamp = datetime(2026, 8, 3, 10, tzinfo=UTC)
+    timestamp = datetime(2026, 8, 3, 7, tzinfo=UTC)
     return NewsRecord(
         id="news_report",
         source_id="interfax",
@@ -213,18 +214,116 @@ def test_eval_analytics_and_exports_preserve_signal_outcomes() -> None:
         {"news_report": reporting_news()},
     )
 
-    assert outcome["returns"] == {"1h": 1.0, "4h": 3.0, "1d": 3.0, "3d": 6.0}
+    assert outcome["returns"] == {"1h": 1.0, "4h": None, "1d": 3.0, "3d": 6.0}
+    assert outcome["evaluation_methodology"] == EVALUATION_METHODOLOGY_VERSION
+    assert outcome["eligibility"]["eligible"] is True
+    assert outcome["entry"]["delay_seconds"] == 600
+    assert outcome["horizon_observations"]["4h"]["timely"] is False
     assert outcome["verdict"] is True
     assert summary["hit_rate_pct"] == 100.0
-    assert summary["median_signed_return_pct"] == 3.0
+    assert summary["median_signed_return_pct"] == 1.0
     assert breakdowns["by_horizon"][0]["hit_rate_pct"] == 100.0
     assert relationships[0]["value"] is None
     assert quality_series[-1]["cumulative_hit_rate_pct"] == 100.0
     assert outcome_rows[0]["return_3d_pct"] == 6.0
-    assert outcome_rows[0]["return_4h_pct"] == 3.0
+    assert outcome_rows[0]["return_4h_pct"] is None
     assert timeseries_rows[-1]["offset_minutes"] == 3 * 24 * 60
     assert timeseries_rows[-1]["signed_return_pct"] == 6.0
     assert truncated is False
+
+
+def test_retrospective_signal_is_excluded_from_quality_metrics() -> None:
+    signal = replace(
+        signal_record(),
+        created_at=signal_record().as_of + timedelta(days=1),
+    )
+    news = replace(
+        reporting_news(),
+        created_at=signal.created_at,
+    )
+    outcome = evaluate_signal(signal, [], news)
+    summary = eval_summary([outcome])
+
+    assert outcome["status"] == "excluded"
+    assert outcome["eligibility"]["reason"] == "retrospective_signal"
+    assert outcome["verdict"] is None
+    assert summary["signals_total"] == 1
+    assert summary["eligible"] == 0
+    assert summary["excluded"] == 1
+    assert summary["exclusion_reasons"] == {"retrospective_signal": 1}
+    assert summary["coverage_pct"] == 0.0
+
+
+def test_eval_never_uses_evidence_received_after_signal_creation() -> None:
+    signal = signal_record()
+    future_evidence = replace(
+        reporting_news(),
+        received_at=signal.created_at + timedelta(seconds=1),
+    )
+
+    outcome = evaluate_signal(signal, [], future_evidence)
+
+    assert outcome["status"] == "excluded"
+    assert outcome["eligibility"]["reason"] == "evidence_received_after_signal"
+
+
+def test_horizon_return_requires_a_timely_market_observation() -> None:
+    signal = signal_record()
+    entry = signal.created_at + timedelta(minutes=10)
+    candles = [
+        {"begin": entry.isoformat(), "open": 100, "close": 100},
+        {
+            "begin": (entry + timedelta(hours=4, minutes=20)).isoformat(),
+            "open": 102,
+            "close": 103,
+        },
+        {
+            "begin": (entry + timedelta(days=1)).isoformat(),
+            "open": 104,
+            "close": 105,
+        },
+    ]
+
+    outcome = evaluate_signal(signal, candles, reporting_news())
+
+    assert outcome["returns"]["4h"] == 2.0
+    assert outcome["horizon_observations"]["4h"] == {
+        "target_at": (entry + timedelta(hours=4)).isoformat().replace("+00:00", "Z"),
+        "observed_at": (entry + timedelta(hours=4, minutes=20))
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "delay_seconds": 1200,
+        "timely": True,
+        "price_field": "open",
+    }
+    assert outcome["returns"]["1h"] is None
+    assert outcome["horizon_observations"]["1h"]["timely"] is False
+
+
+def test_eval_entry_is_after_the_signal_was_actually_created() -> None:
+    signal = replace(
+        signal_record(),
+        created_at=signal_record().as_of + timedelta(minutes=5),
+    )
+    candles = [
+        {"begin": signal.as_of.isoformat(), "open": 90, "close": 100},
+        {
+            "begin": (signal.as_of + timedelta(minutes=10)).isoformat(),
+            "open": 110,
+            "close": 111,
+        },
+    ]
+
+    outcome = evaluate_signal(signal, candles, reporting_news())
+
+    assert outcome["eligibility"]["decision_at"] == signal.created_at.isoformat().replace(
+        "+00:00", "Z"
+    )
+    assert outcome["entry"] == {
+        "at": (signal.as_of + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+        "price": 110.0,
+        "delay_seconds": 300,
+    }
 
 
 def test_eval_breakdowns_have_only_directional_signal_groups() -> None:

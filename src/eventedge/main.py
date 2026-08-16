@@ -48,6 +48,9 @@ from eventedge.collectors import (
 from eventedge.configs.collection import load_collection_config
 from eventedge.evals import (
     ASSESSMENT_MODEL_VERSION,
+    EVALUATION_METHODOLOGY_VERSION,
+    MAX_HORIZON_OBSERVATION_LAG,
+    MAX_LIVE_PROCESSING_LAG,
     build_assessment,
     deduplicate_eval_events,
     deduplicate_eval_signals,
@@ -56,6 +59,7 @@ from eventedge.evals import (
     eval_relationships,
     eval_summary,
     evaluate_signal,
+    evaluation_eligibility,
     event_time_export_rows,
     outcome_export_rows,
 )
@@ -1747,6 +1751,40 @@ async def list_assessments(
     )
 
 
+def evaluation_epoch_methodology(epoch: EvaluationEpochRecord) -> str:
+    versions = {
+        str(outcome.get("evaluation_methodology"))
+        for outcome in epoch.outcomes
+        if outcome.get("evaluation_methodology")
+    }
+    return versions.pop() if len(versions) == 1 else "legacy-or-mixed"
+
+
+def latest_evaluation_epochs(
+    epochs: list[EvaluationEpochRecord],
+) -> list[EvaluationEpochRecord]:
+    """Expose one epoch per model/config while retaining old snapshots in storage."""
+    selected: dict[tuple[str, int], EvaluationEpochRecord] = {}
+    for epoch in epochs:
+        key = (epoch.model_version, epoch.config_version)
+        previous = selected.get(key)
+        if previous is None or (
+            evaluation_epoch_methodology(epoch) == EVALUATION_METHODOLOGY_VERSION,
+            epoch.evaluated_at,
+            epoch.epoch_id,
+        ) > (
+            evaluation_epoch_methodology(previous) == EVALUATION_METHODOLOGY_VERSION,
+            previous.evaluated_at,
+            previous.epoch_id,
+        ):
+            selected[key] = epoch
+    return sorted(
+        selected.values(),
+        key=lambda epoch: (epoch.evaluated_at, epoch.epoch_id),
+        reverse=True,
+    )
+
+
 async def _load_evaluation_material(
     repository: NewsRepository,
     market_data_client: MoexMarketDataClient,
@@ -1783,17 +1821,26 @@ async def _load_evaluation_material(
         news_by_id,
         preserve_model_epochs=True,
     )[:200]
-    epoch_by_model = {
-        (epoch.model_version, epoch.config_version): epoch for epoch in stored_epochs
-    }
-    complete_outcomes = {
-        str(outcome["signal_id"]): dict(outcome)
+    current_method_epochs = [
+        epoch
         for epoch in stored_epochs
-        for outcome in epoch.outcomes
-        if _is_complete_eval_outcome(outcome)
-    }
+        if evaluation_epoch_methodology(epoch) == EVALUATION_METHODOLOGY_VERSION
+    ]
+    epoch_by_model: dict[tuple[str, int], EvaluationEpochRecord] = {}
+    for epoch in current_method_epochs:
+        epoch_by_model.setdefault((epoch.model_version, epoch.config_version), epoch)
+    complete_outcomes: dict[str, dict[str, object]] = {}
+    for epoch in current_method_epochs:
+        for outcome in epoch.outcomes:
+            if _is_complete_eval_outcome(outcome):
+                complete_outcomes.setdefault(str(outcome["signal_id"]), dict(outcome))
     refresh_signals = [signal for signal in signals if signal.id not in complete_outcomes]
-    tickers = list(dict.fromkeys(signal.ticker for signal in refresh_signals))
+    market_refresh_signals = [
+        signal
+        for signal in refresh_signals
+        if evaluation_eligibility(signal, news_by_id.get(signal.news_id))["eligible"]
+    ]
+    tickers = list(dict.fromkeys(signal.ticker for signal in market_refresh_signals))
     candle_results = await asyncio.gather(
         *(market_data_client.candles(ticker, interval=10, lookback_days=14) for ticker in tickers),
         return_exceptions=True,
@@ -1869,7 +1916,10 @@ async def _load_evaluation_material(
             EvaluationEpochRecord(
                 epoch_id=stable_id(
                     "eval_",
-                    f"{model_version}\x00{config_version}",
+                    (
+                        f"{model_version}\x00{config_version}\x00"
+                        f"{EVALUATION_METHODOLOGY_VERSION}"
+                    ),
                 ),
                 model_version=model_version,
                 config_version=config_version,
@@ -1889,10 +1939,23 @@ async def _load_evaluation_material(
 
 def _is_complete_eval_outcome(outcome: Mapping[str, object]) -> bool:
     returns = outcome.get("returns")
+    eligibility = outcome.get("eligibility")
+    if (
+        outcome.get("evaluation_methodology") != EVALUATION_METHODOLOGY_VERSION
+        or not isinstance(eligibility, dict)
+    ):
+        return False
+    if outcome.get("status") == "excluded":
+        return eligibility.get("eligible") is False and bool(eligibility.get("reason"))
+    observations = outcome.get("horizon_observations")
+    three_day = observations.get("3d") if isinstance(observations, dict) else None
     return (
         outcome.get("status") == "evaluated"
+        and eligibility.get("eligible") is True
         and isinstance(returns, dict)
         and returns.get("3d") is not None
+        and isinstance(three_day, dict)
+        and three_day.get("timely") is True
     )
 
 
@@ -1983,6 +2046,7 @@ def directional_epoch_outcomes(
 def evaluation_epoch_meta(epoch: EvaluationEpochRecord) -> dict[str, object]:
     meta = epoch.as_meta_dict()
     meta["signals"] = len(directional_epoch_outcomes(epoch))
+    meta["evaluation_methodology"] = evaluation_epoch_methodology(epoch)
     return meta
 
 
@@ -1995,7 +2059,9 @@ async def list_evals(
     ] = None,
 ) -> JSONResponse:
     repository: NewsRepository = request.app.state.news_repository
-    epochs = await repository.list_evaluation_epochs(include_observations=False)
+    epochs = latest_evaluation_epochs(
+        await repository.list_evaluation_epochs(include_observations=False)
+    )
     selected_model_version = model_version or CURRENT_NEWS_MODEL_VERSION
     selected_epoch = next(
         (epoch for epoch in epochs if epoch.model_version == selected_model_version),
@@ -2019,12 +2085,20 @@ async def list_evals(
                 "primary_horizon": "4h",
                 "evaluation_window": "1h / 4h for product metrics; raw 1d / 3d retained",
                 "evaluation_scope": "directional_signals_only",
+                "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
+                "live_processing_lag_limit_seconds": int(
+                    MAX_LIVE_PROCESSING_LAG.total_seconds()
+                ),
+                "horizon_observation_lag_limit_seconds": int(
+                    MAX_HORIZON_OBSERVATION_LAG.total_seconds()
+                ),
                 "snapshot_status": "ready" if selected_epoch else "pending",
                 "selected_model_version": selected_model_version,
                 "model_epochs": [evaluation_epoch_meta(epoch) for epoch in epochs],
                 "warning": (
-                    "Prototype retrospective on the available MOEX window; "
-                    "it is not a point-in-time calibrated backtest or proof of alpha."
+                    "Only point-in-time timing-eligible live signals enter quality metrics. "
+                    "Returns use raw MOEX candles without fees, slippage or corporate-action "
+                    "adjustment; this is not a calibrated backtest or proof of alpha."
                 ),
             },
         }
@@ -2042,7 +2116,7 @@ async def export_evals(
     ] = "all",
 ) -> Response:
     repository: NewsRepository = request.app.state.news_repository
-    epochs = await repository.list_evaluation_epochs()
+    epochs = latest_evaluation_epochs(await repository.list_evaluation_epochs())
     selected_epochs = [
         epoch for epoch in epochs if model_version == "all" or epoch.model_version == model_version
     ]
@@ -2063,6 +2137,11 @@ async def export_evals(
             "signal_id",
             "ticker",
             "signal_as_of",
+            "signal_data_cutoff_at",
+            "signal_created_at",
+            "decision_at",
+            "processing_lag_seconds",
+            "evaluation_methodology",
             "direction",
             "score",
             "confidence",
@@ -2073,6 +2152,7 @@ async def export_evals(
             "news_source_id",
             "entry_at",
             "entry_price",
+            "entry_delay_seconds",
             "observation_at",
             "offset_minutes",
             "open",
@@ -2094,6 +2174,13 @@ async def export_evals(
             "signal_id",
             "ticker",
             "signal_as_of",
+            "signal_data_cutoff_at",
+            "signal_created_at",
+            "decision_at",
+            "processing_lag_seconds",
+            "evaluation_methodology",
+            "evaluation_eligible",
+            "exclusion_reason",
             "direction",
             "score",
             "confidence",
@@ -2109,10 +2196,19 @@ async def export_evals(
             "delivery_lag_seconds",
             "entry_at",
             "entry_price",
+            "entry_delay_seconds",
             "return_1h_pct",
             "return_4h_pct",
             "return_1d_pct",
             "return_3d_pct",
+            "observed_1h_at",
+            "observed_4h_at",
+            "observed_1d_at",
+            "observed_3d_at",
+            "observation_1h_delay_seconds",
+            "observation_4h_delay_seconds",
+            "observation_1d_delay_seconds",
+            "observation_3d_delay_seconds",
             "latest_price",
             "latest_return_pct",
             "verdict",

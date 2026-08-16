@@ -2,7 +2,7 @@ import asyncio
 import time
 from contextlib import suppress
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import eventedge.main as main_module
+from eventedge.evals import EVALUATION_METHODOLOGY_VERSION
 from eventedge.main import app
 from eventedge.storage import (
     EvaluationEpochRecord,
@@ -1223,11 +1224,12 @@ def test_evals_endpoint_exposes_analysis_and_downloads() -> None:
 def test_complete_eval_outcome_is_reused_without_moex_request() -> None:
     async def scenario() -> None:
         repository = MemoryNewsRepository()
+        timestamp = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=1)
         document = NewsDocument(
             source_id="interfax",
             external_id="incremental-eval-sber",
-            published_at=datetime(2026, 8, 1, 10, tzinfo=UTC),
-            received_at=datetime(2026, 8, 1, 10, 1, tzinfo=UTC),
+            published_at=timestamp,
+            received_at=timestamp,
             title="Сбербанк опубликовал сильную отчётность",
             url="https://example.com/incremental-eval-sber",
             content="Чистая прибыль выросла на 20% и оказалась выше ожиданий.",
@@ -1249,8 +1251,16 @@ def test_complete_eval_outcome_is_reused_without_moex_request() -> None:
             "signal_id": signal.id,
             "ticker": signal.ticker,
             "direction": signal.direction,
+            "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
+            "eligibility": {
+                "eligible": True,
+                "reason": None,
+                "decision_at": signal.created_at.isoformat(),
+                "processing_lag_seconds": 60,
+            },
             "status": "evaluated",
             "returns": {"1h": 0.2, "4h": 0.5, "1d": 0.8, "3d": 1.1},
+            "horizon_observations": {"3d": {"timely": True}},
             "verdict": True,
         }
         cached_observation = {
@@ -1283,6 +1293,85 @@ def test_complete_eval_outcome_is_reused_without_moex_request() -> None:
         assert candles == {}
         current = next(epoch for epoch in epochs if epoch.model_version == signal.model_version)
         assert current.observations == (cached_observation,)
+
+    asyncio.run(scenario())
+
+
+def test_legacy_or_incomplete_eval_outcome_is_not_treated_as_settled() -> None:
+    legacy = {
+        "status": "evaluated",
+        "returns": {"3d": 1.0},
+    }
+    missing_timing_audit = {
+        **legacy,
+        "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
+        "eligibility": {"eligible": True},
+    }
+
+    assert main_module._is_complete_eval_outcome(legacy) is False
+    assert main_module._is_complete_eval_outcome(missing_timing_audit) is False
+
+
+def test_current_eval_method_is_selected_without_deleting_legacy_epoch() -> None:
+    current = EvaluationEpochRecord(
+        epoch_id="eval_current_method",
+        model_version="signal-engine-0.6.1",
+        config_version=1,
+        evaluated_at=datetime(2026, 8, 15, tzinfo=UTC),
+        outcomes=(
+            {
+                "signal_id": "sig_current",
+                "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
+            },
+        ),
+        observations=(),
+    )
+    newer_legacy = replace(
+        current,
+        epoch_id="eval_legacy",
+        evaluated_at=datetime(2026, 8, 16, tzinfo=UTC),
+        outcomes=({"signal_id": "sig_legacy"},),
+    )
+
+    selected = main_module.latest_evaluation_epochs([newer_legacy, current])
+
+    assert [epoch.epoch_id for epoch in selected] == ["eval_current_method"]
+    assert main_module.evaluation_epoch_methodology(newer_legacy) == "legacy-or-mixed"
+
+
+def test_retrospective_signal_is_excluded_without_moex_request() -> None:
+    async def scenario() -> None:
+        repository = MemoryNewsRepository()
+        historical = datetime.now(UTC).replace(microsecond=0) - timedelta(days=2)
+        await repository.ingest(
+            "retrospective-eval-key",
+            NewsDocument(
+                source_id="interfax",
+                external_id="retrospective-eval-sber",
+                published_at=historical,
+                received_at=historical + timedelta(minutes=1),
+                title="Сбербанк опубликовал сильную отчётность",
+                url="https://example.com/retrospective-eval-sber",
+                content="Чистая прибыль выросла на 20% и оказалась выше ожиданий.",
+                language="ru",
+                source_metadata={"signal_candidate": True},
+                payload_hash="retrospective-eval-sber-payload",
+            ),
+        )
+
+        class NoMoexExpected:
+            async def candles(self, *args: object, **kwargs: object) -> dict[str, object]:
+                raise AssertionError("retrospective signals must not request market outcomes")
+
+        outcomes, _, candles, _, _ = await main_module._load_evaluation_material(
+            repository,
+            NoMoexExpected(),  # type: ignore[arg-type]
+        )
+
+        assert candles == {}
+        assert outcomes[0]["status"] == "excluded"
+        assert outcomes[0]["eligibility"]["reason"] == "retrospective_signal"
+        assert outcomes[0]["evaluation_methodology"] == EVALUATION_METHODOLOGY_VERSION
 
     asyncio.run(scenario())
 
