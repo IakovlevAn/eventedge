@@ -262,6 +262,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          page="$(curl --fail --silent --show-error --max-time 10 "${EVENTEDGE_API_URL}/")"
-          grep -Fq '<title>EventEdge — сигналы российского рынка</title>' <<<"$page"
-          echo "Production web application is ready"
+          for attempt in {1..3}; do
+            if page="$(curl --fail --silent --show-error \
+              --max-time 15 \
+              "${EVENTEDGE_API_URL}/")" \
+              && grep -Fq \
+                '<title>EventEdge — сигналы российского рынка</title>' \
+                <<<"$page"; then
+              echo "Production web application is ready"
+              exit 0
+            fi
+            if [[ "$attempt" == "3" ]]; then break; fi
+            echo "Web application smoke attempt ${attempt}/3 did not settle"
+            sleep 2
+          done
+          echo "Production web application is unhealthy" >&2
+          exit 1
