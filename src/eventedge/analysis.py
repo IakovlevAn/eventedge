@@ -83,6 +83,10 @@ class SemanticFeatures(BaseModel):
     event_type: EventType
     instruments: Annotated[list[InstrumentMention], Field(max_length=20)]
     facts: Annotated[list[ExtractedFact], Field(max_length=20)]
+    evidence_quotes: Annotated[
+        tuple[Annotated[str, Field(min_length=8, max_length=500)], ...],
+        Field(max_length=6),
+    ] = ()
     polarity: Annotated[float, Field(ge=-1, le=1)]
     materiality: Annotated[float, Field(ge=0, le=1)]
     novelty: Annotated[float, Field(ge=0, le=1)]
@@ -125,7 +129,7 @@ class BaselineScoringConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     model_version: Literal["signal-engine-0.6.1"] = "signal-engine-0.6.1"
-    config_version: Annotated[int, Field(ge=1)] = 1
+    config_version: Annotated[int, Field(ge=1)] = 2
     positive_threshold: Annotated[float, Field(ge=0, le=100)] = 18
     negative_threshold: Annotated[float, Field(ge=-100, le=0)] = -18
     calibration_scale: Annotated[float, Field(gt=0, le=1)] = 0.55
