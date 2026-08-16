@@ -72,6 +72,12 @@ from eventedge.market import (
     MoexMarketDataClient,
     scenario_range,
 )
+from eventedge.ml_router import (
+    MlRouterDecision,
+    MlRouterMode,
+    MlRouterRuntime,
+    runtime_from_environment,
+)
 from eventedge.source_registry import configured_sources
 from eventedge.storage import (
     EvaluationEpochRecord,
@@ -311,6 +317,7 @@ class RequestIdMiddleware:
 
 
 app.state.news_repository = repository_from_environment(os.environ)
+app.state.ml_router_runtime = runtime_from_environment(os.environ)
 app.state.market_data_client = MoexMarketDataClient()
 app.state.evaluation_material_cache = None
 app.state.evaluation_material_inflight = None
@@ -941,6 +948,7 @@ async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONRespons
                         repository,
                         limit=BACKFILL_BATCH_LIMIT,
                         concurrency=BACKFILL_CONCURRENCY,
+                        ml_router=request.app.state.ml_router_runtime,
                     )
                     outcomes, _, _, _, epochs = await _load_evaluation_material(
                         repository,
@@ -1262,6 +1270,7 @@ async def reprocess_signal_candidates_batch(
     limit: int,
     news_ids: list[str] | None = None,
     concurrency: int = BACKFILL_CONCURRENCY,
+    ml_router: MlRouterRuntime | None = None,
 ) -> dict[str, object]:
     """Re-run current candidate policy in a bounded, idempotent batch."""
     stored_news, stored_signals = await asyncio.gather(
@@ -1280,7 +1289,7 @@ async def reprocess_signal_candidates_batch(
         if signal.model_version == CURRENT_NEWS_MODEL_VERSION
     }
     requested_news_ids = set(news_ids or [])
-    candidates: list[tuple[NewsRecord, RssItem]] = []
+    candidates: list[tuple[NewsRecord, RssItem, MlRouterDecision | None]] = []
     for item in public_news(stored_news):
         if requested_news_ids and item.id not in requested_news_ids:
             continue
@@ -1300,16 +1309,29 @@ async def reprocess_signal_candidates_batch(
             else (),
         )
         if is_signal_analysis_candidate(candidate):
-            candidates.append((item, candidate))
+            decision = (
+                ml_router.predict(
+                    title=candidate.title,
+                    content=candidate.content,
+                    categories=candidate.categories,
+                )
+                if ml_router is not None
+                else None
+            )
+            candidates.append((item, candidate, decision))
 
     selected = candidates[:limit]
     semaphore = asyncio.Semaphore(min(max(concurrency, 1), 4))
 
-    async def reprocess_one(item: NewsRecord, candidate: RssItem) -> dict[str, object]:
+    async def reprocess_one(
+        item: NewsRecord,
+        candidate: RssItem,
+        decision: MlRouterDecision | None,
+    ) -> dict[str, object]:
         async with semaphore:
             for attempt in range(2):
                 try:
-                    return await ingest_reprocessed(item, candidate)
+                    return await ingest_reprocessed(item, candidate, decision)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -1318,7 +1340,11 @@ async def reprocess_signal_candidates_batch(
                     await asyncio.sleep(1.5)
             raise AssertionError("unreachable retry loop")
 
-    async def ingest_reprocessed(item: NewsRecord, candidate: RssItem) -> dict[str, object]:
+    async def ingest_reprocessed(
+        item: NewsRecord,
+        candidate: RssItem,
+        decision: MlRouterDecision | None,
+    ) -> dict[str, object]:
         features = RuleBasedNewsExtractor().extract(
             NewsAnalysisInput(
                 source_id=item.source_id,
@@ -1329,22 +1355,38 @@ async def reprocess_signal_candidates_batch(
         )
         direct_signal_candidate = is_market_signal_candidate(candidate)
         event_candidate = is_market_event_candidate(candidate)
+        ml_rejected = bool(
+            ml_router is not None
+            and ml_router.mode is MlRouterMode.ENFORCE
+            and decision is not None
+            and decision.action == "reject"
+        )
         metadata = dict(item.source_metadata)
         metadata.update(
             {
                 "processing_status": "processed",
-                "signal_candidate": direct_signal_candidate,
-                "analysis_candidate": True,
+                "signal_candidate": direct_signal_candidate and not ml_rejected,
+                "analysis_candidate": not ml_rejected,
                 "event_candidate": event_candidate,
                 "classification_status": (
-                    "signal_candidate" if direct_signal_candidate else "semantic_candidate"
+                    "ml_rejected"
+                    if ml_rejected
+                    else (
+                        "signal_candidate"
+                        if direct_signal_candidate
+                        else "semantic_candidate"
+                    )
                 ),
                 "classification_reason": (
-                    "eligible_for_direct_signal_analysis"
-                    if direct_signal_candidate
-                    else "eligible_for_semantic_signal_analysis"
+                    "ml_router_high_confidence_irrelevant"
+                    if ml_rejected
+                    else (
+                        "eligible_for_direct_signal_analysis"
+                        if direct_signal_candidate
+                        else "eligible_for_semantic_signal_analysis"
+                    )
                 ),
-                "classification_version": "candidate-gate-0.4.0",
+                "classification_version": "candidate-gate-0.5.0",
                 "reprocess_version": CURRENT_NEWS_MODEL_VERSION,
                 "tickers": [
                     instrument.ticker
@@ -1353,6 +1395,8 @@ async def reprocess_signal_candidates_batch(
                 ],
             }
         )
+        if ml_router is not None and decision is not None:
+            metadata["ml_router"] = decision.as_metadata(mode=ml_router.mode)
         hash_payload = {
             "source_id": item.source_id,
             "external_id": item.external_id,
@@ -1367,7 +1411,7 @@ async def reprocess_signal_candidates_batch(
         payload_hash = canonical_payload_hash(hash_payload)
         result = await repository.ingest(
             (
-                f"reprocess:v4:{item.id}:{CURRENT_NEWS_MODEL_VERSION}:"
+                f"reprocess:v5:{item.id}:{CURRENT_NEWS_MODEL_VERSION}:"
                 f"{payload_hash[:16]}"
             ),
             NewsDocument(
@@ -1382,22 +1426,26 @@ async def reprocess_signal_candidates_batch(
                 source_metadata=metadata,
                 payload_hash=payload_hash,
             ),
-            generate_signals=True,
+            generate_signals=not ml_rejected,
         )
         return {
             "news_id": item.id,
             "job_id": result.job.id,
             "result_ref": result.job.result_ref,
             "replayed": result.replayed,
+            **({"ml_router_action": decision.action} if decision is not None else {}),
         }
 
     results = await asyncio.gather(
-        *(reprocess_one(item, candidate) for item, candidate in selected),
+        *(
+            reprocess_one(item, candidate, decision)
+            for item, candidate, decision in selected
+        ),
         return_exceptions=True,
     )
     completed = [result for result in results if isinstance(result, dict)]
     failed = [type(result).__name__ for result in results if isinstance(result, BaseException)]
-    for (item, _), result in zip(selected, results, strict=True):
+    for (item, _, _), result in zip(selected, results, strict=True):
         if isinstance(result, BaseException):
             logger.warning(
                 "Signal reprocess failed news_id=%s error=%s",
@@ -1416,6 +1464,7 @@ async def reprocess_signal_candidates_batch(
             "batch_limit": limit,
             "concurrency": min(max(concurrency, 1), 4),
             "candidate_policy": "targetable-economic-0.4.1",
+            **({"ml_router": ml_router.status()} if ml_router is not None else {}),
         },
     }
 
@@ -1450,6 +1499,7 @@ async def reprocess_signal_candidates(
         repository,
         limit=payload.limit,
         news_ids=payload.news_ids,
+        ml_router=request.app.state.ml_router_runtime,
     )
     request.app.state.evaluation_material_cache = None
     invalidate_content_snapshot(request)

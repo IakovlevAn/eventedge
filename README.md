@@ -57,6 +57,34 @@ Gate требует 32 примера и precision/recall `1.0`. Это конт
 human ground truth. Для реальной оценки используется описанный выше JSONL с
 `label_source=human`.
 
+## Локальный ML-router перед LLM
+
+Опциональный `ml-router-nb-0.1.0` работает после deterministic signal-router и
+до LLM. Он использует только заголовок, первые 2500 символов текста и категории,
+доступные на момент обработки новости. Рыночные outcomes, результаты LLM и
+будущие данные не входят в признаки. Vocabulary и веса строятся только на
+chronological train partition; одинаковые `event_id` не могут попасть в разные
+partition.
+
+```bash
+PYTHONPATH=src uv run python -m scripts.train_ml_router \
+  --dataset path/to/human-quality-labels.jsonl \
+  --output path/to/ml-router.json
+```
+
+Команда полностью локальная: она не вызывает API, не запускает cloud job и не
+пишет в production. По умолчанию принимаются только human labels. Флаг
+`--allow-synthetic` предназначен для fixtures; полученный артефакт помечается
+`synthetic_test` и запрещён в production.
+
+Runtime по умолчанию выключен (`ML_ROUTER_MODE=disabled`). Для наблюдения без
+изменения маршрута задаются `ML_ROUTER_MODE=shadow` и
+`ML_ROUTER_ARTIFACT_PATH`. В `enforce` разрешено только уверенное отклонение
+нерелевантной новости; accept и abstain продолжают идти в LLM. Startup
+останавливается, если артефакт отсутствует, повреждён или не проходит minimum
+data/precision/recall/coverage gate. В этом PR production-артефакт и
+автоматический backfill не добавляются.
+
 ## События и provenance
 
 `GET /v1/events` детерминированно объединяет подтверждающие публикации одного
