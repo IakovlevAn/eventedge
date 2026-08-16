@@ -48,8 +48,8 @@ class LlmSemanticPayload(BaseModel):
     event_type: EventType
     facts: Annotated[list[ExtractedFact], Field(max_length=12)]
     evidence_quotes: Annotated[
-        list[Annotated[str, Field(min_length=8, max_length=500)]],
-        Field(min_length=1, max_length=6),
+        list[Annotated[str, Field(min_length=8, max_length=240)]],
+        Field(min_length=1, max_length=3),
     ]
     polarity: Annotated[float, Field(ge=-1, le=1)]
     materiality: Annotated[float, Field(ge=0, le=1)]

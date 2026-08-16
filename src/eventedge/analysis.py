@@ -84,8 +84,8 @@ class SemanticFeatures(BaseModel):
     instruments: Annotated[list[InstrumentMention], Field(max_length=20)]
     facts: Annotated[list[ExtractedFact], Field(max_length=20)]
     evidence_quotes: Annotated[
-        tuple[Annotated[str, Field(min_length=8, max_length=500)], ...],
-        Field(max_length=6),
+        tuple[Annotated[str, Field(min_length=8, max_length=240)], ...],
+        Field(max_length=3),
     ] = ()
     polarity: Annotated[float, Field(ge=-1, le=1)]
     materiality: Annotated[float, Field(ge=0, le=1)]
