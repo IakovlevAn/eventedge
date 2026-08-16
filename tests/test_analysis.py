@@ -41,6 +41,7 @@ def test_positive_company_results_create_algorithmic_up_signal() -> None:
     assert signals[0].score == 50.5
     assert signals[0].confidence == pytest.approx(0.9063)
     assert signals[0].model_version == "signal-engine-0.6.1"
+    assert signals[0].config_version == 2
     assert signals[0].extractor_version == "rules-0.1.0"
 
 
