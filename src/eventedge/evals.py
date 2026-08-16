@@ -11,6 +11,9 @@ from eventedge.storage import NewsRecord, SignalRecord, to_rfc3339
 
 ASSESSMENT_MODEL_VERSION = "hybrid-market-0.2.1"
 ASSESSMENT_CONFIG_VERSION = 2
+EVALUATION_METHODOLOGY_VERSION = "market-outcome-0.2.0"
+MAX_LIVE_PROCESSING_LAG = timedelta(minutes=15)
+MAX_HORIZON_OBSERVATION_LAG = timedelta(minutes=20)
 POSITIVE_THRESHOLD = 18.0
 NEGATIVE_THRESHOLD = -18.0
 REPORT_MARKERS = (
@@ -328,23 +331,51 @@ def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
 
 
+def evaluation_eligibility(
+    signal: SignalRecord,
+    news: NewsRecord | None,
+) -> dict[str, object]:
+    """Reject outcomes that could not have represented a live decision."""
+    decision_at = max(signal.as_of, signal.data_cutoff_at, signal.created_at)
+    reason = None
+    if signal.as_of > signal.created_at:
+        reason = "signal_as_of_after_creation"
+    elif signal.data_cutoff_at > signal.created_at:
+        reason = "data_cutoff_after_creation"
+    elif news is None:
+        reason = "missing_evidence"
+    elif news.published_at > signal.created_at:
+        reason = "evidence_published_after_signal"
+    elif news.received_at > signal.created_at:
+        reason = "evidence_received_after_signal"
+    elif signal.created_at - max(signal.as_of, signal.data_cutoff_at) > MAX_LIVE_PROCESSING_LAG:
+        reason = "retrospective_signal"
+    return {
+        "eligible": reason is None,
+        "reason": reason,
+        "decision_at": to_rfc3339(decision_at),
+        "processing_lag_seconds": max(
+            0,
+            round((signal.created_at - max(signal.as_of, signal.data_cutoff_at)).total_seconds()),
+        ),
+    }
+
+
 def evaluate_signal(
     signal: SignalRecord,
     candles: list[dict[str, object]],
     news: NewsRecord | None,
 ) -> dict[str, object]:
-    rows = sorted(
-        (
-            (_parse_timestamp(str(item["begin"])), item)
-            for item in candles
-            if item.get("begin") and _number(item.get("open")) is not None
-        ),
-        key=lambda pair: pair[0],
-    )
+    eligibility = evaluation_eligibility(signal, news)
+    decision_at = _parse_timestamp(str(eligibility["decision_at"]))
     base = {
         "signal_id": signal.id,
         "ticker": signal.ticker,
         "as_of": to_rfc3339(signal.as_of),
+        "data_cutoff_at": to_rfc3339(signal.data_cutoff_at),
+        "signal_created_at": to_rfc3339(signal.created_at),
+        "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
+        "eligibility": eligibility,
         "direction": signal.direction,
         "score": signal.score,
         "confidence": signal.confidence,
@@ -365,22 +396,70 @@ def evaluate_signal(
         if news
         else None,
     }
+    empty_returns = {label: None for label in ("1h", "4h", "1d", "3d")}
+    if not eligibility["eligible"]:
+        return {
+            **base,
+            "status": "excluded",
+            "entry": None,
+            "returns": empty_returns,
+            "horizon_observations": {},
+            "verdict": None,
+        }
+    rows = sorted(
+        (
+            (_parse_timestamp(str(item["begin"])), item)
+            for item in candles
+            if item.get("begin") and _number(item.get("open")) is not None
+        ),
+        key=lambda pair: pair[0],
+    )
     if not rows:
-        return {**base, "status": "unavailable", "entry": None, "returns": {}, "verdict": None}
+        return {
+            **base,
+            "status": "unavailable",
+            "entry": None,
+            "returns": empty_returns,
+            "horizon_observations": {},
+            "verdict": None,
+        }
 
-    entry_pair = next((pair for pair in rows if pair[0] >= signal.as_of), None)
-    if entry_pair is None or entry_pair[0] - signal.as_of > timedelta(days=3):
-        return {**base, "status": "unavailable", "entry": None, "returns": {}, "verdict": None}
+    entry_pair = next((pair for pair in rows if pair[0] > decision_at), None)
+    if entry_pair is None or entry_pair[0] - decision_at > timedelta(days=3):
+        return {
+            **base,
+            "status": "unavailable",
+            "entry": None,
+            "returns": empty_returns,
+            "horizon_observations": {},
+            "verdict": None,
+        }
     entry_time, entry_row = entry_pair
     entry_price = _number(entry_row.get("open"))
     assert entry_price is not None
     returns: dict[str, float | None] = {}
+    horizon_observations: dict[str, dict[str, object]] = {}
     target_hours = {"1h": 1, "4h": 4, "1d": 24, "3d": 72}
     for label, hours in target_hours.items():
         target = entry_time + timedelta(hours=hours)
-        target_row = next((row for timestamp, row in rows if timestamp >= target), None)
-        price = _number(target_row.get("close")) if target_row else None
+        observation = next(
+            ((timestamp, row) for timestamp, row in rows if timestamp >= target),
+            None,
+        )
+        observed_at, target_row = observation if observation else (None, None)
+        delay = observed_at - target if observed_at is not None else None
+        timely = delay is not None and delay <= MAX_HORIZON_OBSERVATION_LAG
+        # The candle open is observable at `begin`; using its close would
+        # silently add one interval of future price information.
+        price = _number(target_row.get("open")) if target_row is not None and timely else None
         returns[label] = round((price / entry_price - 1) * 100, 2) if price is not None else None
+        horizon_observations[label] = {
+            "target_at": to_rfc3339(target),
+            "observed_at": to_rfc3339(observed_at) if observed_at is not None else None,
+            "delay_seconds": round(delay.total_seconds()) if delay is not None else None,
+            "timely": timely,
+            "price_field": "open",
+        }
     latest_price = _number(rows[-1][1].get("close"))
     latest_return = (
         round((latest_price / entry_price - 1) * 100, 2) if latest_price is not None else None
@@ -401,8 +480,13 @@ def evaluate_signal(
     return {
         **base,
         "status": status,
-        "entry": {"at": to_rfc3339(entry_time), "price": round(entry_price, 4)},
+        "entry": {
+            "at": to_rfc3339(entry_time),
+            "price": round(entry_price, 4),
+            "delay_seconds": round((entry_time - decision_at).total_seconds()),
+        },
         "returns": returns,
+        "horizon_observations": horizon_observations,
         "latest_price": round(latest_price, 4) if latest_price is not None else None,
         "latest_return_pct": latest_return,
         "verdict": verdict,
@@ -599,10 +683,22 @@ def _metric_slice(
 
 
 def eval_summary(outcomes: list[dict[str, object]]) -> dict[str, object]:
-    decided = [item for item in outcomes if item.get("verdict") is not None]
-    metrics = _metric_slice(outcomes)
+    eligible = [item for item in outcomes if item.get("status") != "excluded"]
+    decided = [item for item in eligible if item.get("verdict") is not None]
+    metrics = _metric_slice(eligible)
+    exclusion_reasons: dict[str, int] = {}
+    for item in outcomes:
+        if item.get("status") != "excluded":
+            continue
+        eligibility = item.get("eligibility")
+        reason = eligibility.get("reason") if isinstance(eligibility, dict) else None
+        key = str(reason or "unknown")
+        exclusion_reasons[key] = exclusion_reasons.get(key, 0) + 1
     return {
         "signals_total": len(outcomes),
+        "eligible": len(eligible),
+        "excluded": len(outcomes) - len(eligible),
+        "exclusion_reasons": exclusion_reasons,
         "evaluated": len(decided),
         "complete": sum(item.get("status") == "evaluated" for item in outcomes),
         "partial": sum(
@@ -615,11 +711,12 @@ def eval_summary(outcomes: list[dict[str, object]]) -> dict[str, object]:
         "hit_rate_pct": metrics["hit_rate_pct"],
         "average_signed_return_pct": metrics["average_signed_return_pct"],
         "median_signed_return_pct": metrics["median_signed_return_pct"],
-        "coverage_pct": round(len(decided) / len(outcomes) * 100, 1) if outcomes else 0.0,
+        "coverage_pct": round(len(decided) / len(eligible) * 100, 1) if eligible else 0.0,
     }
 
 
 def eval_breakdowns(outcomes: list[dict[str, object]]) -> dict[str, object]:
+    outcomes = [item for item in outcomes if item.get("status") != "excluded"]
     by_horizon = [
         {"horizon": horizon, **_metric_slice(outcomes, horizon=horizon)}
         for horizon in EVAL_HORIZONS
@@ -769,11 +866,26 @@ def outcome_export_rows(outcomes: list[dict[str, object]]) -> list[dict[str, obj
             if isinstance(item.get("evaluation_benchmark"), dict)
             else {}
         )
+        eligibility = (
+            item.get("eligibility") if isinstance(item.get("eligibility"), dict) else {}
+        )
+        observations = (
+            item.get("horizon_observations")
+            if isinstance(item.get("horizon_observations"), dict)
+            else {}
+        )
         rows.append(
             {
                 "signal_id": item["signal_id"],
                 "ticker": item["ticker"],
                 "signal_as_of": item["as_of"],
+                "signal_data_cutoff_at": item.get("data_cutoff_at"),
+                "signal_created_at": item.get("signal_created_at"),
+                "decision_at": eligibility.get("decision_at"),
+                "processing_lag_seconds": eligibility.get("processing_lag_seconds"),
+                "evaluation_methodology": item.get("evaluation_methodology"),
+                "evaluation_eligible": eligibility.get("eligible"),
+                "exclusion_reason": eligibility.get("reason"),
                 "direction": item["direction"],
                 "score": item["score"],
                 "confidence": item["confidence"],
@@ -789,10 +901,27 @@ def outcome_export_rows(outcomes: list[dict[str, object]]) -> list[dict[str, obj
                 "delivery_lag_seconds": news.get("delivery_lag_seconds"),
                 "entry_at": entry.get("at"),
                 "entry_price": entry.get("price"),
+                "entry_delay_seconds": entry.get("delay_seconds"),
                 "return_1h_pct": _return_at(item, "1h"),
                 "return_4h_pct": _return_at(item, "4h"),
                 "return_1d_pct": _return_at(item, "1d"),
                 "return_3d_pct": _return_at(item, "3d"),
+                **{
+                    f"observed_{horizon}_at": (
+                        observations.get(horizon, {}).get("observed_at")
+                        if isinstance(observations.get(horizon), dict)
+                        else None
+                    )
+                    for horizon in EVAL_HORIZONS
+                },
+                **{
+                    f"observation_{horizon}_delay_seconds": (
+                        observations.get(horizon, {}).get("delay_seconds")
+                        if isinstance(observations.get(horizon), dict)
+                        else None
+                    )
+                    for horizon in EVAL_HORIZONS
+                },
                 "latest_price": item.get("latest_price"),
                 "latest_return_pct": item.get("latest_return_pct"),
                 "verdict": item.get("verdict"),
@@ -810,6 +939,11 @@ def event_time_export_rows(
 ) -> tuple[list[dict[str, object]], bool]:
     rows = []
     for signal in signals:
+        news = news_by_id.get(signal.news_id)
+        eligibility = evaluation_eligibility(signal, news)
+        if not eligibility["eligible"]:
+            continue
+        decision_at = _parse_timestamp(str(eligibility["decision_at"]))
         candles = sorted(
             (
                 (_parse_timestamp(str(item["begin"])), item)
@@ -818,24 +952,33 @@ def event_time_export_rows(
             ),
             key=lambda pair: pair[0],
         )
-        entry = next((pair for pair in candles if pair[0] >= signal.as_of), None)
-        if entry is None or entry[0] - signal.as_of > timedelta(days=3):
+        entry = next((pair for pair in candles if pair[0] > decision_at), None)
+        if entry is None or entry[0] - decision_at > timedelta(days=3):
             continue
         entry_at, entry_row = entry
         entry_price = _number(entry_row.get("open"))
         if entry_price is None:
             continue
-        news = news_by_id.get(signal.news_id)
         for observed_at, candle in candles:
             if observed_at < entry_at or observed_at > entry_at + timedelta(days=3):
                 continue
+            observed_price = _number(candle.get("open"))
             close = _number(candle.get("close"))
-            raw_return = round((close / entry_price - 1) * 100, 4) if close is not None else None
+            raw_return = (
+                round((observed_price / entry_price - 1) * 100, 4)
+                if observed_price is not None
+                else None
+            )
             rows.append(
                 {
                     "signal_id": signal.id,
                     "ticker": signal.ticker,
                     "signal_as_of": to_rfc3339(signal.as_of),
+                    "signal_data_cutoff_at": to_rfc3339(signal.data_cutoff_at),
+                    "signal_created_at": to_rfc3339(signal.created_at),
+                    "decision_at": eligibility["decision_at"],
+                    "processing_lag_seconds": eligibility["processing_lag_seconds"],
+                    "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
                     "direction": signal.direction,
                     "score": signal.score,
                     "confidence": signal.confidence,
@@ -845,6 +988,7 @@ def event_time_export_rows(
                     "news_source_id": news.source_id if news else None,
                     "entry_at": to_rfc3339(entry_at),
                     "entry_price": round(entry_price, 4),
+                    "entry_delay_seconds": round((entry_at - decision_at).total_seconds()),
                     "observation_at": to_rfc3339(observed_at),
                     "offset_minutes": int((observed_at - entry_at).total_seconds() / 60),
                     "open": _number(candle.get("open")),
