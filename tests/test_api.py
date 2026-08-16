@@ -4,7 +4,7 @@ from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -157,6 +157,34 @@ def test_news_response_cache_reuses_only_the_same_snapshot(
 
     assert main_module.cached_news_response(application, first_news, first_signals, key) is payload
     assert main_module.cached_news_response(application, second_news, first_signals, key) is None
+
+
+def test_event_projection_is_built_once_for_concurrent_snapshot_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "CONTENT_SNAPSHOT_TTL_SECONDS", 60)
+    news: list[NewsRecord] = []
+    signals: list[SignalRecord] = []
+    events = [{"id": "evt_00000000000000000000000000"}]
+    build = Mock(return_value=events)
+    monkeypatch.setattr(main_module, "build_market_event_records", build)
+    application = SimpleNamespace(
+        state=SimpleNamespace(
+            event_response_cache=None,
+            event_response_lock=asyncio.Lock(),
+        )
+    )
+
+    async def scenario() -> list[list[dict[str, object]]]:
+        return await asyncio.gather(
+            main_module.get_or_build_market_event_records(application, news, signals),
+            main_module.get_or_build_market_event_records(application, news, signals),
+        )
+
+    results = asyncio.run(scenario())
+
+    assert results == [events, events]
+    build.assert_called_once_with(news, signals)
 
 
 def test_news_response_cache_serves_stale_payload_during_projection_refresh(
@@ -795,10 +823,23 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
 
     events = client.get("/v1/events", params={"scope": "company", "limit": 100})
     assert events.status_code == 200
-    assert any(
-        event["news_ids"] == [stored["id"]] and event["scope"] == "company"
+    stored_event = next(
+        event
         for event in events.json()["data"]
+        if event["news_ids"] == [stored["id"]] and event["scope"] == "company"
     )
+    assert stored_event["id"].startswith("evt_")
+    assert stored_event["event_type"] == "financial_results"
+    assert stored_event["evidence"][0]["news_id"] == stored["id"]
+    assert len(stored_event["evidence"][0]["content_hash"]) == 64
+
+    event_detail = client.get(f"/v1/events/{stored_event['id']}")
+    assert event_detail.status_code == 200
+    assert event_detail.json()["data"] == stored_event
+
+    missing_event = client.get("/v1/events/evt_00000000000000000000000000")
+    assert missing_event.status_code == 404
+    assert missing_event.json()["code"] == "RESOURCE_NOT_FOUND"
 
     cached = client.get(
         f"/v1/signals/{signal_id}",

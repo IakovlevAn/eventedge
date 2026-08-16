@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import FastAPI, Header, Query, Request
+from fastapi import Path as PathParam
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -315,6 +316,8 @@ app.state.content_snapshot_lock = asyncio.Lock()
 app.state.content_snapshot_inflight = None
 app.state.news_response_cache = None
 app.state.news_response_inflight = {}
+app.state.event_response_cache = None
+app.state.event_response_lock = asyncio.Lock()
 app.state.repository_last_success_at = None
 app.state.source_registry_cache = None
 app.state.collectors = {
@@ -451,6 +454,7 @@ def invalidate_content_snapshot(request: Request) -> None:
     request.app.state.content_snapshot_inflight = None
     request.app.state.content_snapshot_cache = None
     request.app.state.news_response_cache = None
+    request.app.state.event_response_cache = None
 
 
 def cached_news_response(
@@ -702,6 +706,110 @@ async def get_or_build_news_response(
             response_content,
         )
     return response_content
+
+
+def build_market_event_records(
+    stored_news: list[NewsRecord],
+    stored_signals: list[SignalRecord],
+) -> list[dict[str, object]]:
+    """Build event groups from one immutable content snapshot."""
+    news = public_news(stored_news)
+    signals = latest_model_signal_per_news(
+        deduplicate_signals(
+            normalize_signal_freshness(stored_signals, {item.id: item for item in news})
+        )
+    )
+    signals_by_news: dict[str, list[dict[str, object]]] = {}
+    for signal in signals:
+        signals_by_news.setdefault(signal.news_id, []).append(
+            {
+                "id": signal.id,
+                "ticker": signal.ticker,
+                "target": signal_target(signal.ticker),
+                "direction": signal.direction,
+                "score": signal.score,
+                "confidence": signal.confidence,
+                "status": signal.status,
+            }
+        )
+
+    candidates: list[dict[str, object]] = []
+    for item in news:
+        related_signals = signals_by_news.get(item.id, [])
+        projection = classify_news_event(
+            title=item.title,
+            content=item.content,
+            source_metadata=item.source_metadata,
+            related_signals=related_signals,
+        )
+        record = item.as_api_dict()
+        candidates.append(
+            {
+                "id": f"evt_{item.id.removeprefix('news_')}",
+                "title": item.title,
+                "summary": item.content,
+                "published_at": record["published_at"],
+                "detected_at": record["created_at"],
+                "source_id": item.source_id,
+                "source_url": item.url,
+                "news_id": item.id,
+                "evidence": {
+                    "news_id": item.id,
+                    "source_id": item.source_id,
+                    "published_at": record["published_at"],
+                    "title": item.title,
+                    "url": item.url,
+                    "content_hash": canonical_payload_hash(
+                        {
+                            "title": item.title,
+                            "content": item.content,
+                            "language": item.language,
+                        }
+                    ),
+                },
+                "related_signals": related_signals,
+                **projection,
+            }
+        )
+    return cluster_market_events(candidates)
+
+
+async def get_or_build_market_event_records(
+    application: FastAPI,
+    stored_news: list[NewsRecord],
+    stored_signals: list[SignalRecord],
+) -> list[dict[str, object]]:
+    """Reuse one event projection per snapshot and serialize first-build work."""
+    cached = application.state.event_response_cache
+    if (
+        CONTENT_SNAPSHOT_TTL_SECONDS > 0
+        and cached is not None
+        and cached["news"] is stored_news
+        and cached["signals"] is stored_signals
+    ):
+        return cached["events"]
+
+    async with application.state.event_response_lock:
+        cached = application.state.event_response_cache
+        if (
+            CONTENT_SNAPSHOT_TTL_SECONDS > 0
+            and cached is not None
+            and cached["news"] is stored_news
+            and cached["signals"] is stored_signals
+        ):
+            return cached["events"]
+        events = await asyncio.to_thread(
+            build_market_event_records,
+            stored_news,
+            stored_signals,
+        )
+        if CONTENT_SNAPSHOT_TTL_SECONDS > 0:
+            application.state.event_response_cache = {
+                "news": stored_news,
+                "signals": stored_signals,
+                "events": events,
+            }
+        return events
 
 
 def health_payload() -> dict[str, str]:
@@ -971,50 +1079,12 @@ async def list_market_events(
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> JSONResponse:
     stored_news, stored_signals = await load_content_snapshot(request)
-    news = public_news(stored_news)
-    signals = latest_model_signal_per_news(
-        deduplicate_signals(
-            normalize_signal_freshness(stored_signals, {item.id: item for item in news})
-        )
+    all_events = await get_or_build_market_event_records(
+        request.app,
+        stored_news,
+        stored_signals,
     )
-    signals_by_news: dict[str, list[dict[str, object]]] = {}
-    for signal in signals:
-        signals_by_news.setdefault(signal.news_id, []).append(
-            {
-                "id": signal.id,
-                "ticker": signal.ticker,
-                "target": signal_target(signal.ticker),
-                "direction": signal.direction,
-                "score": signal.score,
-                "confidence": signal.confidence,
-                "status": signal.status,
-            }
-        )
-    candidates: list[dict[str, object]] = []
-    for item in news:
-        related_signals = signals_by_news.get(item.id, [])
-        projection = classify_news_event(
-            title=item.title,
-            content=item.content,
-            source_metadata=item.source_metadata,
-            related_signals=related_signals,
-        )
-        if scope is not None and projection["scope"] != scope:
-            continue
-        candidates.append(
-            {
-                "id": f"event_{item.id.removeprefix('news_')}",
-                "title": item.title,
-                "summary": item.content,
-                "published_at": item.as_api_dict()["published_at"],
-                "source_id": item.source_id,
-                "source_url": item.url,
-                "news_id": item.id,
-                "related_signals": related_signals,
-                **projection,
-            }
-        )
-    events = cluster_market_events(candidates)
+    events = [event for event in all_events if scope is None or event["scope"] == scope]
     return JSONResponse(
         content={
             "data": events[:limit],
@@ -1026,6 +1096,26 @@ async def list_market_events(
             },
         }
     )
+
+
+@app.get("/v1/events/{event_id}", tags=["Events"])
+async def get_market_event(
+    request: Request,
+    event_id: Annotated[
+        str,
+        PathParam(pattern=r"^evt_[0-9A-HJKMNP-TV-Z]{26}$"),
+    ],
+) -> JSONResponse:
+    stored_news, stored_signals = await load_content_snapshot(request)
+    events = await get_or_build_market_event_records(
+        request.app,
+        stored_news,
+        stored_signals,
+    )
+    event = next((item for item in events if item["id"] == event_id), None)
+    if event is None:
+        raise StarletteHTTPException(status_code=404)
+    return JSONResponse(content={"data": event})
 
 
 @app.get("/v1/sources", tags=["Sources"])

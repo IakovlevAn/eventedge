@@ -11,6 +11,9 @@ def test_company_event_wins_when_a_traded_ticker_is_known() -> None:
     assert event["scope"] == "company"
     assert event["tickers"] == ["SBER"]
     assert event["sectors"] == ["Финансы"]
+    assert event["event_type"] == "financial_results"
+    assert event["materiality"] > 0
+    assert event["extractor_version"] == "rules-0.1.0"
 
 
 def test_warehouse_incident_becomes_retail_logistics_context() -> None:
@@ -104,3 +107,92 @@ def test_corroborating_publications_form_one_event() -> None:
     assert events[0]["news_ids"] == ["news_one", "news_two"]
     assert events[0]["source_count"] == 2
     assert events[0]["title"] == "Сбербанк опубликовал результаты за полугодие"
+
+
+def test_event_clustering_is_order_independent_and_preserves_provenance() -> None:
+    common = {
+        "scope": "company",
+        "scope_label": "Компания",
+        "tickers": ["SBER"],
+        "sectors": ["Финансы"],
+        "event_type": "financial_results",
+        "extractor_version": "rules-0.1.0",
+        "materiality": 0.8,
+    }
+    earlier = {
+        **common,
+        "id": "evt_earlier",
+        "news_id": "news_earlier",
+        "source_id": "interfax",
+        "source_url": "https://example.com/earlier",
+        "title": "Сбербанк опубликовал результаты за полугодие",
+        "summary": "Короткая публикация.",
+        "published_at": "2026-08-09T10:00:00Z",
+        "detected_at": "2026-08-09T10:01:00Z",
+        "evidence": {"news_id": "news_earlier", "content_hash": "one"},
+        "related_signals": [{"id": "sig_one", "score": 20}],
+    }
+    later = {
+        **common,
+        "id": "evt_later",
+        "news_id": "news_later",
+        "source_id": "rbc",
+        "source_url": "https://example.com/later",
+        "title": "Сбербанк опубликовал сильные результаты за полугодие",
+        "summary": "Более подробная подтверждающая публикация с цифрами.",
+        "published_at": "2026-08-09T11:00:00Z",
+        "detected_at": "2026-08-09T11:01:00Z",
+        "evidence": {"news_id": "news_later", "content_hash": "two"},
+        "related_signals": [{"id": "sig_two", "score": 30}],
+    }
+
+    chronological = cluster_market_events([earlier, later])
+    reversed_input = cluster_market_events([later, earlier])
+
+    assert chronological == reversed_input
+    assert chronological[0]["id"] == "evt_earlier"
+    assert chronological[0]["event_time"] == earlier["published_at"]
+    assert chronological[0]["news_ids"] == ["news_earlier", "news_later"]
+    assert [item["news_id"] for item in chronological[0]["evidence"]] == [
+        "news_earlier",
+        "news_later",
+    ]
+    assert [item["id"] for item in chronological[0]["related_signals"]] == [
+        "sig_one",
+        "sig_two",
+    ]
+
+
+def test_different_semantic_event_types_are_not_merged() -> None:
+    common = {
+        "scope": "company",
+        "scope_label": "Компания",
+        "tickers": ["SBER"],
+        "sectors": ["Финансы"],
+        "published_at": "2026-08-09T10:00:00Z",
+        "title": "Сбербанк сообщил о новом корпоративном решении",
+        "summary": "Подробности решения.",
+        "related_signals": [],
+    }
+    events = cluster_market_events(
+        [
+            {
+                **common,
+                "id": "evt_results",
+                "news_id": "news_results",
+                "source_id": "interfax",
+                "source_url": "https://example.com/results",
+                "event_type": "financial_results",
+            },
+            {
+                **common,
+                "id": "evt_dividend",
+                "news_id": "news_dividend",
+                "source_id": "rbc",
+                "source_url": "https://example.com/dividend",
+                "event_type": "dividend",
+            },
+        ]
+    )
+
+    assert len(events) == 2
