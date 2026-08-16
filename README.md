@@ -44,6 +44,19 @@ PYTHONPATH=src uv run python -m scripts.evaluate_quality_dataset \
 router и печатает воспроизводимый JSON-отчёт. Она не вызывает LLM, не пишет в
 YDB и не изменяет production.
 
+CI дополнительно защищает текущий signal-router синтетическим regression
+contract:
+
+```bash
+PYTHONPATH=src uv run python -m scripts.check_signal_quality_gate \
+  --dataset tests/fixtures/retro_signal_audit.json
+```
+
+Gate требует 32 примера и precision/recall `1.0`. Это контракт известных
+позитивных и негативных случаев, а не оценка качества на реальном рынке и не
+human ground truth. Для реальной оценки используется описанный выше JSONL с
+`label_source=human`.
+
 ## Локальный UI
 
 ```bash
