@@ -23,6 +23,27 @@ uv run pytest
 uv run python scripts/validate_openapi.py
 ```
 
+## Offline-проверка качества маршрутизации
+
+Размеченные примеры хранятся в JSONL по схеме `quality-example-1.0`. По
+умолчанию evaluator принимает только `label_source=human`: ответы LLM и
+синтетические fixtures нельзя незаметно использовать как financial ground
+truth. Повторные публикации одного события должны иметь общий `event_id`, чтобы
+временное разбиение по `received_at` не разносило их между train, validation и
+test. События, пересекающие временную границу, попадают в `purged`, а не в
+соседние выборки. `published_at`, `received_at` и `labeled_at` всегда содержат
+timezone.
+
+```bash
+PYTHONPATH=src uv run python -m scripts.evaluate_quality_dataset \
+  --dataset path/to/human-quality-labels.jsonl \
+  --include-split
+```
+
+Команда только читает локальный файл, сравнивает метки с текущим deterministic
+router и печатает воспроизводимый JSON-отчёт. Она не вызывает LLM, не пишет в
+YDB и не изменяет production.
+
 ## Локальный UI
 
 ```bash
