@@ -27,6 +27,8 @@ def test_production_smoke_accounts_for_partial_moex_and_checks_new_routes() -> N
     assert "Smoke test source registry and market events" in workflow
     assert '"${EVENTEDGE_API_URL}/v1/sources"' in workflow
     assert '"${EVENTEDGE_API_URL}/v1/events?limit=1"' in workflow
+    assert '"${EVENTEDGE_API_URL}/v1/events/${event_id}"' in workflow
+    assert ".data.id == $event_id and (.data.evidence | length) > 0" in workflow
 
 
 def test_web_smoke_retries_transient_timeouts_but_still_checks_content() -> None:

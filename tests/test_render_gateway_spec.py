@@ -17,6 +17,11 @@ def test_gateway_template_exposes_web_app_and_assets() -> None:
     assert "/" in spec["paths"]
     assert "/assets/{asset}" in spec["paths"]
     assert "/v1/events" in spec["paths"]
+    assert "/v1/events/{event_id}" in spec["paths"]
+    assert (
+        spec["paths"]["/v1/events/{event_id}"]["get"]["parameters"][0]["required"]
+        is True
+    )
     assert "/v1/sources" in spec["paths"]
     assert "/v1/sources/telegram" in spec["paths"]
     assert spec["paths"]["/v1/sources/telegram"]["post"]["parameters"][0]["name"] == (

@@ -218,6 +218,25 @@ paths:
         type: serverless_containers
         container_id: __API_CONTAINER_ID__
         service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
+  /v1/events/{event_id}:
+    get:
+      operationId: getMarketEvent
+      parameters:
+        - name: event_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^evt_[0-9A-HJKMNP-TV-Z]{26}$'
+      responses:
+        '200':
+          description: Aggregated event with its evidence.
+        '404':
+          description: Event not found.
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: __API_CONTAINER_ID__
+        service_account_id: __GATEWAY_SERVICE_ACCOUNT_ID__
   /v1/sources:
     get:
       operationId: listSources
