@@ -41,6 +41,14 @@ jobs:
       - name: Test
         run: uv run pytest
 
+      - name: Check deterministic signal quality gate
+        run: >-
+          uv run python -m scripts.check_signal_quality_gate
+          --dataset tests/fixtures/retro_signal_audit.json
+          --minimum-observations 32
+          --minimum-precision 1.0
+          --minimum-recall 1.0
+
       - name: Validate API contract
         run: uv run python scripts/validate_openapi.py
 

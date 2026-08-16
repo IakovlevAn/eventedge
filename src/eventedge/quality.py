@@ -8,13 +8,31 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from eventedge.collectors import RssItem, is_semantic_analysis_candidate
+from eventedge.collectors import (
+    RssItem,
+    is_semantic_analysis_candidate,
+    is_signal_analysis_candidate,
+)
 from eventedge.events import classify_news_event
 
 
 class QualityLabelSource(StrEnum):
     HUMAN = "human"
     SYNTHETIC_TEST = "synthetic_test"
+
+
+class QualityRouter(StrEnum):
+    SEMANTIC = "semantic"
+    SIGNAL = "signal"
+
+
+class QualityGateThresholds(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    minimum_observations: Annotated[int, Field(ge=1)] = 1
+    minimum_precision: Annotated[float, Field(ge=0, le=1)] = 0
+    minimum_recall: Annotated[float, Field(ge=0, le=1)] = 0
+    minimum_scope_accuracy: Annotated[float, Field(ge=0, le=1)] | None = None
 
 
 class QualityLabels(BaseModel):
@@ -200,7 +218,11 @@ def _group_start(group: list[QualityExample]) -> datetime:
     return min(example.received_at for example in group)
 
 
-def evaluate_current_router(examples: list[QualityExample]) -> dict[str, object]:
+def evaluate_current_router(
+    examples: list[QualityExample],
+    *,
+    router: QualityRouter = QualityRouter.SEMANTIC,
+) -> dict[str, object]:
     true_positive = false_positive = false_negative = true_negative = 0
     scope_correct = 0
     relevant_count = 0
@@ -215,7 +237,12 @@ def evaluate_current_router(examples: list[QualityExample]) -> dict[str, object]
             content=example.content,
             categories=example.categories,
         )
-        predicted_relevant = is_semantic_analysis_candidate(item)
+        if router is QualityRouter.SEMANTIC:
+            predicted_relevant = is_semantic_analysis_candidate(item)
+        elif router is QualityRouter.SIGNAL:
+            predicted_relevant = is_signal_analysis_candidate(item)
+        else:  # pragma: no cover - StrEnum protects normal callers
+            raise ValueError(f"unsupported quality router: {router}")
         projection = classify_news_event(
             title=example.title,
             content=example.content,
@@ -250,6 +277,7 @@ def evaluate_current_router(examples: list[QualityExample]) -> dict[str, object]
     actual_positive = true_positive + false_negative
     return {
         "schema_version": "quality-report-1.0",
+        "router": router.value,
         "observations": len(examples),
         "independent_events": len({example.event_id for example in examples}),
         "relevance": {
@@ -267,4 +295,54 @@ def evaluate_current_router(examples: list[QualityExample]) -> dict[str, object]
             "accuracy": round(scope_correct / relevant_count, 4) if relevant_count else None,
         },
         "predictions": rows,
+    }
+
+
+def check_quality_gate(
+    report: dict[str, object],
+    thresholds: QualityGateThresholds,
+) -> dict[str, object]:
+    relevance = report.get("relevance")
+    scope = report.get("scope")
+    if not isinstance(relevance, dict):
+        raise ValueError("quality report is missing relevance metrics")
+    if thresholds.minimum_scope_accuracy is not None and not isinstance(scope, dict):
+        raise ValueError("quality report is missing scope metrics")
+
+    checks: list[dict[str, object]] = []
+
+    def add_check(metric: str, actual: object, minimum: int | float) -> None:
+        passed = isinstance(actual, int | float) and actual >= minimum
+        checks.append(
+            {
+                "metric": metric,
+                "actual": actual,
+                "minimum": minimum,
+                "passed": passed,
+            }
+        )
+
+    add_check("observations", report.get("observations"), thresholds.minimum_observations)
+    add_check("relevance.precision", relevance.get("precision"), thresholds.minimum_precision)
+    add_check("relevance.recall", relevance.get("recall"), thresholds.minimum_recall)
+    if thresholds.minimum_scope_accuracy is not None:
+        assert isinstance(scope, dict)
+        add_check(
+            "scope.accuracy",
+            scope.get("accuracy"),
+            thresholds.minimum_scope_accuracy,
+        )
+
+    violations = [
+        (
+            f"{check['metric']}={check['actual']!r} is below "
+            f"minimum {check['minimum']}"
+        )
+        for check in checks
+        if not check["passed"]
+    ]
+    return {
+        "passed": not violations,
+        "checks": checks,
+        "violations": violations,
     }

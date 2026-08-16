@@ -9,6 +9,9 @@ from pydantic import ValidationError
 
 from eventedge.quality import (
     QualityExample,
+    QualityGateThresholds,
+    QualityRouter,
+    check_quality_gate,
     evaluate_current_router,
     load_quality_dataset,
     temporal_group_split,
@@ -212,3 +215,34 @@ def test_router_report_handles_zero_denominators_and_records_predictions() -> No
     }
     assert report["scope"] == {"observations": 0, "accuracy": None}
     assert report["predictions"][0]["predicted_scope"] == "none"
+
+
+def test_quality_gate_fails_closed_for_missing_metric_and_small_dataset() -> None:
+    report = {
+        "observations": 1,
+        "relevance": {"precision": None, "recall": 0.75},
+    }
+
+    gate = check_quality_gate(
+        report,
+        QualityGateThresholds(
+            minimum_observations=2,
+            minimum_precision=0.8,
+            minimum_recall=0.7,
+        ),
+    )
+
+    assert gate["passed"] is False
+    assert gate["violations"] == [
+        "observations=1 is below minimum 2",
+        "relevance.precision=None is below minimum 0.8",
+    ]
+
+
+def test_quality_evaluator_can_check_production_signal_router() -> None:
+    examples = [QualityExample.model_validate(quality_example(1))]
+
+    report = evaluate_current_router(examples, router=QualityRouter.SIGNAL)
+
+    assert report["router"] == "signal"
+    assert report["relevance"]["true_positive"] == 1
