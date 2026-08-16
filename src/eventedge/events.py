@@ -213,6 +213,19 @@ def classify_news_event(
     related_signals: Iterable[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     """Project one news item into a stable, explainable market-event scope."""
+    features = RuleBasedNewsExtractor().extract(
+        NewsAnalysisInput(
+            source_id="event_projection",
+            title=title,
+            content=content,
+            language="ru",
+        )
+    )
+    semantic = {
+        "event_type": features.event_type.value,
+        "materiality": features.materiality,
+        "extractor_version": features.extractor_version,
+    }
     signal_tickers = [
         ticker
         for signal in related_signals
@@ -220,15 +233,11 @@ def classify_news_event(
         and (ticker := str(signal["ticker"]).upper()) not in CONTEXT_SIGNAL_TARGETS
     ]
     metadata_tickers = source_metadata.get("tickers", [])
-    title_features = RuleBasedNewsExtractor().extract(
-        NewsAnalysisInput(
-            source_id="event_projection",
-            title=title,
-            content=title,
-            language="ru",
-        )
-    )
-    title_tickers = {instrument.ticker for instrument in title_features.instruments}
+    title_tickers = {
+        instrument.ticker
+        for instrument in features.instruments
+        if instrument.relevance >= 0.9
+    }
     tickers = list(
         dict.fromkeys(
             [
@@ -246,6 +255,7 @@ def classify_news_event(
             dict.fromkeys(TICKER_SECTORS[ticker] for ticker in tickers if ticker in TICKER_SECTORS)
         )
         return {
+            **semantic,
             "scope": "company",
             "scope_label": "Компания",
             "tickers": tickers,
@@ -256,6 +266,7 @@ def classify_news_event(
     normalized = " ".join((title, content)).casefold()
     if any(marker in normalized for marker in MARKET_PRIORITY_MARKERS):
         return {
+            **semantic,
             "scope": "market",
             "scope_label": "Рынок",
             "tickers": [],
@@ -269,6 +280,7 @@ def classify_news_event(
     ]
     if sectors:
         return {
+            **semantic,
             "scope": "sector",
             "scope_label": "Отрасль",
             "tickers": [],
@@ -277,6 +289,7 @@ def classify_news_event(
         }
 
     return {
+        **semantic,
         "scope": "market",
         "scope_label": "Рынок",
         "tickers": [],
@@ -338,49 +351,118 @@ def is_broad_market_event_text(title: str, content: str) -> bool:
 
 
 def cluster_market_events(items: Iterable[Mapping[str, object]]) -> list[dict[str, object]]:
-    """Collapse corroborating publications into one event-centric API record."""
+    """Collapse corroborating publications into deterministic event records."""
     groups: list[dict[str, object]] = []
-    for raw_item in items:
-        item = dict(raw_item)
+    ordered_items = sorted((dict(item) for item in items), key=_item_order_key)
+    for item in ordered_items:
         group = next((candidate for candidate in groups if _same_event(candidate, item)), None)
         if group is None:
-            group = {
-                **item,
-                "news_ids": [item["news_id"]],
-                "sources": [
-                    {
-                        "source_id": item["source_id"],
-                        "url": item["source_url"],
-                    }
-                ],
-                "source_count": 1,
-            }
-            group.pop("news_id", None)
-            groups.append(group)
+            groups.append(_new_event_group(item))
             continue
+        _merge_event_group(group, item)
+    return sorted(
+        groups,
+        key=lambda item: (str(item["event_time"]), str(item["id"])),
+        reverse=True,
+    )
 
-        news_ids = list(group["news_ids"])
-        news_ids.append(item["news_id"])
-        sources = list(group["sources"])
-        if not any(
-            source["source_id"] == item["source_id"] and source["url"] == item["source_url"]
-            for source in sources
-        ):
-            sources.append({"source_id": item["source_id"], "url": item["source_url"]})
-        if _event_weight(item) > _event_weight(group):
-            event_id = group["id"]
-            group.clear()
-            group.update(item)
-            group["id"] = event_id
-            group.pop("news_id", None)
-        group["news_ids"] = news_ids
-        group["sources"] = sources
-        group["source_count"] = len(sources)
-    return groups
+
+def _new_event_group(item: Mapping[str, object]) -> dict[str, object]:
+    group = dict(item)
+    group["event_time"] = item["published_at"]
+    group["news_ids"] = [item["news_id"]]
+    group["sources"] = [
+        {"source_id": item["source_id"], "url": item["source_url"]}
+    ]
+    evidence = item.get("evidence")
+    group["evidence"] = [dict(evidence)] if isinstance(evidence, Mapping) else []
+    group["related_signals"] = _deduplicate_mappings(item.get("related_signals", []))
+    group["source_count"] = 1
+    group.pop("news_id", None)
+    return group
+
+
+def _merge_event_group(group: dict[str, object], item: Mapping[str, object]) -> None:
+    news_ids = [*group["news_ids"], item["news_id"]]
+    sources = list(group["sources"])
+    source = {"source_id": item["source_id"], "url": item["source_url"]}
+    if source not in sources:
+        sources.append(source)
+    evidence = list(group["evidence"])
+    item_evidence = item.get("evidence")
+    if isinstance(item_evidence, Mapping) and dict(item_evidence) not in evidence:
+        evidence.append(dict(item_evidence))
+    signals = _deduplicate_mappings(
+        [*group.get("related_signals", []), *item.get("related_signals", [])]
+    )
+    tickers = sorted({*group.get("tickers", []), *item.get("tickers", [])})
+    sectors = sorted({*group.get("sectors", []), *item.get("sectors", [])})
+    materiality = max(
+        float(group.get("materiality", 0)),
+        float(item.get("materiality", 0)),
+    )
+    event_type = str(group.get("event_type", "other"))
+    if event_type == "other" and item.get("event_type"):
+        event_type = str(item["event_type"])
+    canonical_id = group["id"]
+    event_time = group["event_time"]
+    detected_at = min(
+        (str(value) for value in (group.get("detected_at"), item.get("detected_at")) if value),
+        default=None,
+    )
+
+    if _event_weight(item) > _event_weight(group):
+        group.clear()
+        group.update(item)
+        group.pop("news_id", None)
+
+    group.update(
+        {
+            "id": canonical_id,
+            "event_time": event_time,
+            "news_ids": news_ids,
+            "sources": sources,
+            "source_count": len(sources),
+            "evidence": evidence,
+            "related_signals": signals,
+            "tickers": tickers,
+            "sectors": sectors,
+            "materiality": materiality,
+            "event_type": event_type,
+        }
+    )
+    if detected_at is not None:
+        group["detected_at"] = detected_at
+
+
+def _item_order_key(item: Mapping[str, object]) -> tuple[str, str, str, str]:
+    return (
+        str(item.get("published_at", "")),
+        str(item.get("news_id", "")),
+        str(item.get("source_id", "")),
+        str(item.get("id", "")),
+    )
+
+
+def _deduplicate_mappings(items: object) -> list[dict[str, object]]:
+    if not isinstance(items, Iterable) or isinstance(items, (str, bytes, Mapping)):
+        return []
+    unique: dict[str, dict[str, object]] = {}
+    for raw_item in items:
+        if not isinstance(raw_item, Mapping):
+            continue
+        item = dict(raw_item)
+        key = str(item.get("id") or sorted((str(key), repr(value)) for key, value in item.items()))
+        unique[key] = item
+    return [unique[key] for key in sorted(unique)]
 
 
 def _same_event(left: Mapping[str, object], right: Mapping[str, object]) -> bool:
     if left.get("scope") != right.get("scope"):
+        return False
+    left_type = str(left.get("event_type", "other"))
+    right_type = str(right.get("event_type", "other"))
+    if left_type != "other" and right_type != "other" and left_type != right_type:
         return False
     left_tickers = set(left.get("tickers", []))
     right_tickers = set(right.get("tickers", []))
