@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -11,6 +12,7 @@ from eventedge.collectors import (
     RssFeedConfig,
     RssItem,
     TelegramChannelConfig,
+    collect_news_items,
     collect_rss_feed,
     collect_telegram_channel,
     google_news_search_url,
@@ -21,11 +23,13 @@ from eventedge.collectors import (
     is_market_event_candidate,
     is_market_signal_candidate,
     is_moex_equity_title,
+    is_obvious_company_product_or_marketing_noise,
     is_semantic_analysis_candidate,
     is_signal_analysis_candidate,
     is_watched_company_news,
     parse_rss,
     parse_telegram_channel,
+    signal_analysis_priority,
 )
 from eventedge.storage import MemoryNewsRepository, TelegramSourceRecord
 
@@ -177,7 +181,7 @@ def test_sector_news_without_ticker_is_analyzed_and_stored() -> None:
         "event_candidate": True,
         "signal_candidate": False,
         "analysis_candidate": True,
-        "classification_version": "candidate-gate-0.4.0",
+        "classification_version": "candidate-gate-0.6.0",
     }
     assert {signal["ticker"] for signal in signals} == {"RUAGRI", "RUTRANS"}
     assert {signal["target"]["type"] for signal in signals} == {"sector"}
@@ -447,6 +451,20 @@ def test_semantic_router_keeps_company_report_with_many_percentages() -> None:
     assert is_semantic_analysis_candidate(item) is True
 
 
+def test_signal_router_keeps_compact_company_financial_report_title() -> None:
+    item = RssItem(
+        external_id="aeroflot-report",
+        published_at=datetime(2026, 8, 18, tzinfo=UTC),
+        title="📒 Финотчет Аэрофлот за 2026, 6 месяцев #AFLT",
+        url="https://example.com/aeroflot-report",
+        content="ПАО Аэрофлот опубликовало данные за первое полугодие.",
+        categories=(),
+    )
+
+    assert is_signal_analysis_candidate(item) is True
+    assert signal_analysis_priority(item) == 3
+
+
 def test_moex_equity_filter_rejects_mechanical_listing_notice() -> None:
     item = RssItem(
         external_id="moex-1",
@@ -521,6 +539,112 @@ def test_market_candidate_rejects_promo_and_debt_noise() -> None:
 
     assert is_market_signal_candidate(promo) is False
     assert is_market_signal_candidate(debt) is False
+
+
+def test_product_noise_is_rejected_before_analyzer_but_material_news_is_kept() -> None:
+    product = RssItem(
+        external_id="yandex-maps-product",
+        published_at=datetime(2026, 8, 18, tzinfo=UTC),
+        title="Яндекс Карты теперь показывают ограничения скорости",
+        url="https://example.com/yandex-maps-product",
+        content="Новая функция появилась в приложении для водителей.",
+        categories=("Технологии",),
+    )
+    material = RssItem(
+        external_id="sber-results-and-product",
+        published_at=datetime(2026, 8, 18, tzinfo=UTC),
+        title="Сбербанк опубликовал отчётность и представил новый сервис",
+        url="https://example.com/sber-results-and-product",
+        content="Чистая прибыль выросла на 20%.",
+        categories=("Компании",),
+    )
+    product_launch = RssItem(
+        external_id="sber-autoleasing",
+        published_at=datetime(2026, 8, 18, tzinfo=UTC),
+        title="Сбербанк запустил автолизинг",
+        url="https://example.com/sber-autoleasing",
+        content="Услуга стала доступна клиентам банка.",
+        categories=("Компании",),
+    )
+
+    assert is_obvious_company_product_or_marketing_noise(product) is True
+    assert is_signal_analysis_candidate(product) is False
+    assert is_obvious_company_product_or_marketing_noise(product_launch) is True
+    assert is_signal_analysis_candidate(product_launch) is False
+    assert is_obvious_company_product_or_marketing_noise(material) is False
+    assert is_signal_analysis_candidate(material) is True
+
+
+def test_product_noise_records_bounded_reason_without_calling_analyzer() -> None:
+    analyzer = AsyncMock(side_effect=AssertionError("product noise reached analyzer"))
+    repository = MemoryNewsRepository(analyzer=analyzer)
+    item = RssItem(
+        external_id="sber-contest",
+        published_at=datetime(2026, 8, 18, tzinfo=UTC),
+        title="Сбер учредил спецприз для конкурса стартапов",
+        url="https://example.com/sber-contest",
+        content="Победители получат специальный приз.",
+        categories=("Компании",),
+    )
+
+    async def scenario() -> tuple[dict[str, int], dict[str, object]]:
+        result = await collect_news_items(
+            repository,
+            source_id="interfax",
+            source_url="https://example.com/feed",
+            language="ru",
+            collector="rss",
+            items=[item],
+            item_filter=lambda candidate: True,
+            signal_filter=lambda candidate: True,
+            analyze_signals=True,
+        )
+        news = await repository.list_news(source_id="interfax", limit=1)
+        return result, dict(news[0].source_metadata)
+
+    result, metadata = asyncio.run(scenario())
+
+    analyzer.assert_not_awaited()
+    assert result["signal_candidates"] == 0
+    assert result["analysis_candidates"] == 0
+    assert metadata["classification_status"] == "noise_filtered"
+    assert metadata["signal_outcome"] == {
+        "status": "rejected_before_analysis",
+        "reason": "product_or_marketing_noise",
+        "signal_count": 0,
+        "policy_version": "candidate-gate-0.6.0",
+    }
+
+
+def test_signal_analysis_priority_only_promotes_material_company_events() -> None:
+    standard = RssItem(
+        external_id="sber-management",
+        published_at=datetime(2026, 8, 18, tzinfo=UTC),
+        title="Сбербанк назначил нового руководителя направления",
+        url="https://example.com/sber-management",
+        content="Компания сообщила о кадровом назначении.",
+        categories=(),
+    )
+    production = RssItem(
+        external_id="nornickel-production",
+        published_at=datetime(2026, 8, 18, tzinfo=UTC),
+        title="Норникель увеличил производство металлов",
+        url="https://example.com/nornickel-production",
+        content="Объем производства увеличился на 12%.",
+        categories=(),
+    )
+    acquisition = RssItem(
+        external_id="yandex-acquisition",
+        published_at=datetime(2026, 8, 18, tzinfo=UTC),
+        title="Яндекс приобрёл долю в технологической компании",
+        url="https://example.com/yandex-acquisition",
+        content="Сделка закрыта после согласования условий.",
+        categories=(),
+    )
+
+    assert signal_analysis_priority(standard) == 1
+    assert signal_analysis_priority(production) == 2
+    assert signal_analysis_priority(acquisition) == 3
 
 
 def test_cbr_filter_keeps_market_policy_and_rejects_commemorative_news() -> None:

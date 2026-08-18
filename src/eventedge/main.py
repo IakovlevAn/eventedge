@@ -44,6 +44,7 @@ from eventedge.collectors import (
     is_market_signal_candidate,
     is_moex_equity_title,
     is_signal_analysis_candidate,
+    signal_analysis_priority,
 )
 from eventedge.configs.collection import load_collection_config
 from eventedge.evals import (
@@ -80,6 +81,7 @@ from eventedge.ml_router import (
 )
 from eventedge.source_registry import configured_sources
 from eventedge.storage import (
+    SIGNAL_REJECTION_REASONS,
     EvaluationEpochRecord,
     IdempotencyConflictError,
     MemoryNewsRepository,
@@ -593,6 +595,12 @@ def build_news_response_payload(
         bool(row["analysis_candidate"] or signals_by_news.get(item.id))
         for item, row in zip(scoped_news, processing_rows, strict=True)
     )
+    rejection_reasons: dict[str, int] = {}
+    for item in scoped_news:
+        outcome = item.source_metadata.get("signal_outcome")
+        reason = outcome.get("reason") if isinstance(outcome, Mapping) else None
+        if isinstance(reason, str) and reason in SIGNAL_REJECTION_REASONS:
+            rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
     processing_coverage = {
         "stored": len(scoped_news),
         "relevant": relevant_count,
@@ -606,6 +614,7 @@ def build_news_response_payload(
             if analysis_candidate_count
             else 0.0
         ),
+        "rejection_reasons": dict(sorted(rejection_reasons.items())),
         "signal_model_version": CURRENT_NEWS_MODEL_VERSION,
     }
     news = scoped_news[:limit]
@@ -970,6 +979,7 @@ async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONRespons
                 "failed": int(reprocess_meta.get("failed", 0)),
                 "failure_types": list(reprocess_meta.get("failure_types", [])),
                 "remaining": int(reprocess_meta["remaining_candidates"]),
+                "rejection_reasons": dict(reprocess_meta.get("rejection_reasons", {})),
                 "outcomes": len(outcomes),
                 "epochs": len(epochs),
             }
@@ -1289,7 +1299,7 @@ async def reprocess_signal_candidates_batch(
         if signal.model_version == CURRENT_NEWS_MODEL_VERSION
     }
     requested_news_ids = set(news_ids or [])
-    candidates: list[tuple[NewsRecord, RssItem, MlRouterDecision | None]] = []
+    candidates: list[tuple[int, NewsRecord, RssItem, MlRouterDecision | None]] = []
     for item in public_news(stored_news):
         if requested_news_ids and item.id not in requested_news_ids:
             continue
@@ -1318,12 +1328,14 @@ async def reprocess_signal_candidates_batch(
                 if ml_router is not None
                 else None
             )
-            candidates.append((item, candidate, decision))
+            candidates.append((signal_analysis_priority(candidate), item, candidate, decision))
 
+    candidates.sort(key=lambda row: row[0], reverse=True)
     selected = candidates[:limit]
     semaphore = asyncio.Semaphore(min(max(concurrency, 1), 4))
 
     async def reprocess_one(
+        priority: int,
         item: NewsRecord,
         candidate: RssItem,
         decision: MlRouterDecision | None,
@@ -1331,7 +1343,7 @@ async def reprocess_signal_candidates_batch(
         async with semaphore:
             for attempt in range(2):
                 try:
-                    return await ingest_reprocessed(item, candidate, decision)
+                    return await ingest_reprocessed(priority, item, candidate, decision)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -1341,6 +1353,7 @@ async def reprocess_signal_candidates_batch(
             raise AssertionError("unreachable retry loop")
 
     async def ingest_reprocessed(
+        priority: int,
         item: NewsRecord,
         candidate: RssItem,
         decision: MlRouterDecision | None,
@@ -1386,7 +1399,8 @@ async def reprocess_signal_candidates_batch(
                         else "eligible_for_semantic_signal_analysis"
                     )
                 ),
-                "classification_version": "candidate-gate-0.5.0",
+                "classification_version": "candidate-gate-0.6.0",
+                "analysis_priority": priority,
                 "reprocess_version": CURRENT_NEWS_MODEL_VERSION,
                 "tickers": [
                     instrument.ticker
@@ -1433,25 +1447,40 @@ async def reprocess_signal_candidates_batch(
             "job_id": result.job.id,
             "result_ref": result.job.result_ref,
             "replayed": result.replayed,
+            **(
+                {"signal_outcome": dict(result.signal_outcome)}
+                if result.signal_outcome is not None
+                else {}
+            ),
             **({"ml_router_action": decision.action} if decision is not None else {}),
         }
 
     results = await asyncio.gather(
         *(
-            reprocess_one(item, candidate, decision)
-            for item, candidate, decision in selected
+            reprocess_one(priority, item, candidate, decision)
+            for priority, item, candidate, decision in selected
         ),
         return_exceptions=True,
     )
     completed = [result for result in results if isinstance(result, dict)]
     failed = [type(result).__name__ for result in results if isinstance(result, BaseException)]
-    for (item, _, _), result in zip(selected, results, strict=True):
+    for (_, item, _, _), result in zip(selected, results, strict=True):
         if isinstance(result, BaseException):
             logger.warning(
                 "Signal reprocess failed news_id=%s error=%s",
                 item.id,
                 type(result).__name__,
             )
+    rejection_reasons: dict[str, int] = {}
+    for result in completed:
+        outcome = result.get("signal_outcome")
+        reason = outcome.get("reason") if isinstance(outcome, Mapping) else None
+        if isinstance(reason, str) and reason in SIGNAL_REJECTION_REASONS:
+            rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+    priority_counts = {
+        str(priority): sum(1 for selected_priority, *_ in selected if selected_priority == priority)
+        for priority in sorted({row[0] for row in selected}, reverse=True)
+    }
     return {
         "data": completed,
         "meta": {
@@ -1463,7 +1492,9 @@ async def reprocess_signal_candidates_batch(
             "model_version": CURRENT_NEWS_MODEL_VERSION,
             "batch_limit": limit,
             "concurrency": min(max(concurrency, 1), 4),
-            "candidate_policy": "targetable-economic-0.4.1",
+            "candidate_policy": "material-event-priority-0.5.0",
+            "selected_priority_counts": priority_counts,
+            "rejection_reasons": dict(sorted(rejection_reasons.items())),
             **({"ml_router": ml_router.status()} if ml_router is not None else {}),
         },
     }

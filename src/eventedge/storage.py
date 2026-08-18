@@ -12,6 +12,7 @@ from typing import Protocol
 import ydb
 
 from eventedge.analysis import (
+    CURRENT_NEWS_MODEL_VERSION,
     EventType,
     InstrumentMention,
     NewsAnalysisInput,
@@ -24,6 +25,16 @@ from eventedge.llm import NewsAnalyzer, RuleBasedNewsAnalyzer
 
 CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 LOGGER = logging.getLogger(__name__)
+SIGNAL_REJECTION_REASONS = frozenset(
+    {
+        "below_score_threshold",
+        "event_other",
+        "low_materiality",
+        "no_instrument",
+        "product_or_marketing_noise",
+        "weak_direction",
+    }
+)
 
 
 class IdempotencyConflictError(Exception):
@@ -73,6 +84,7 @@ class Job:
 class IngestResult:
     job: Job
     replayed: bool
+    signal_outcome: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -465,6 +477,63 @@ def process_document(
     )
 
 
+def signal_rejection_reason(
+    document: NewsDocument,
+    features: SemanticFeatures,
+) -> str:
+    signal_instruments = [
+        instrument
+        for instrument in features.instruments
+        if instrument.relevance >= 0.9
+        and not (document.source_id == "moex_news" and instrument.ticker == "MOEX")
+    ]
+    if document.source_id == "cbr_press":
+        signal_instruments = []
+    if not signal_instruments:
+        projection = classify_news_event(
+            title=document.title,
+            content=document.content,
+            source_metadata=document.source_metadata,
+        )
+        if not context_signal_specs(
+            projection,
+            title=document.title,
+            content=document.content,
+        ):
+            return "no_instrument"
+    if features.event_type is EventType.OTHER:
+        return "event_other"
+    if features.materiality < 0.55:
+        return "low_materiality"
+    if abs(features.polarity) < 0.15:
+        return "weak_direction"
+    return "below_score_threshold"
+
+
+def document_with_signal_outcome(
+    document: NewsDocument,
+    processed: ProcessedNews,
+    *,
+    generate_signals: bool,
+) -> tuple[NewsDocument, Mapping[str, object] | None]:
+    if not generate_signals:
+        return document, None
+    outcome: dict[str, object] = {
+        "status": "generated" if processed.signals else "rejected_after_analysis",
+        "signal_count": len(processed.signals),
+        "model_version": CURRENT_NEWS_MODEL_VERSION,
+    }
+    if not processed.signals:
+        outcome["reason"] = signal_rejection_reason(document, processed.features)
+    return (
+        replace(
+            document,
+            source_metadata={**document.source_metadata, "signal_outcome": outcome},
+        ),
+        outcome,
+    )
+
+
 async def extract_features(
     analyzer: NewsAnalyzer,
     document: NewsDocument,
@@ -600,6 +669,11 @@ class MemoryNewsRepository:
                 now=now,
                 generate_signals=generate_signals,
             )
+            document, signal_outcome = document_with_signal_outcome(
+                document,
+                processed,
+                generate_signals=generate_signals,
+            )
             result_ref = processed.signals[0].id if processed.signals else processed.feature_set_id
             job = Job(
                 id=stable_id("job_", idempotency_key),
@@ -627,7 +701,11 @@ class MemoryNewsRepository:
             )
             self._signals.update({signal.id: signal for signal in processed.signals})
             self._requests[idempotency_key] = (document.payload_hash, job.id)
-            return IngestResult(job=job, replayed=False)
+            return IngestResult(
+                job=job,
+                replayed=False,
+                signal_outcome=signal_outcome,
+            )
 
     async def get_job(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
@@ -793,6 +871,11 @@ class YdbNewsRepository:
             now=now,
             generate_signals=generate_signals,
         )
+        document, signal_outcome = document_with_signal_outcome(
+            document,
+            processed,
+            generate_signals=generate_signals,
+        )
         result_ref = processed.signals[0].id if processed.signals else processed.feature_set_id
         job = Job(
             id=job_id,
@@ -875,7 +958,11 @@ class YdbNewsRepository:
                     async for _ in result_sets:
                         pass
             await tx.commit()
-            return IngestResult(job=job, replayed=False)
+            return IngestResult(
+                job=job,
+                replayed=False,
+                signal_outcome=signal_outcome,
+            )
 
         return await self._require_pool().retry_operation_async(transaction)
 

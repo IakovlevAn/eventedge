@@ -314,17 +314,20 @@ async def collect_news_items(
     consecutive_replays = 0
 
     for item in items:
+        product_marketing_noise = is_obvious_company_product_or_marketing_noise(item)
         event_candidate = item_filter(item) if item_filter is not None else True
         if event_candidate:
             matched += 1
         else:
             filtered += 1
-        direct_signal_candidate = event_candidate and (
+        direct_signal_candidate = event_candidate and not product_marketing_noise and (
             signal_filter(item) if signal_filter is not None else True
         )
         if direct_signal_candidate:
             signal_candidates += 1
-        analysis_candidate = direct_signal_candidate or is_signal_analysis_candidate(item)
+        analysis_candidate = not product_marketing_noise and (
+            direct_signal_candidate or is_signal_analysis_candidate(item)
+        )
         if analysis_candidate:
             analysis_candidates += 1
         features = RuleBasedNewsExtractor().extract(
@@ -356,7 +359,9 @@ async def collect_news_items(
         else:
             hash_metadata["channel_url"] = source_url
         classification_status = (
-            "signal_candidate"
+            "noise_filtered"
+            if product_marketing_noise
+            else "signal_candidate"
             if direct_signal_candidate
             else "semantic_candidate"
             if analysis_candidate
@@ -365,7 +370,9 @@ async def collect_news_items(
             else "unclassified"
         )
         classification_reason = (
-            "eligible_for_direct_signal_analysis"
+            "obvious_company_product_or_marketing_noise"
+            if product_marketing_noise
+            else "eligible_for_direct_signal_analysis"
             if direct_signal_candidate
             else "eligible_for_semantic_signal_analysis"
             if analysis_candidate
@@ -380,9 +387,21 @@ async def collect_news_items(
             ),
             "classification_status": classification_status,
             "classification_reason": classification_reason,
-            "classification_version": "candidate-gate-0.4.0",
+            "classification_version": "candidate-gate-0.6.0",
             "event_candidate": event_candidate,
             "analysis_candidate": analysis_candidate,
+            **(
+                {
+                    "signal_outcome": {
+                        "status": "rejected_before_analysis",
+                        "reason": "product_or_marketing_noise",
+                        "signal_count": 0,
+                        "policy_version": "candidate-gate-0.6.0",
+                    }
+                }
+                if product_marketing_noise
+                else {}
+            ),
         }
         hash_payload = {
             "source_id": source_id,
@@ -608,6 +627,8 @@ MARKET_NOISE_TITLE_MARKERS = (
     "рейтинг «покупать»",
     "рейтинг покупать",
     "рекомендуем покупать",
+    "выглядит заниженной",
+    "выглядят заниженными",
     "наш выбор",
     "топ акци",
     "арене",
@@ -646,6 +667,126 @@ PRICE_REACTION_TITLE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+OBVIOUS_COMPANY_PRODUCT_OR_MARKETING_MARKERS = (
+    "акция для клиентов",
+    "благотвор",
+    "в честь юбилея",
+    "кешбэк",
+    "кэшбэк",
+    "конкурс",
+    "новая функция",
+    "новое приложение",
+    "новый продукт",
+    "новый сервис",
+    "обновил приложение",
+    "обновила приложение",
+    "опрос клиентов",
+    "представил сервис",
+    "представила сервис",
+    "спецприз",
+    "спрос на ",
+    "скидк",
+    "теперь показывает",
+    "теперь показывают",
+    "фестивал",
+    "запустил сервис",
+    "запустила сервис",
+)
+
+MATERIAL_COMPANY_EVENT_MARKERS = (
+    "дивиденд",
+    "отчетност",
+    "отчётност",
+    "финансовые результат",
+    "чистая прибыль",
+    "чистый убыт",
+    "выручк",
+    "ebitda",
+    "мсфо",
+    "рсбу",
+    "санкц",
+    "эмбарго",
+    "блокирующ",
+    "приобрел долю",
+    "приобрёл долю",
+    "продал долю",
+    "покупк бизнеса",
+    "продаж бизнеса",
+    "слияни",
+    "поглощени",
+    "остановил производств",
+    "приостановил производств",
+    "возобновил производств",
+    "сократил производств",
+    "увеличил производств",
+    "добыча выросла",
+    "добыча снизилась",
+)
+
+MATERIAL_MA_MARKERS = (
+    "приобрел долю",
+    "приобрёл долю",
+    "продал долю",
+    "покупк бизнеса",
+    "продаж бизнеса",
+    "слияни",
+    "поглощени",
+)
+
+FINANCIAL_RESULTS_PRIORITY_MARKERS = (
+    "финансовые результат",
+    "финотчет",
+    "финотчёт",
+    "чистая прибыль",
+    "чистый убыт",
+    "выручк",
+    "ebitda",
+    "мсфо",
+    "рсбу",
+)
+
+SANCTIONS_PRIORITY_MARKERS = (
+    "санкц",
+    "эмбарго",
+    "блокирующ",
+)
+
+PRODUCTION_PRIORITY_MARKERS = (
+    "добыча выросла",
+    "добыча снизилась",
+    "запустил производств",
+    "запустила производств",
+    "остановил производств",
+    "приостановил производств",
+    "возобновил производств",
+    "сократил производств",
+    "увеличил производств",
+)
+
+
+def is_obvious_company_product_or_marketing_noise(item: RssItem) -> bool:
+    """Drop cheap, explicit company promotion before semantic analysis."""
+    normalized = f"{item.title} {item.content[:1500]}".casefold()
+    features = RuleBasedNewsExtractor().extract(
+        NewsAnalysisInput(
+            source_id="market_news",
+            title=item.title,
+            content=item.content,
+            language="ru",
+        )
+    )
+    explicit_noise = any(
+        marker in normalized for marker in OBVIOUS_COMPANY_PRODUCT_OR_MARKETING_MARKERS
+    )
+    if not explicit_noise and features.event_type is not EventType.PRODUCT:
+        return False
+    if any(marker in normalized for marker in MATERIAL_COMPANY_EVENT_MARKERS):
+        return False
+    return any(
+        instrument.relevance >= 0.9 and instrument.ticker != "MOEX"
+        for instrument in features.instruments
+    )
+
 
 def is_market_noise(item: RssItem) -> bool:
     """Reject posts that describe non-market topics or an already realised price move."""
@@ -654,6 +795,8 @@ def is_market_noise(item: RssItem) -> bool:
     if any(marker in categories for marker in NON_MARKET_CATEGORY_MARKERS):
         return True
     if any(marker in normalized_title for marker in MARKET_NOISE_TITLE_MARKERS):
+        return True
+    if is_obvious_company_product_or_marketing_noise(item):
         return True
     if PRICE_REACTION_TITLE_PATTERN.search(item.title):
         return True
@@ -664,6 +807,8 @@ def is_market_noise(item: RssItem) -> bool:
 
 MARKET_EVENT_MARKERS = (
     "дивиденд",
+    "финотчет",
+    "финотчёт",
     "отчетност",
     "отчётност",
     "финансовые результат",
@@ -841,6 +986,44 @@ def is_signal_analysis_candidate(item: RssItem) -> bool:
             content=item.content,
         )
     )
+
+
+def signal_analysis_priority(item: RssItem) -> int:
+    """Rank material company events while preserving source order within a rank."""
+    if is_obvious_company_product_or_marketing_noise(item):
+        return 0
+    features = RuleBasedNewsExtractor().extract(
+        NewsAnalysisInput(
+            source_id="market_news",
+            title=item.title,
+            content=item.content,
+            language="ru",
+        )
+    )
+    if not any(
+        instrument.relevance >= 0.9 and instrument.ticker != "MOEX"
+        for instrument in features.instruments
+    ):
+        return 1
+    normalized_title = item.title.casefold()
+    priority_context = (
+        f"{item.title} {item.content[:1500]}".casefold()
+        if len(item.title) <= 40
+        else normalized_title
+    )
+    financial_results = "нефинансов" not in priority_context and any(
+        marker in priority_context for marker in FINANCIAL_RESULTS_PRIORITY_MARKERS
+    )
+    if (
+        "дивиденд" in priority_context
+        or financial_results
+        or any(marker in priority_context for marker in SANCTIONS_PRIORITY_MARKERS)
+        or any(marker in priority_context for marker in MATERIAL_MA_MARKERS)
+    ):
+        return 3
+    if any(marker in priority_context for marker in PRODUCTION_PRIORITY_MARKERS):
+        return 2
+    return 1
 
 
 GOOGLE_TRUSTED_PUBLISHERS = (

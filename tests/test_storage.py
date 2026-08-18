@@ -21,6 +21,7 @@ from eventedge.storage import (
     normalize_signal_freshness,
     process_document,
     signal_from_row,
+    signal_rejection_reason,
     stable_id,
 )
 
@@ -85,6 +86,89 @@ def test_generate_signals_false_is_a_hard_storage_boundary() -> None:
     processed = process_document(document, features, now=timestamp, generate_signals=False)
 
     assert processed.signals == ()
+
+
+def test_analyzed_news_records_bounded_signal_rejection_reason() -> None:
+    timestamp = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    document = NewsDocument(
+        source_id="interfax",
+        external_id="sber-community-event",
+        published_at=timestamp,
+        received_at=timestamp,
+        title="Сбербанк провел встречу сообщества",
+        url="https://example.com/sber-community-event",
+        content="Участники обсудили общественные инициативы.",
+        language="ru",
+        source_metadata={"analysis_candidate": True, "signal_candidate": True},
+        payload_hash="sber-community-event-payload",
+    )
+    repository = MemoryNewsRepository()
+
+    async def scenario() -> tuple[dict[str, object], dict[str, object]]:
+        result = await repository.ingest("sber-community-event", document)
+        news = await repository.list_news(source_id="interfax", limit=1)
+        assert result.signal_outcome is not None
+        stored = news[0].source_metadata["signal_outcome"]
+        assert isinstance(stored, dict)
+        return dict(result.signal_outcome), dict(stored)
+
+    outcome, stored_outcome = asyncio.run(scenario())
+
+    assert outcome == {
+        "status": "rejected_after_analysis",
+        "signal_count": 0,
+        "model_version": "signal-engine-0.6.1",
+        "reason": "event_other",
+    }
+    assert stored_outcome == outcome
+
+
+@pytest.mark.parametrize(
+    ("has_instrument", "event_type", "materiality", "polarity", "expected"),
+    [
+        (False, EventType.FINANCIAL_RESULTS, 0.9, 1.0, "no_instrument"),
+        (True, EventType.OTHER, 0.9, 1.0, "event_other"),
+        (True, EventType.PRODUCT, 0.4, 1.0, "low_materiality"),
+        (True, EventType.FINANCIAL_RESULTS, 0.9, 0.0, "weak_direction"),
+    ],
+)
+def test_signal_rejection_reason_is_bounded_and_explainable(
+    has_instrument: bool,
+    event_type: EventType,
+    materiality: float,
+    polarity: float,
+    expected: str,
+) -> None:
+    timestamp = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    document = NewsDocument(
+        source_id="interfax",
+        external_id="reason-fixture",
+        published_at=timestamp,
+        received_at=timestamp,
+        title="Корпоративное событие",
+        url="https://example.com/reason-fixture",
+        content="Опубликована новая информация.",
+        language="ru",
+        source_metadata={"analysis_candidate": True},
+        payload_hash="reason-fixture-payload",
+    )
+    features = SemanticFeatures(
+        extractor_version="test-0.1.0",
+        event_type=event_type,
+        instruments=(
+            [InstrumentMention(ticker="SBER", relevance=0.96, matched_alias="Сбербанк")]
+            if has_instrument
+            else []
+        ),
+        facts=[],
+        polarity=polarity,
+        materiality=materiality,
+        novelty=1,
+        temporal_status=TemporalStatus.CURRENT,
+        rationale="Проверка причины отказа.",
+    )
+
+    assert signal_rejection_reason(document, features) == expected
 
 
 def test_evaluation_epochs_are_kept_independently_by_model() -> None:
