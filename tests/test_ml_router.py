@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import ValidationError
 
+from eventedge.llm import RuleBasedNewsAnalyzer
 from eventedge.main import reprocess_signal_candidates_batch
 from eventedge.ml_router import (
     MlRouterArtifact,
@@ -233,6 +234,55 @@ def candidate_document() -> NewsDocument:
         source_metadata={"categories": ["Компании"]},
         payload_hash="original-ml-router-candidate",
     )
+
+
+def test_reprocess_prioritizes_material_event_without_changing_batch_limit() -> None:
+    analyzer = AsyncMock()
+    analyzer.extract.side_effect = RuleBasedNewsAnalyzer().extract
+    repository = MemoryNewsRepository(analyzer=analyzer)
+    standard = replace(
+        candidate_document(),
+        external_id="newer-management",
+        published_at=datetime(2026, 8, 16, 11, tzinfo=UTC),
+        received_at=datetime(2026, 8, 16, 11, 1, tzinfo=UTC),
+        title="Сбербанк назначил нового руководителя направления",
+        content="Компания сообщила о кадровом назначении.",
+        payload_hash="newer-management",
+    )
+    material = replace(
+        candidate_document(),
+        external_id="older-dividend",
+        published_at=datetime(2026, 8, 16, 10, tzinfo=UTC),
+        received_at=datetime(2026, 8, 16, 10, 1, tzinfo=UTC),
+        title="Лукойл рекомендовал дивиденды",
+        content="Совет директоров рекомендовал выплатить 500 рублей на акцию.",
+        payload_hash="older-dividend",
+    )
+
+    async def scenario() -> tuple[dict[str, object], str, dict[str, object]]:
+        await repository.ingest("standard-original", standard, generate_signals=False)
+        await repository.ingest("material-original", material, generate_signals=False)
+        news = await repository.list_news(source_id="interfax", limit=10)
+        material_id = next(item.id for item in news if item.external_id == "older-dividend")
+        result = await reprocess_signal_candidates_batch(repository, limit=1)
+        updated = await repository.list_news(source_id="interfax", limit=10)
+        standard_metadata = next(
+            dict(item.source_metadata)
+            for item in updated
+            if item.external_id == "newer-management"
+        )
+        return result, material_id, standard_metadata
+
+    result, material_id, standard_metadata = asyncio.run(scenario())
+
+    assert result["meta"]["batch_limit"] == 1
+    assert result["meta"]["selected"] == 1
+    assert result["meta"]["selected_priority_counts"] == {"3": 1}
+    assert result["data"][0]["news_id"] == material_id
+    assert analyzer.extract.await_count == 1
+    assert analyzer.extract.await_args.args[0].title == "Лукойл рекомендовал дивиденды"
+    assert "reprocess_version" not in standard_metadata
+    assert "signal_outcome" not in standard_metadata
 
 
 def test_shadow_records_decision_but_still_calls_downstream_analyzer() -> None:

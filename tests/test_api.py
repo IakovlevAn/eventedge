@@ -545,7 +545,7 @@ def test_backfill_reclassifies_stored_sector_news_without_ticker(
         app.state.evaluation_material_cache = None
 
     assert response.status_code == 200
-    assert response.json()["meta"]["candidate_policy"] == "targetable-economic-0.4.1"
+    assert response.json()["meta"]["candidate_policy"] == "material-event-priority-0.5.0"
     assert {signal.ticker for signal in signals} == {"RUAGRI", "RUTRANS"}
     assert {signal.model_version for signal in signals} == {"signal-engine-0.6.1"}
     assert updated.source_metadata["classification_status"] == "semantic_candidate"
@@ -646,6 +646,7 @@ def test_maintenance_timer_refreshes_models_and_persisted_evals(
         "failed": 0,
         "failure_types": [],
         "remaining": 4,
+        "rejection_reasons": {},
         "outcomes": 1,
         "epochs": 0,
     }
@@ -780,6 +781,7 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
         "signaled": 1,
         "candidate_coverage_pct": 100.0,
         "signal_yield_pct": 100.0,
+        "rejection_reasons": {},
         "signal_model_version": "signal-engine-0.6.1",
     }
     assert news.json()["meta"]["collection_lanes"] == [
@@ -847,6 +849,46 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
         headers={"If-None-Match": signal.headers["ETag"]},
     )
     assert cached.status_code == 304
+
+
+def test_news_coverage_aggregates_bounded_signal_rejection_reasons() -> None:
+    timestamp = datetime(2026, 8, 18, 12, tzinfo=UTC)
+    news = NewsRecord(
+        id="news_rejected_company",
+        source_id="interfax",
+        external_id="rejected-company",
+        published_at=timestamp,
+        received_at=timestamp,
+        title="Сбербанк провел встречу сообщества",
+        url="https://example.com/rejected-company",
+        content="Участники обсудили общественные инициативы.",
+        language="ru",
+        source_metadata={
+            "event_candidate": True,
+            "analysis_candidate": True,
+            "signal_candidate": True,
+            "tickers": ["SBER"],
+            "processing_status": "processed",
+            "signal_outcome": {
+                "status": "rejected_after_analysis",
+                "reason": "event_other",
+                "signal_count": 0,
+                "model_version": "signal-engine-0.6.1",
+            },
+        },
+        created_at=timestamp,
+    )
+
+    payload = main_module.build_news_response_payload(
+        [news],
+        [],
+        source_id=None,
+        scope="company",
+        limit=100,
+    )
+
+    coverage = payload["meta"]["processing_coverage"]
+    assert coverage["rejection_reasons"] == {"event_other": 1}
 
 
 def test_signal_list_rejects_unknown_direction() -> None:
