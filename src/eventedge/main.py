@@ -114,6 +114,7 @@ EVALUATION_CACHE_TTL_SECONDS = 60
 BACKFILL_BATCH_LIMIT = min(40, max(1, int(os.environ.get("BACKFILL_BATCH_LIMIT", "4"))))
 BACKFILL_CONCURRENCY = min(4, max(1, int(os.environ.get("BACKFILL_CONCURRENCY", "1"))))
 MAINTENANCE_DEADLINE_SECONDS = 20.0
+SIGNAL_READ_TIMEOUT_SECONDS = 5.0
 CONTENT_SNAPSHOT_TTL_SECONDS = 60 if os.environ.get("APP_ENV") == "prod" else 0
 CANONICAL_NEWS_RESPONSE_LIMIT = 500
 RECENT_REPOSITORY_SUCCESS_TTL_SECONDS = 120 if os.environ.get("APP_ENV") == "prod" else 0
@@ -1566,7 +1567,51 @@ async def list_signals(
             detail="direction must contain only up, neutral or down.",
         )
 
-    news, stored_signals = await load_content_snapshot(request)
+    selected_model_version = model_version or (
+        CURRENT_NEWS_MODEL_VERSION if (status or "active") == "active" else None
+    )
+    repository: NewsRepository = request.app.state.news_repository
+    try:
+        async with asyncio.timeout(SIGNAL_READ_TIMEOUT_SECONDS):
+            stored_signals = await repository.list_signals(
+                ticker=ticker,
+                directions=requested_directions,
+                status=status or "active",
+                min_confidence=min_confidence,
+                limit=1000,
+                model_version=selected_model_version,
+            )
+            requested_news_ids = frozenset(signal.news_id for signal in stored_signals)
+            news = await repository.get_news_by_ids(requested_news_ids)
+    except TimeoutError:
+        logger.warning("Signal feed read exceeded %.1fs", SIGNAL_READ_TIMEOUT_SECONDS)
+        return problem_response(
+            request,
+            status=503,
+            code="DEPENDENCY_UNAVAILABLE",
+            title="Signal feed is temporarily unavailable",
+            detail="The structured data store did not complete the signal read in time.",
+        )
+    except Exception:
+        logger.exception("Signal feed read failed")
+        return problem_response(
+            request,
+            status=503,
+            code="DEPENDENCY_UNAVAILABLE",
+            title="Signal feed is temporarily unavailable",
+            detail="The structured data store did not return a complete signal feed.",
+        )
+
+    if {item.id for item in news} != requested_news_ids:
+        logger.error("Signal feed read returned incomplete news references")
+        return problem_response(
+            request,
+            status=503,
+            code="DEPENDENCY_UNAVAILABLE",
+            title="Signal feed is temporarily unavailable",
+            detail="The structured data store did not return a complete signal feed.",
+        )
+    request.app.state.repository_last_success_at = time.monotonic()
     hidden_ids = hidden_news_ids(news)
     news_by_id = {item.id: item for item in news}
     signals = filter_signals(
@@ -1576,16 +1621,13 @@ async def list_signals(
         status=status or "active",
         min_confidence=min_confidence,
         limit=1000,
-    )
-    selected_model_version = model_version or (
-        CURRENT_NEWS_MODEL_VERSION if (status or "active") == "active" else None
+        model_version=selected_model_version,
     )
     signals = deduplicate_eval_events(
         deduplicate_signals(
             signal
             for signal in signals
             if signal.news_id not in hidden_ids
-            and (selected_model_version is None or signal.model_version == selected_model_version)
         ),
         news_by_id,
     )[:limit]
