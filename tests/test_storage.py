@@ -20,10 +20,53 @@ from eventedge.storage import (
     migrate_ydb_schema,
     normalize_signal_freshness,
     process_document,
+    select_signals_query,
     signal_from_row,
     signal_rejection_reason,
     stable_id,
 )
+
+
+def test_ydb_signal_query_applies_filters_and_bounded_limit() -> None:
+    query, parameters = select_signals_query(
+        ticker="SBER",
+        directions=frozenset({"up", "down"}),
+        status="active",
+        min_confidence=0.7,
+        limit=10_000,
+        model_version="signal-engine-0.6.1",
+    )
+
+    assert "ticker = $ticker" in query
+    assert "direction IN ($direction_0, $direction_1)" in query
+    assert "status = $status" in query
+    assert "expires_at > $now" in query
+    assert "confidence >= $min_confidence" in query
+    assert "model_version = $model_version" in query
+    assert "LIMIT 1000" in query
+    assert parameters["$ticker"] == "SBER"
+    assert parameters["$direction_0"] == "down"
+    assert parameters["$direction_1"] == "up"
+    assert parameters["$status"] == "active"
+    assert parameters["$min_confidence"] == 0.7
+    assert parameters["$model_version"] == "signal-engine-0.6.1"
+
+
+def test_ydb_expired_signal_query_includes_active_rows_for_publication_normalization() -> None:
+    query, parameters = select_signals_query(
+        ticker=None,
+        directions=None,
+        status="expired",
+        min_confidence=None,
+        limit=20,
+        model_version=None,
+    )
+
+    assert "status IN ($status, $active_status)" in query
+    assert "$now" not in parameters
+    assert "LIMIT 20" in query
+    assert parameters["$status"] == "expired"
+    assert parameters["$active_status"] == "active"
 
 
 def test_neutral_market_context_is_analyzed_without_becoming_a_signal() -> None:

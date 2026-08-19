@@ -286,6 +286,11 @@ class NewsRepository(Protocol):
         limit: int,
     ) -> list[NewsRecord]: ...
 
+    async def get_news_by_ids(
+        self,
+        news_ids: frozenset[str],
+    ) -> list[NewsRecord]: ...
+
     async def list_signals(
         self,
         *,
@@ -294,6 +299,7 @@ class NewsRepository(Protocol):
         status: str | None,
         min_confidence: float | None,
         limit: int,
+        model_version: str | None = None,
     ) -> list[SignalRecord]: ...
 
     async def get_signal(self, signal_id: str) -> SignalRecord | None: ...
@@ -563,6 +569,7 @@ def filter_signals(
     status: str | None,
     min_confidence: float | None,
     limit: int,
+    model_version: str | None = None,
 ) -> list[SignalRecord]:
     current_time = utc_now()
     normalized = (
@@ -578,6 +585,7 @@ def filter_signals(
         and (directions is None or signal.direction in directions)
         and (status is None or signal.status == status)
         and (min_confidence is None or signal.confidence >= min_confidence)
+        and (model_version is None or signal.model_version == model_version)
     )
     return sorted(filtered, key=lambda signal: (signal.as_of, signal.id), reverse=True)[:limit]
 
@@ -725,6 +733,12 @@ class MemoryNewsRepository:
             reverse=True,
         )[:limit]
 
+    async def get_news_by_ids(
+        self,
+        news_ids: frozenset[str],
+    ) -> list[NewsRecord]:
+        return [self._news[news_id] for news_id in sorted(news_ids) if news_id in self._news]
+
     async def list_signals(
         self,
         *,
@@ -733,6 +747,7 @@ class MemoryNewsRepository:
         status: str | None,
         min_confidence: float | None,
         limit: int,
+        model_version: str | None = None,
     ) -> list[SignalRecord]:
         return filter_signals(
             list(self._signals.values()),
@@ -741,6 +756,7 @@ class MemoryNewsRepository:
             status=status,
             min_confidence=min_confidence,
             limit=limit,
+            model_version=model_version,
         )
 
     async def get_signal(self, signal_id: str) -> SignalRecord | None:
@@ -1001,6 +1017,24 @@ class YdbNewsRepository:
         )
         return list(records)[:limit]
 
+    async def get_news_by_ids(
+        self,
+        news_ids: frozenset[str],
+    ) -> list[NewsRecord]:
+        if not news_ids:
+            return []
+        result_sets = await self._require_pool().execute_with_retries(
+            SELECT_NEWS_BY_IDS_QUERY,
+            {
+                "$news_ids": ydb.TypedValue(
+                    sorted(news_ids),
+                    ydb.ListType(ydb.PrimitiveType.Utf8),
+                )
+            },
+        )
+        rows = result_sets[0].rows if result_sets else []
+        return [news_from_row(row) for row in rows]
+
     async def list_signals(
         self,
         *,
@@ -1009,8 +1043,17 @@ class YdbNewsRepository:
         status: str | None,
         min_confidence: float | None,
         limit: int,
+        model_version: str | None = None,
     ) -> list[SignalRecord]:
-        result_sets = await self._require_pool().execute_with_retries(SELECT_SIGNALS_QUERY)
+        query, parameters = select_signals_query(
+            ticker=ticker,
+            directions=directions,
+            status=status,
+            min_confidence=min_confidence,
+            limit=limit,
+            model_version=model_version,
+        )
+        result_sets = await self._require_pool().execute_with_retries(query, parameters)
         rows = result_sets[0].rows if result_sets else []
         return filter_signals(
             [signal_from_row(row) for row in rows],
@@ -1019,6 +1062,7 @@ class YdbNewsRepository:
             status=status,
             min_confidence=min_confidence,
             limit=limit,
+            model_version=model_version,
         )
 
     async def get_signal(self, signal_id: str) -> SignalRecord | None:
@@ -1591,6 +1635,25 @@ ORDER BY published_at DESC, news_id DESC
 LIMIT 1000;
 """
 
+SELECT_NEWS_BY_IDS_QUERY = """
+DECLARE $news_ids AS List<Utf8>;
+
+SELECT
+    news_id,
+    source_id,
+    external_id,
+    published_at,
+    received_at,
+    title,
+    url,
+    content,
+    language,
+    source_metadata,
+    created_at
+FROM `news_items`
+WHERE news_id IN $news_ids;
+"""
+
 SIGNAL_SELECT_COLUMNS = """
     signal_id,
     news_id,
@@ -1621,6 +1684,74 @@ FROM `signals`
 ORDER BY as_of DESC, signal_id DESC
 LIMIT 1000;
 """
+
+
+def select_signals_query(
+    *,
+    ticker: str | None,
+    directions: frozenset[str] | None,
+    status: str | None,
+    min_confidence: float | None,
+    limit: int,
+    model_version: str | None,
+) -> tuple[str, dict[str, object]]:
+    """Build a bounded YDB signal read with only typed, server-side filters."""
+    declarations: list[str] = []
+    predicates: list[str] = []
+    parameters: dict[str, object] = {}
+
+    if ticker is not None:
+        declarations.append("DECLARE $ticker AS Utf8;")
+        predicates.append("ticker = $ticker")
+        parameters["$ticker"] = ticker
+
+    if directions:
+        direction_parameters = []
+        for index, direction in enumerate(sorted(directions)):
+            parameter = f"$direction_{index}"
+            declarations.append(f"DECLARE {parameter} AS Utf8;")
+            direction_parameters.append(parameter)
+            parameters[parameter] = direction
+        predicates.append(f"direction IN ({', '.join(direction_parameters)})")
+
+    if status is not None:
+        declarations.append("DECLARE $status AS Utf8;")
+        parameters["$status"] = status
+        if status == "active":
+            declarations.append("DECLARE $now AS Timestamp;")
+            predicates.extend(("status = $status", "expires_at > $now"))
+            parameters["$now"] = ydb.TypedValue(utc_now(), ydb.PrimitiveType.Timestamp)
+        elif status == "expired":
+            # Legacy rows may have been stored with a received-at expiry. Fetch
+            # active rows too so normalize_signal_freshness can re-anchor them
+            # to the source publication before applying the requested status.
+            declarations.append("DECLARE $active_status AS Utf8;")
+            predicates.append("status IN ($status, $active_status)")
+            parameters["$active_status"] = "active"
+        else:
+            predicates.append("status = $status")
+
+    if min_confidence is not None:
+        declarations.append("DECLARE $min_confidence AS Double;")
+        predicates.append("confidence >= $min_confidence")
+        parameters["$min_confidence"] = min_confidence
+
+    if model_version is not None:
+        declarations.append("DECLARE $model_version AS Utf8;")
+        predicates.append("model_version = $model_version")
+        parameters["$model_version"] = model_version
+
+    bounded_limit = min(1000, max(1, limit))
+    where_clause = f"\nWHERE {' AND '.join(predicates)}" if predicates else ""
+    query = (
+        "\n".join(declarations)
+        + f"\n\nSELECT {SIGNAL_SELECT_COLUMNS}\n"
+        + "FROM `signals`"
+        + where_clause
+        + "\nORDER BY as_of DESC, signal_id DESC"
+        + f"\nLIMIT {bounded_limit};\n"
+    )
+    return query, parameters
 
 SELECT_SIGNAL_QUERY = f"""
 DECLARE $signal_id AS Utf8;
@@ -1729,6 +1860,7 @@ VALIDATED_QUERIES = (
     INSERT_SIGNAL_QUERY,
     SELECT_JOB_QUERY,
     SELECT_NEWS_QUERY,
+    SELECT_NEWS_BY_IDS_QUERY,
     SELECT_SIGNALS_QUERY,
     SELECT_SIGNAL_QUERY,
     SELECT_TELEGRAM_SOURCES_QUERY,

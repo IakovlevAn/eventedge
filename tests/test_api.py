@@ -710,6 +710,73 @@ def test_signal_list_has_contract_shape_and_etag() -> None:
     assert cached.content == b""
 
 
+def test_signal_list_reads_repository_instead_of_stale_empty_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = MemoryNewsRepository()
+    timestamp = datetime.now(UTC).replace(microsecond=0)
+    document = NewsDocument(
+        source_id="interfax",
+        external_id="direct-signal-read",
+        published_at=timestamp,
+        received_at=timestamp,
+        title="Сбербанк опубликовал сильную отчётность",
+        url="https://example.com/direct-signal-read",
+        content="Чистая прибыль выросла на 20% и оказалась выше ожиданий.",
+        language="ru",
+        source_metadata={"signal_candidate": True},
+        payload_hash="direct-signal-read-payload",
+    )
+    result = asyncio.run(repository.ingest("direct-signal-read-key", document))
+    monkeypatch.setattr(app.state, "news_repository", repository)
+    monkeypatch.setattr(
+        app.state,
+        "content_snapshot_cache",
+        {
+            "repository": repository,
+            "expires_at": time.monotonic() + 60,
+            "news": [],
+            "signals": [],
+        },
+    )
+    snapshot_read = AsyncMock(side_effect=AssertionError("signal list must bypass snapshot"))
+    monkeypatch.setattr(main_module, "load_content_snapshot", snapshot_read)
+
+    response = client.get("/v1/signals", params={"ticker": "SBER"})
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["data"]] == [result.job.result_ref]
+    snapshot_read.assert_not_awaited()
+
+
+def test_signal_list_rejects_incomplete_repository_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = MemoryNewsRepository()
+    timestamp = datetime.now(UTC).replace(microsecond=0)
+    document = NewsDocument(
+        source_id="interfax",
+        external_id="incomplete-signal-read",
+        published_at=timestamp,
+        received_at=timestamp,
+        title="Сбербанк опубликовал сильную отчётность",
+        url="https://example.com/incomplete-signal-read",
+        content="Чистая прибыль выросла на 20% и оказалась выше ожиданий.",
+        language="ru",
+        source_metadata={"signal_candidate": True},
+        payload_hash="incomplete-signal-read-payload",
+    )
+    asyncio.run(repository.ingest("incomplete-signal-read-key", document))
+    monkeypatch.setattr(repository, "get_news_by_ids", AsyncMock(return_value=[]))
+    monkeypatch.setattr(app.state, "news_repository", repository)
+
+    response = client.get("/v1/signals", params={"ticker": "SBER"})
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "DEPENDENCY_UNAVAILABLE"
+    assert response.headers["content-type"].startswith("application/problem+json")
+
+
 def test_invalid_limit_uses_problem_json() -> None:
     response = client.get("/v1/signals", params={"limit": 101})
 
