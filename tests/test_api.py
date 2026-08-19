@@ -96,6 +96,34 @@ def test_worker_startup_skips_public_read_model_prewarm(
     prewarm.assert_not_awaited()
 
 
+def test_api_startup_does_not_block_on_public_read_model_prewarm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+    application = SimpleNamespace(
+        state=SimpleNamespace(
+            news_repository=repository,
+            repository_last_success_at=None,
+            content_snapshot_inflight=None,
+            signal_feed_inflight=None,
+        )
+    )
+    prewarm = AsyncMock(side_effect=AssertionError("startup must not build a broad snapshot"))
+    monkeypatch.setenv("EVENTEDGE_COMPONENT", "api")
+    monkeypatch.setattr(main_module, "CONTENT_SNAPSHOT_TTL_SECONDS", 60)
+    monkeypatch.setattr(main_module, "refresh_content_snapshot_in_background", prewarm)
+
+    async def scenario() -> None:
+        async with main_module.lifespan(application):
+            pass
+
+    asyncio.run(scenario())
+
+    repository.start.assert_awaited_once()
+    repository.stop.assert_awaited_once()
+    prewarm.assert_not_awaited()
+
+
 def test_expired_content_snapshot_is_served_while_refresh_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -136,6 +164,159 @@ def test_expired_content_snapshot_is_served_while_refresh_runs(
     assert len(signals) == 1
     list_news.assert_not_awaited()
     list_signals.assert_not_awaited()
+
+
+def test_signal_feed_cache_reuses_complete_repository_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "SIGNAL_FEED_TTL_SECONDS", 30)
+
+    async def scenario() -> tuple[list[SignalRecord], AsyncMock, AsyncMock]:
+        repository = MemoryNewsRepository()
+        timestamp = datetime.now(UTC).replace(microsecond=0)
+        await repository.ingest(
+            "cached-signal-feed-key",
+            NewsDocument(
+                source_id="interfax",
+                external_id="cached-signal-feed",
+                published_at=timestamp,
+                received_at=timestamp,
+                title="Сбербанк опубликовал сильную отчётность",
+                url="https://example.com/cached-signal-feed",
+                content="Чистая прибыль выросла на 20% и превысила ожидания.",
+                language="ru",
+                source_metadata={"signal_candidate": True},
+                payload_hash="cached-signal-feed-payload",
+            ),
+        )
+        list_signals = AsyncMock(wraps=repository.list_signals)
+        get_news_by_ids = AsyncMock(wraps=repository.get_news_by_ids)
+        repository.list_signals = list_signals
+        repository.get_news_by_ids = get_news_by_ids
+        application = SimpleNamespace(
+            state=SimpleNamespace(
+                news_repository=repository,
+                repository_last_success_at=None,
+                signal_feed_cache=None,
+                signal_feed_lock=asyncio.Lock(),
+                signal_feed_inflight=None,
+            )
+        )
+        request = SimpleNamespace(app=application)
+
+        first = await main_module.load_signal_feed(request)
+        second = await main_module.load_signal_feed(request)
+
+        assert first is not second
+        assert first[0] is second[0]
+        assert first[1] is second[1]
+        return first[1], list_signals, get_news_by_ids
+
+    signals, list_signals, get_news_by_ids = asyncio.run(scenario())
+
+    assert len(signals) == 1
+    list_signals.assert_awaited_once()
+    get_news_by_ids.assert_awaited_once()
+
+
+def test_expired_signal_feed_is_served_while_refresh_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "SIGNAL_FEED_TTL_SECONDS", 30)
+    news = [object()]
+    signals = [object()]
+    refresh = AsyncMock(return_value=(news, signals))
+    monkeypatch.setattr(main_module, "refresh_signal_feed", refresh)
+
+    async def scenario() -> tuple[list[object], list[object]]:
+        repository = object()
+        application = SimpleNamespace(
+            state=SimpleNamespace(
+                news_repository=repository,
+                signal_feed_cache={
+                    "repository": repository,
+                    "expires_at": time.monotonic() - 1,
+                    "news": news,
+                    "signals": signals,
+                },
+                signal_feed_inflight=None,
+            )
+        )
+        result = await main_module.load_signal_feed(SimpleNamespace(app=application))
+        await application.state.signal_feed_inflight
+        return result
+
+    result_news, result_signals = asyncio.run(scenario())
+
+    assert result_news is news
+    assert result_signals is signals
+    refresh.assert_awaited_once()
+
+
+def test_empty_signal_refresh_preserves_nonempty_last_known_good(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "SIGNAL_FEED_TTL_SECONDS", 30)
+
+    async def scenario() -> tuple[list[object], list[object], float]:
+        repository = SimpleNamespace(
+            list_signals=AsyncMock(return_value=[]),
+            get_news_by_ids=AsyncMock(return_value=[]),
+        )
+        news = [object()]
+        signals = [object()]
+        application = SimpleNamespace(
+            state=SimpleNamespace(
+                news_repository=repository,
+                repository_last_success_at=None,
+                signal_feed_cache={
+                    "repository": repository,
+                    "expires_at": time.monotonic() - 1,
+                    "news": news,
+                    "signals": signals,
+                },
+                signal_feed_lock=asyncio.Lock(),
+            )
+        )
+
+        result_news, result_signals = await main_module.refresh_signal_feed(application)
+        return result_news, result_signals, application.state.signal_feed_cache["expires_at"]
+
+    result_news, result_signals, expires_at = asyncio.run(scenario())
+
+    assert len(result_news) == 1
+    assert len(result_signals) == 1
+    assert expires_at > time.monotonic()
+
+
+def test_failed_background_signal_refresh_applies_retry_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = object()
+    cache = {
+        "repository": repository,
+        "expires_at": time.monotonic() - 1,
+        "news": [object()],
+        "signals": [object()],
+    }
+    application = SimpleNamespace(
+        state=SimpleNamespace(
+            news_repository=repository,
+            signal_feed_cache=cache,
+            signal_feed_inflight=None,
+        )
+    )
+    refresh = AsyncMock(side_effect=TimeoutError)
+    monkeypatch.setattr(main_module, "refresh_signal_feed", refresh)
+
+    async def scenario() -> None:
+        application.state.signal_feed_inflight = asyncio.current_task()
+        await main_module.refresh_signal_feed_in_background(application)
+
+    asyncio.run(scenario())
+
+    assert cache["expires_at"] > time.monotonic()
+    assert application.state.signal_feed_inflight is None
 
 
 def test_news_response_cache_reuses_only_the_same_snapshot(

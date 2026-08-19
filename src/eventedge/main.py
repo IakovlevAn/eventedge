@@ -114,7 +114,9 @@ EVALUATION_CACHE_TTL_SECONDS = 60
 BACKFILL_BATCH_LIMIT = min(40, max(1, int(os.environ.get("BACKFILL_BATCH_LIMIT", "4"))))
 BACKFILL_CONCURRENCY = min(4, max(1, int(os.environ.get("BACKFILL_CONCURRENCY", "1"))))
 MAINTENANCE_DEADLINE_SECONDS = 20.0
-SIGNAL_READ_TIMEOUT_SECONDS = 5.0
+SIGNAL_READ_TIMEOUT_SECONDS = 12.0
+SIGNAL_FEED_TTL_SECONDS = 30 if os.environ.get("APP_ENV") == "prod" else 0
+SIGNAL_FEED_FAILURE_RETRY_SECONDS = 5.0
 CONTENT_SNAPSHOT_TTL_SECONDS = 60 if os.environ.get("APP_ENV") == "prod" else 0
 CANONICAL_NEWS_RESPONSE_LIMIT = 500
 RECENT_REPOSITORY_SUCCESS_TTL_SECONDS = 120 if os.environ.get("APP_ENV") == "prod" else 0
@@ -257,24 +259,17 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     repository: NewsRepository = application.state.news_repository
     await repository.start()
     application.state.repository_last_success_at = time.monotonic()
-    component = os.environ.get("EVENTEDGE_COMPONENT", "api")
-    if component != "worker" and CONTENT_SNAPSHOT_TTL_SECONDS > 0:
-        # A provisioned API instance must not report startup complete before
-        # its default read model is ready. Otherwise the first request races
-        # the background projection and concurrent callers duplicate CPU work.
-        # Timer workers do not serve public reads, so building this model on
-        # every cold worker only delays collection and increases billed time.
-        await refresh_content_snapshot_in_background(application)
     try:
         yield
     finally:
-        inflight = application.state.content_snapshot_inflight
-        if inflight is not None and not inflight.done():
-            inflight.cancel()
-            try:
-                await inflight
-            except asyncio.CancelledError:
-                pass
+        for task_name in ("content_snapshot_inflight", "signal_feed_inflight"):
+            inflight = getattr(application.state, task_name, None)
+            if inflight is not None and not inflight.done():
+                inflight.cancel()
+                try:
+                    await inflight
+                except asyncio.CancelledError:
+                    pass
         await repository.stop()
 
 
@@ -328,6 +323,9 @@ app.state.evaluation_material_lock = asyncio.Lock()
 app.state.content_snapshot_cache = None
 app.state.content_snapshot_lock = asyncio.Lock()
 app.state.content_snapshot_inflight = None
+app.state.signal_feed_cache = None
+app.state.signal_feed_lock = asyncio.Lock()
+app.state.signal_feed_inflight = None
 app.state.news_response_cache = None
 app.state.news_response_inflight = {}
 app.state.event_response_cache = None
@@ -461,12 +459,100 @@ async def load_content_snapshot(request: Request) -> tuple[list[NewsRecord], lis
     return await refresh_content_snapshot(request.app)
 
 
+async def refresh_signal_feed(
+    application: FastAPI,
+) -> tuple[list[NewsRecord], list[SignalRecord]]:
+    """Refresh the current active signal feed without the broad content snapshot."""
+    repository: NewsRepository = application.state.news_repository
+    async with application.state.signal_feed_lock:
+        now = time.monotonic()
+        cached = application.state.signal_feed_cache
+        if (
+            SIGNAL_FEED_TTL_SECONDS > 0
+            and cached is not None
+            and cached["repository"] is repository
+            and cached["expires_at"] > now
+        ):
+            return cached["news"], cached["signals"]
+
+        async with asyncio.timeout(SIGNAL_READ_TIMEOUT_SECONDS):
+            signals = await repository.list_signals(
+                ticker=None,
+                directions=None,
+                status="active",
+                min_confidence=None,
+                limit=1000,
+                model_version=CURRENT_NEWS_MODEL_VERSION,
+            )
+            requested_news_ids = frozenset(signal.news_id for signal in signals)
+            news = await repository.get_news_by_ids(requested_news_ids)
+        if {item.id for item in news} != requested_news_ids:
+            raise RuntimeError("signal feed contains unresolved news references")
+
+        completed_at = time.monotonic()
+        application.state.repository_last_success_at = completed_at
+        if (
+            not signals
+            and cached is not None
+            and cached["repository"] is repository
+            and cached["signals"]
+        ):
+            logger.warning("Ignoring anomalous empty signal feed refresh")
+            cached["expires_at"] = completed_at + SIGNAL_FEED_TTL_SECONDS
+            return cached["news"], cached["signals"]
+        if SIGNAL_FEED_TTL_SECONDS > 0:
+            application.state.signal_feed_cache = {
+                "repository": repository,
+                "expires_at": completed_at + SIGNAL_FEED_TTL_SECONDS,
+                "news": news,
+                "signals": signals,
+            }
+        return news, signals
+
+
+async def refresh_signal_feed_in_background(application: FastAPI) -> None:
+    current_task = asyncio.current_task()
+    try:
+        await refresh_signal_feed(application)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Background signal feed refresh failed")
+        cached = application.state.signal_feed_cache
+        if cached is not None and cached["repository"] is application.state.news_repository:
+            cached["expires_at"] = time.monotonic() + SIGNAL_FEED_FAILURE_RETRY_SECONDS
+    finally:
+        if application.state.signal_feed_inflight is current_task:
+            application.state.signal_feed_inflight = None
+
+
+async def load_signal_feed(request: Request) -> tuple[list[NewsRecord], list[SignalRecord]]:
+    """Serve the last complete feed while a single background refresh runs."""
+    repository: NewsRepository = request.app.state.news_repository
+    now = time.monotonic()
+    cached = request.app.state.signal_feed_cache
+    if cached is not None and cached["repository"] is repository:
+        if cached["expires_at"] <= now:
+            inflight = request.app.state.signal_feed_inflight
+            if inflight is None or inflight.done():
+                request.app.state.signal_feed_inflight = asyncio.create_task(
+                    refresh_signal_feed_in_background(request.app)
+                )
+        return cached["news"], cached["signals"]
+    return await refresh_signal_feed(request.app)
+
+
 def invalidate_content_snapshot(request: Request) -> None:
     inflight = request.app.state.content_snapshot_inflight
     if inflight is not None and not inflight.done():
         inflight.cancel()
     request.app.state.content_snapshot_inflight = None
     request.app.state.content_snapshot_cache = None
+    signal_inflight = request.app.state.signal_feed_inflight
+    if signal_inflight is not None and not signal_inflight.done():
+        signal_inflight.cancel()
+    request.app.state.signal_feed_inflight = None
+    request.app.state.signal_feed_cache = None
     request.app.state.news_response_cache = None
     request.app.state.event_response_cache = None
 
@@ -1572,17 +1658,23 @@ async def list_signals(
     )
     repository: NewsRepository = request.app.state.news_repository
     try:
-        async with asyncio.timeout(SIGNAL_READ_TIMEOUT_SECONDS):
-            stored_signals = await repository.list_signals(
-                ticker=ticker,
-                directions=requested_directions,
-                status=status or "active",
-                min_confidence=min_confidence,
-                limit=1000,
-                model_version=selected_model_version,
-            )
-            requested_news_ids = frozenset(signal.news_id for signal in stored_signals)
-            news = await repository.get_news_by_ids(requested_news_ids)
+        if (
+            (status or "active") == "active"
+            and selected_model_version == CURRENT_NEWS_MODEL_VERSION
+        ):
+            news, stored_signals = await load_signal_feed(request)
+        else:
+            async with asyncio.timeout(SIGNAL_READ_TIMEOUT_SECONDS):
+                stored_signals = await repository.list_signals(
+                    ticker=ticker,
+                    directions=requested_directions,
+                    status=status or "active",
+                    min_confidence=min_confidence,
+                    limit=1000,
+                    model_version=selected_model_version,
+                )
+                requested_news_ids = frozenset(signal.news_id for signal in stored_signals)
+                news = await repository.get_news_by_ids(requested_news_ids)
     except TimeoutError:
         logger.warning("Signal feed read exceeded %.1fs", SIGNAL_READ_TIMEOUT_SECONDS)
         return problem_response(
@@ -1602,6 +1694,7 @@ async def list_signals(
             detail="The structured data store did not return a complete signal feed.",
         )
 
+    requested_news_ids = frozenset(signal.news_id for signal in stored_signals)
     if {item.id for item in news} != requested_news_ids:
         logger.error("Signal feed read returned incomplete news references")
         return problem_response(
