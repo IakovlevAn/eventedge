@@ -1997,11 +1997,24 @@ async def list_assessments(
         )
         data.append(assessment)
 
-    return JSONResponse(
+    snapshot_as_of = max((str(item["as_of"]) for item in data), default=None)
+    snapshot_basis = [
+        {
+            "ticker": item["ticker"],
+            "as_of": item["as_of"],
+            "last_price": item["market"].get("last_price"),
+        }
+        for item in data
+    ]
+    snapshot_id = f"market_{canonical_payload_hash(snapshot_basis)[:24]}"
+    response = JSONResponse(
         content={
             "data": data,
             "errors": errors,
             "meta": {
+                "snapshot_id": snapshot_id,
+                "snapshot_as_of": snapshot_as_of,
+                "generated_at": utc_now(),
                 "requested": len(normalized),
                 "returned": len(data),
                 "directed": sum(item["direction"] != "neutral" for item in data),
@@ -2012,6 +2025,9 @@ async def list_assessments(
             },
         }
     )
+    response.headers["ETag"] = f'"{snapshot_id}"'
+    response.headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=15"
+    return response
 
 
 def evaluation_epoch_methodology(epoch: EvaluationEpochRecord) -> str:

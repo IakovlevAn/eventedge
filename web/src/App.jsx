@@ -30,6 +30,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { shouldAcceptSnapshot } from "./snapshot.js";
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "");
 const apiUrl = (path) => `${API_BASE}${path}`;
@@ -2122,6 +2123,7 @@ export default function App() {
   const [marketStatus, setMarketStatus] = useState("loading");
   const [marketUpdatedAt, setMarketUpdatedAt] = useState(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const acceptedAssessmentSnapshot = useRef(null);
 
   useEffect(() => {
     const handleHashChange = () => setRoute(parseRoute());
@@ -2140,9 +2142,14 @@ export default function App() {
       setDataError("");
       try {
         const sourceRequest = fetch(apiUrl("/v1/sources"), { signal: controller.signal }).catch(() => null);
-        const [signalResponse, newsResponse] = await Promise.all([
+        const assessmentRequest = fetch(apiUrl("/v1/assessments"), { signal: controller.signal }).catch(() => null);
+        const [signalResponse, newsResponse, assessmentResponse] = await Promise.all([
           fetch(apiUrl("/v1/signals?status=active&limit=100"), { signal: controller.signal }),
           fetch(apiUrl("/v1/news?limit=100"), { signal: controller.signal }),
+          Promise.race([
+            assessmentRequest,
+            new Promise((resolve) => window.setTimeout(() => resolve(null), 6000)),
+          ]),
         ]);
         const sourceResponse = await Promise.race([
           sourceRequest,
@@ -2168,31 +2175,38 @@ export default function App() {
             evidenceByTicker.get(ticker).push(item);
           });
         });
-        const seenTickers = new Set();
-        setSignals(instrumentSignals.filter((item) => {
-          if (seenTickers.has(item.ticker)) return false;
-          seenTickers.add(item.ticker);
-          return true;
-        }));
+        let nextVisibleSignals = instrumentSignals;
+        let shouldCommitSignals = true;
+        if (assessmentResponse?.ok) {
+          const assessmentPayload = await assessmentResponse.json();
+          if (shouldAcceptSnapshot(acceptedAssessmentSnapshot.current, assessmentPayload.meta)) {
+            acceptedAssessmentSnapshot.current = assessmentPayload.meta;
+            const nextAssessments = assessmentPayload.data.map(assessmentFromApi);
+            const assessedTickers = new Set(nextAssessments.map((item) => item.ticker));
+            const newsOnlySignals = instrumentSignals.filter((item) => !assessedTickers.has(item.ticker));
+            nextVisibleSignals = [...nextAssessments, ...newsOnlySignals];
+            setAssessmentMeta(assessmentPayload.meta || { directed: 0, market_biases: 0, news_backed: 0 });
+            setMarketUpdatedAt(assessmentPayload.meta?.snapshot_as_of || new Date().toISOString());
+            setMarketStatus(assessmentPayload.data.length ? "ready" : "error");
+          } else {
+            shouldCommitSignals = false;
+          }
+        } else {
+          setMarketStatus("error");
+          shouldCommitSignals = !loaded;
+        }
+        if (shouldCommitSignals) {
+          const seenTickers = new Set();
+          setSignals(nextVisibleSignals.filter((item) => {
+            if (seenTickers.has(item.ticker)) return false;
+            seenTickers.add(item.ticker);
+            return true;
+          }).map((item) => ({ ...item, evidence: evidenceByTicker.get(item.ticker)?.slice(0, 8) || [] })));
+        }
         setAllNews(nextNews);
         setNewsMeta(newsPayload.meta || { total: nextNews.length, sources: [] });
         setDataStatus("ready");
         loaded = true;
-
-        try {
-          const assessmentResponse = await fetch(apiUrl("/v1/assessments"), { signal: controller.signal });
-          if (!assessmentResponse.ok) throw new Error("Live assessments unavailable");
-          const assessmentPayload = await assessmentResponse.json();
-          const nextSignals = assessmentPayload.data.map(assessmentFromApi);
-          const assessedTickers = new Set(nextSignals.map((item) => item.ticker));
-          const newsOnlySignals = instrumentSignals.filter((item) => !assessedTickers.has(item.ticker));
-          setSignals([...nextSignals, ...newsOnlySignals].map((item) => ({ ...item, evidence: evidenceByTicker.get(item.ticker)?.slice(0, 8) || [] })));
-          setAssessmentMeta(assessmentPayload.meta || { directed: 0, market_biases: 0, news_backed: 0 });
-          setMarketUpdatedAt(new Date().toISOString());
-          setMarketStatus(assessmentPayload.data.length ? "ready" : "error");
-        } catch (assessmentError) {
-          if (assessmentError.name !== "AbortError") setMarketStatus("error");
-        }
       } catch (error) {
         if (error.name === "AbortError") return;
         if (!loaded) {
