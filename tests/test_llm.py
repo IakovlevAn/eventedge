@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from eventedge.analysis import NewsAnalysisInput
 from eventedge.llm import YandexGptNewsAnalyzer
 
@@ -211,6 +213,35 @@ def test_ungrounded_evidence_uses_explicit_rules_fallback() -> None:
 
     assert features.extractor_version == "rules-fallback-grounding-0.1.0"
     assert len(session.calls) == 1
+
+
+def test_async_deadline_uses_explicit_rules_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def stuck_to_thread(*args: object, **kwargs: object) -> object:
+        await asyncio.sleep(60)
+        raise AssertionError("stuck extraction should have been cancelled")
+
+    monkeypatch.setattr("eventedge.llm.asyncio.to_thread", stuck_to_thread)
+    analyzer = YandexGptNewsAnalyzer(
+        folder_id="folder-id",
+        session=FakeSession("{}"),  # type: ignore[arg-type]
+        token_provider=FakeTokenProvider(),  # type: ignore[arg-type]
+    )
+    analyzer._async_deadline_seconds = 0.01
+
+    features = asyncio.run(
+        analyzer.extract(
+            NewsAnalysisInput(
+                source_id="moex_news",
+                title="Сбербанк рекомендовал дивиденды",
+                content="Совет директоров рекомендовал выплатить 500 рублей на акцию.",
+            )
+        )
+    )
+
+    assert features.extractor_version == "rules-fallback-timeout-0.1.0"
+    assert [instrument.ticker for instrument in features.instruments] == ["SBER"]
 
 
 def test_structured_fact_value_must_be_present_in_its_quote() -> None:

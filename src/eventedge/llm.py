@@ -113,6 +113,10 @@ class YandexGptNewsAnalyzer:
         self._folder_id = folder_id
         self._model_name = model_name
         self._timeout_seconds = timeout_seconds
+        # requests' timeout does not bound every stage around a blocking call
+        # (for example, name resolution). Keep the async pipeline bounded so
+        # the deterministic fallback still has time to be persisted.
+        self._async_deadline_seconds = timeout_seconds + 5.0
         self._max_content_chars = max_content_chars
         self._rules = rules or RuleBasedNewsExtractor()
         self._session = session or requests.Session()
@@ -121,7 +125,16 @@ class YandexGptNewsAnalyzer:
     async def extract(self, document: NewsAnalysisInput) -> SemanticFeatures:
         baseline = self._rules.extract(document)
         try:
-            payload = await asyncio.to_thread(self._extract_sync, document, baseline)
+            async with asyncio.timeout(self._async_deadline_seconds):
+                payload = await asyncio.to_thread(self._extract_sync, document, baseline)
+        except TimeoutError:
+            LOGGER.warning(
+                "YandexGPT semantic extraction exceeded its async deadline; "
+                "using rules fallback"
+            )
+            return baseline.model_copy(
+                update={"extractor_version": "rules-fallback-timeout-0.1.0"}
+            )
         except UngroundedLlmOutputError as error:
             LOGGER.warning(
                 "YandexGPT semantic extraction was not grounded; using rules fallback: %s",
