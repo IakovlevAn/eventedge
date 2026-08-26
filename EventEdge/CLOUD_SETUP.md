@@ -63,7 +63,7 @@ cloud: eventedge
 - После bootstrap trusted workflow автоматически делает squash merge зелёных PR из веток `agent/*` в `main`.
 - Workflow сверяет SHA проверенной ревизии, репозиторий ветки и target `main`; draft и PR с label `do-not-merge` не мержатся.
 - После зелёного CI на `main` выполняется OIDC-аутентификация, публикация образа и деплой новой ревизии.
-- API-ревизия использует 1 vCPU / 1 GB, concurrency 4, `min-instances=1`, максимум два инстанса. Worker использует те же ресурсы по требованию, но обрабатывает только одну timer-задачу одновременно и имеет `min-instances=0`.
+- API-ревизия использует 2 vCPU / 4 GB, concurrency 7, `min-instances=1` и один инстанс, чтобы короткоживущий кеш котировок оставался согласованным. Worker использует те же ресурсы по требованию, но обрабатывает только одну timer-задачу одновременно и имеет `min-instances=0`.
 - YDB не имеет зарезервированной мощности, ограничена 10 RU/с и 1 ГБ, защищена от удаления.
 - Перед публикацией serverless-ревизии CI применяет DDL из того же Docker-образа. Для этого `eventedge-ci` должен иметь `ydb.editor` только на базе `eventedge-prod`.
 - Runtime service account имеет `ydb.editor` только на базе `eventedge-prod`; роль не выдана на каталог или облако.
