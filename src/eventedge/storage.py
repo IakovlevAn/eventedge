@@ -322,6 +322,15 @@ class NewsRepository(Protocol):
         include_observations: bool = True,
     ) -> list[EvaluationEpochRecord]: ...
 
+    async def get_or_create_assessment_snapshot(
+        self,
+        snapshot_key: str,
+        payload: Mapping[str, object],
+        *,
+        created_at: datetime,
+        expires_before: datetime,
+    ) -> dict[str, object]: ...
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
@@ -631,7 +640,12 @@ def normalize_signal_freshness(
 
 
 class MemoryNewsRepository:
-    def __init__(self, *, analyzer: NewsAnalyzer | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        analyzer: NewsAnalyzer | None = None,
+        cache_assessment_snapshots: bool = False,
+    ) -> None:
         self._analyzer = analyzer or RuleBasedNewsAnalyzer()
         self._requests: dict[str, tuple[str, str]] = {}
         self._jobs: dict[str, Job] = {}
@@ -639,6 +653,8 @@ class MemoryNewsRepository:
         self._signals: dict[str, SignalRecord] = {}
         self._telegram_sources: dict[str, TelegramSourceRecord] = {}
         self._evaluation_epochs: dict[str, EvaluationEpochRecord] = {}
+        self._assessment_snapshots: dict[str, tuple[datetime, dict[str, object]]] = {}
+        self._cache_assessment_snapshots = cache_assessment_snapshots
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
@@ -806,6 +822,29 @@ class MemoryNewsRepository:
             )
             for epoch in epochs
         ]
+
+    async def get_or_create_assessment_snapshot(
+        self,
+        snapshot_key: str,
+        payload: Mapping[str, object],
+        *,
+        created_at: datetime,
+        expires_before: datetime,
+    ) -> dict[str, object]:
+        candidate = json_object(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        if not self._cache_assessment_snapshots:
+            return candidate
+        async with self._lock:
+            self._assessment_snapshots = {
+                key: stored
+                for key, stored in self._assessment_snapshots.items()
+                if stored[0] >= expires_before
+            }
+            existing = self._assessment_snapshots.get(snapshot_key)
+            if existing is not None:
+                return json_object(json.dumps(existing[1], ensure_ascii=False, sort_keys=True))
+            self._assessment_snapshots[snapshot_key] = (created_at, candidate)
+            return json_object(json.dumps(candidate, ensure_ascii=False, sort_keys=True))
 
 
 class YdbNewsRepository:
@@ -1130,6 +1169,60 @@ class YdbNewsRepository:
         rows = result_sets[0].rows if result_sets else []
         return [evaluation_epoch_from_row(row) for row in rows]
 
+    async def get_or_create_assessment_snapshot(
+        self,
+        snapshot_key: str,
+        payload: Mapping[str, object],
+        *,
+        created_at: datetime,
+        expires_before: datetime,
+    ) -> dict[str, object]:
+        parameters = {
+            "$snapshot_key": snapshot_key,
+            "$payload": ydb.TypedValue(
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                ydb.PrimitiveType.Json,
+            ),
+            "$created_at": ydb.TypedValue(created_at, ydb.PrimitiveType.Timestamp),
+            "$expires_before": ydb.TypedValue(expires_before, ydb.PrimitiveType.Timestamp),
+        }
+
+        async def transaction(session: ydb.aio.QuerySession) -> dict[str, object]:
+            tx = session.transaction()
+            async with await tx.execute(
+                SELECT_ASSESSMENT_SNAPSHOT_QUERY,
+                {"$snapshot_key": snapshot_key},
+            ) as result_sets:
+                async for result_set in result_sets:
+                    if result_set.rows:
+                        stored = json_object(result_set.rows[0].payload)
+                        await tx.commit()
+                        return stored
+
+            async with await tx.execute(
+                DELETE_EXPIRED_ASSESSMENT_SNAPSHOTS_QUERY,
+                {"$expires_before": parameters["$expires_before"]},
+            ) as result_sets:
+                async for _ in result_sets:
+                    pass
+            async with await tx.execute(
+                INSERT_ASSESSMENT_SNAPSHOT_QUERY,
+                {
+                    "$snapshot_key": snapshot_key,
+                    "$payload": parameters["$payload"],
+                    "$created_at": parameters["$created_at"],
+                },
+            ) as result_sets:
+                async for _ in result_sets:
+                    pass
+            await tx.commit()
+            return json_object(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+        # Serializable transaction conflicts are retried by the SDK. A loser
+        # re-enters the transaction, observes the winner and returns its exact
+        # payload, which makes the snapshot canonical across API instances.
+        return await self._require_pool().retry_operation_async(transaction)
+
     def _require_pool(self) -> ydb.aio.QuerySessionPool:
         if self._pool is None:
             raise RuntimeError("YDB repository has not been started")
@@ -1397,6 +1490,14 @@ SCHEMA_STATEMENTS = (
         PRIMARY KEY (`epoch_id`)
     );
     """,
+    """
+    CREATE TABLE IF NOT EXISTS `assessment_snapshots` (
+        `snapshot_key` Utf8 NOT NULL,
+        `payload` Json NOT NULL,
+        `created_at` Timestamp NOT NULL,
+        PRIMARY KEY (`snapshot_key`)
+    );
+    """,
 )
 
 SCHEMA_TABLE_NAMES = (
@@ -1408,6 +1509,7 @@ SCHEMA_TABLE_NAMES = (
     "telegram_sources",
     "telegram_source_metadata",
     "evaluation_epochs",
+    "assessment_snapshots",
 )
 
 SCHEMA_RATE_LIMIT_MESSAGE = "Request exceeded a limit on the number of schema operations"
@@ -1853,6 +1955,30 @@ UPSERT INTO `evaluation_epochs` (
 );
 """
 
+SELECT_ASSESSMENT_SNAPSHOT_QUERY = """
+DECLARE $snapshot_key AS Utf8;
+
+SELECT payload
+FROM `assessment_snapshots`
+WHERE snapshot_key = $snapshot_key;
+"""
+
+INSERT_ASSESSMENT_SNAPSHOT_QUERY = """
+DECLARE $snapshot_key AS Utf8;
+DECLARE $payload AS Json;
+DECLARE $created_at AS Timestamp;
+
+INSERT INTO `assessment_snapshots` (snapshot_key, payload, created_at)
+VALUES ($snapshot_key, $payload, $created_at);
+"""
+
+DELETE_EXPIRED_ASSESSMENT_SNAPSHOTS_QUERY = """
+DECLARE $expires_before AS Timestamp;
+
+DELETE FROM `assessment_snapshots`
+WHERE created_at < $expires_before;
+"""
+
 VALIDATED_QUERIES = (
     SELECT_REQUEST_QUERY,
     INSERT_REQUEST_QUERY,
@@ -1869,4 +1995,7 @@ VALIDATED_QUERIES = (
     SELECT_EVALUATION_EPOCHS_QUERY,
     SELECT_EVALUATION_EPOCH_SUMMARIES_QUERY,
     UPSERT_EVALUATION_EPOCH_QUERY,
+    SELECT_ASSESSMENT_SNAPSHOT_QUERY,
+    INSERT_ASSESSMENT_SNAPSHOT_QUERY,
+    DELETE_EXPIRED_ASSESSMENT_SNAPSHOTS_QUERY,
 )

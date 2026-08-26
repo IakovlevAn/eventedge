@@ -62,16 +62,16 @@ def build_payload(
             "imageUrl": environment["IMAGE_URL"],
             "environment": runtime_environment,
         },
-        # The public API deliberately keeps one warm instance as the single
-        # writer for short-lived market snapshots. Its work is I/O-bound, so
-        # seven concurrent requests cover one dashboard refresh plus burst
-        # reads without creating a second process-local MOEX cache.
+        # The public API keeps one warm instance per active zone as a cost cap.
+        # Its work is I/O-bound, so seven concurrent requests cover one
+        # dashboard refresh plus burst reads. Cross-instance assessment
+        # snapshots are canonicalized in YDB, not in process-local memory.
         "concurrency": "1" if is_worker else "7",
         "provisionPolicy": {"minInstances": "0" if is_worker else "1"},
         "scalingPolicy": {
-            # Peak allocation is quota-safe: API 1x(2 CPU, 4 GiB) plus worker
-            # 3x(2 CPU, 4 GiB) = 8 CPU and 16 GiB. Keeping the public API at one
-            # instance prevents load balancing between divergent local caches.
+            # Peak allocation per zone is quota-safe: API 1x(2 CPU, 4 GiB) plus
+            # worker 3x(2 CPU, 4 GiB) = 8 CPU and 16 GiB. The API cap controls
+            # spend; YDB provides cross-zone snapshot consistency.
             "zoneInstancesLimit": "3" if is_worker else "1",
             "zoneRequestsLimit": "3" if is_worker else "7",
         },

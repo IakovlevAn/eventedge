@@ -39,7 +39,7 @@ runtime_caps:
     interval_seconds: 600
 notes:
   - The Yandex Cloud billing budget sends alerts but does not stop resource consumption.
-  - One provisioned 2-vCPU API instance serves up to seven concurrent I/O-bound requests and remains the single writer for process-local market snapshots.
+  - One provisioned 2-vCPU API instance per active zone serves up to seven concurrent I/O-bound requests; shared assessment snapshots are canonicalized in YDB across instances.
   - Public endpoints serve the last successful market snapshot immediately and refresh it every 60 seconds in the background.
   - A cold API instance finishes the default news projection before reporting startup complete, and concurrent projection misses share one single-flight task.
   - News collection and LLM analysis run in a separate non-provisioned worker so timer jobs cannot block the public API.

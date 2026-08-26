@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -8,8 +8,11 @@ import ydb
 
 from eventedge.analysis import EventType, InstrumentMention, SemanticFeatures, TemporalStatus
 from eventedge.storage import (
+    DELETE_EXPIRED_ASSESSMENT_SNAPSHOTS_QUERY,
+    INSERT_ASSESSMENT_SNAPSHOT_QUERY,
     SCHEMA_STATEMENTS,
     SCHEMA_TABLE_NAMES,
+    SELECT_ASSESSMENT_SNAPSHOT_QUERY,
     EvaluationEpochRecord,
     MemoryNewsRepository,
     NewsDocument,
@@ -253,6 +256,179 @@ def test_evaluation_epochs_are_kept_independently_by_model() -> None:
         }
 
     asyncio.run(scenario())
+
+
+def test_memory_assessment_snapshot_is_first_writer_wins_and_expires() -> None:
+    async def scenario() -> None:
+        repository = MemoryNewsRepository(cache_assessment_snapshots=True)
+        created_at = datetime(2026, 8, 26, 19, tzinfo=UTC)
+        first = {"meta": {"snapshot_id": "market_first"}, "data": [{"ticker": "SBER"}]}
+        competing = {
+            "meta": {"snapshot_id": "market_competing"},
+            "data": [{"ticker": "SBER"}],
+        }
+
+        winner = await repository.get_or_create_assessment_snapshot(
+            "bucket:sber",
+            first,
+            created_at=created_at,
+            expires_before=created_at - timedelta(minutes=10),
+        )
+        loser = await repository.get_or_create_assessment_snapshot(
+            "bucket:sber",
+            competing,
+            created_at=created_at,
+            expires_before=created_at - timedelta(minutes=10),
+        )
+        assert winner == loser == first
+
+        replacement = await repository.get_or_create_assessment_snapshot(
+            "next:sber",
+            competing,
+            created_at=created_at + timedelta(minutes=11),
+            expires_before=created_at + timedelta(minutes=1),
+        )
+        assert replacement == competing
+        assert "bucket:sber" not in repository._assessment_snapshots
+
+    asyncio.run(scenario())
+
+
+def test_ydb_assessment_snapshot_returns_transaction_winner() -> None:
+    stored_payload = '{"data": [], "meta": {"snapshot_id": "market_winner"}}'
+    executed: list[str] = []
+
+    class FakeResultSets:
+        def __init__(self, rows: list[SimpleNamespace]) -> None:
+            self.rows = rows
+
+        async def __aenter__(self) -> "FakeResultSets":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        def __aiter__(self):  # type: ignore[no-untyped-def]
+            async def iterate():  # type: ignore[no-untyped-def]
+                yield SimpleNamespace(rows=self.rows)
+
+            return iterate()
+
+    class FakeTransaction:
+        committed = False
+
+        async def execute(
+            self,
+            statement: str,
+            parameters: dict[str, object],
+        ) -> FakeResultSets:
+            executed.append(statement)
+            assert parameters == {"$snapshot_key": "bucket:tickers"}
+            return FakeResultSets([SimpleNamespace(payload=stored_payload)])
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    transaction = FakeTransaction()
+
+    class FakeSession:
+        def transaction(self) -> FakeTransaction:
+            return transaction
+
+    class FakePool:
+        async def retry_operation_async(self, operation):  # type: ignore[no-untyped-def]
+            return await operation(FakeSession())
+
+    repository = YdbNewsRepository(
+        endpoint="grpcs://localhost:2135",
+        database="/local",
+        credentials=ydb.AnonymousCredentials(),
+    )
+    repository._pool = FakePool()  # type: ignore[assignment]
+
+    async def scenario() -> None:
+        result = await repository.get_or_create_assessment_snapshot(
+            "bucket:tickers",
+            {"data": [], "meta": {"snapshot_id": "market_loser"}},
+            created_at=datetime(2026, 8, 26, 19, tzinfo=UTC),
+            expires_before=datetime(2026, 8, 26, 18, 50, tzinfo=UTC),
+        )
+        assert result["meta"] == {"snapshot_id": "market_winner"}
+
+    asyncio.run(scenario())
+
+    assert executed == [SELECT_ASSESSMENT_SNAPSHOT_QUERY]
+    assert transaction.committed is True
+
+
+def test_ydb_assessment_snapshot_inserts_candidate_after_cleanup() -> None:
+    executed: list[str] = []
+    parameter_sets: list[dict[str, object]] = []
+
+    class FakeResultSets:
+        async def __aenter__(self) -> "FakeResultSets":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        def __aiter__(self):  # type: ignore[no-untyped-def]
+            async def iterate():  # type: ignore[no-untyped-def]
+                yield SimpleNamespace(rows=[])
+
+            return iterate()
+
+    class FakeTransaction:
+        committed = False
+
+        async def execute(
+            self,
+            statement: str,
+            parameters: dict[str, object],
+        ) -> FakeResultSets:
+            executed.append(statement)
+            parameter_sets.append(parameters)
+            return FakeResultSets()
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    transaction = FakeTransaction()
+
+    class FakeSession:
+        def transaction(self) -> FakeTransaction:
+            return transaction
+
+    class FakePool:
+        async def retry_operation_async(self, operation):  # type: ignore[no-untyped-def]
+            return await operation(FakeSession())
+
+    repository = YdbNewsRepository(
+        endpoint="grpcs://localhost:2135",
+        database="/local",
+        credentials=ydb.AnonymousCredentials(),
+    )
+    repository._pool = FakePool()  # type: ignore[assignment]
+    candidate = {"data": [], "meta": {"snapshot_id": "market_candidate"}}
+
+    async def scenario() -> None:
+        result = await repository.get_or_create_assessment_snapshot(
+            "bucket:tickers",
+            candidate,
+            created_at=datetime(2026, 8, 26, 19, tzinfo=UTC),
+            expires_before=datetime(2026, 8, 26, 18, 50, tzinfo=UTC),
+        )
+        assert result == candidate
+
+    asyncio.run(scenario())
+
+    assert executed == [
+        SELECT_ASSESSMENT_SNAPSHOT_QUERY,
+        DELETE_EXPIRED_ASSESSMENT_SNAPSHOTS_QUERY,
+        INSERT_ASSESSMENT_SNAPSHOT_QUERY,
+    ]
+    assert parameter_sets[0] == {"$snapshot_key": "bucket:tickers"}
+    assert transaction.committed is True
 
 
 def test_legacy_signal_copies_are_collapsed() -> None:

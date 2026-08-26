@@ -1431,8 +1431,16 @@ def test_batch_instrument_snapshots_validate_tickers() -> None:
     assert response.json()["code"] == "INVALID_PARAMETER"
 
 
-def test_assessments_cover_companies_without_fresh_news_signal() -> None:
+def test_assessments_cover_companies_without_fresh_news_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original = app.state.market_data_client
+    snapshot_store = AsyncMock(side_effect=lambda _key, payload, **_kwargs: dict(payload))
+    monkeypatch.setattr(
+        app.state.news_repository,
+        "get_or_create_assessment_snapshot",
+        snapshot_store,
+    )
 
     class FakeMarketDataClient:
         async def snapshot(self, ticker: str) -> dict[str, object]:
@@ -1490,6 +1498,8 @@ def test_assessments_cover_companies_without_fresh_news_signal() -> None:
     assert response.json()["meta"]["snapshot_id"].startswith("market_")
     assert response.headers["etag"] == f'"{response.json()["meta"]["snapshot_id"]}"'
     assert response.headers["cache-control"] == "public, max-age=15, stale-while-revalidate=15"
+    snapshot_store.assert_awaited_once()
+    assert ":" in snapshot_store.await_args.args[0]
 
 
 def test_evals_endpoint_exposes_analysis_and_downloads() -> None:
