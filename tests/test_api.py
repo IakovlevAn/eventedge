@@ -871,7 +871,7 @@ def test_maintenance_timer_defers_work_before_trigger_timeout(
         "epochs": 0,
         "status": "partial",
         "deferred": ["signal_reprocessing"],
-        "deadline_seconds": 0.01,
+        "deadline_seconds": 60.0,
     }
     assert eval_refreshed is True
 
@@ -889,7 +889,7 @@ def test_maintenance_timer_reprocesses_when_eval_refresh_times_out(
         await asyncio.sleep(60)
         raise AssertionError("eval refresh should have been cancelled")
 
-    monkeypatch.setattr(main_module, "MAINTENANCE_DEADLINE_SECONDS", 0.01)
+    monkeypatch.setattr(main_module, "EVALUATION_REFRESH_DEADLINE_SECONDS", 0.01)
     monkeypatch.setattr(main_module, "reprocess_signal_candidates_batch", fake_reprocess)
     monkeypatch.setattr(main_module, "_load_evaluation_material", slow_load)
 
@@ -916,7 +916,7 @@ def test_maintenance_timer_reprocesses_when_eval_refresh_times_out(
         "rejection_reasons": {},
         "status": "partial",
         "deferred": ["eval_refresh"],
-        "deadline_seconds": 0.01,
+        "deadline_seconds": 20.0,
     }
 
 

@@ -114,6 +114,7 @@ EVALUATION_CACHE_TTL_SECONDS = 60
 BACKFILL_BATCH_LIMIT = min(40, max(1, int(os.environ.get("BACKFILL_BATCH_LIMIT", "4"))))
 BACKFILL_CONCURRENCY = min(4, max(1, int(os.environ.get("BACKFILL_CONCURRENCY", "1"))))
 MAINTENANCE_DEADLINE_SECONDS = 20.0
+EVALUATION_REFRESH_DEADLINE_SECONDS = 60.0
 SIGNAL_READ_TIMEOUT_SECONDS = 12.0
 SIGNAL_FEED_TTL_SECONDS = 30 if os.environ.get("APP_ENV") == "prod" else 0
 SIGNAL_FEED_FAILURE_RETRY_SECONDS = 5.0
@@ -1056,7 +1057,7 @@ async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONRespons
 
             async def bounded_eval_refresh() -> tuple[object, ...] | None:
                 try:
-                    async with asyncio.timeout(MAINTENANCE_DEADLINE_SECONDS):
+                    async with asyncio.timeout(EVALUATION_REFRESH_DEADLINE_SECONDS):
                         return await _load_evaluation_material(
                             repository,
                             request.app.state.market_data_client,
@@ -1105,7 +1106,10 @@ async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONRespons
                     {
                         "status": "deferred" if len(deferred) == 2 else "partial",
                         "deferred": deferred,
-                        "deadline_seconds": MAINTENANCE_DEADLINE_SECONDS,
+                        "deadline_seconds": max(
+                            MAINTENANCE_DEADLINE_SECONDS,
+                            EVALUATION_REFRESH_DEADLINE_SECONDS,
+                        ),
                     }
                 )
             results[collector_name] = maintenance_result
