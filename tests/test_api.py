@@ -1736,7 +1736,17 @@ def test_evals_selects_highest_config_before_newest_evaluation_time(
 
 def test_retrospective_signal_is_excluded_without_moex_request() -> None:
     async def scenario() -> None:
-        repository = MemoryNewsRepository()
+        class ExactNewsRepository(MemoryNewsRepository):
+            requested_news_ids: frozenset[str] | None = None
+
+            async def list_news(self, *, source_id: str | None, limit: int) -> list[NewsRecord]:
+                raise AssertionError("eval refresh must not scan an unrelated recent-news window")
+
+            async def get_news_by_ids(self, news_ids: frozenset[str]) -> list[NewsRecord]:
+                self.requested_news_ids = news_ids
+                return await super().get_news_by_ids(news_ids)
+
+        repository = ExactNewsRepository()
         historical = datetime.now(UTC).replace(microsecond=0) - timedelta(days=2)
         await repository.ingest(
             "retrospective-eval-key",
@@ -1767,6 +1777,7 @@ def test_retrospective_signal_is_excluded_without_moex_request() -> None:
         assert outcomes[0]["status"] == "excluded"
         assert outcomes[0]["eligibility"]["reason"] == "retrospective_signal"
         assert outcomes[0]["evaluation_methodology"] == EVALUATION_METHODOLOGY_VERSION
+        assert repository.requested_news_ids == {outcomes[0]["news"]["id"]}
 
     asyncio.run(scenario())
 
