@@ -113,7 +113,11 @@ NEWS_DELIVERY_TARGET_SECONDS = 120
 EVALUATION_CACHE_TTL_SECONDS = 60
 BACKFILL_BATCH_LIMIT = min(40, max(1, int(os.environ.get("BACKFILL_BATCH_LIMIT", "4"))))
 BACKFILL_CONCURRENCY = min(4, max(1, int(os.environ.get("BACKFILL_CONCURRENCY", "1"))))
-MAINTENANCE_DEADLINE_SECONDS = 20.0
+# One attempt can spend up to 3 seconds obtaining an IAM token and 18 seconds
+# waiting for YandexGPT before the deterministic fallback and persistence run.
+# Leave enough time for that path plus the existing single retry while staying
+# well below the 180-second serverless execution timeout.
+SIGNAL_REPROCESS_DEADLINE_SECONDS = 60.0
 EVALUATION_REFRESH_DEADLINE_SECONDS = 60.0
 SIGNAL_READ_TIMEOUT_SECONDS = 12.0
 SIGNAL_FEED_TTL_SECONDS = 30 if os.environ.get("APP_ENV") == "prod" else 0
@@ -1041,7 +1045,7 @@ async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONRespons
         if collector_name == "maintenance":
             async def bounded_reprocess() -> dict[str, object] | None:
                 try:
-                    async with asyncio.timeout(MAINTENANCE_DEADLINE_SECONDS):
+                    async with asyncio.timeout(SIGNAL_REPROCESS_DEADLINE_SECONDS):
                         return await reprocess_signal_candidates_batch(
                             repository,
                             limit=BACKFILL_BATCH_LIMIT,
@@ -1107,7 +1111,7 @@ async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONRespons
                         "status": "deferred" if len(deferred) == 2 else "partial",
                         "deferred": deferred,
                         "deadline_seconds": max(
-                            MAINTENANCE_DEADLINE_SECONDS,
+                            SIGNAL_REPROCESS_DEADLINE_SECONDS,
                             EVALUATION_REFRESH_DEADLINE_SECONDS,
                         ),
                     }

@@ -847,7 +847,7 @@ def test_maintenance_timer_defers_work_before_trigger_timeout(
         eval_refreshed = True
         return ([{"signal_id": "sig_1"}], [], {}, {}, [])
 
-    monkeypatch.setattr(main_module, "MAINTENANCE_DEADLINE_SECONDS", 0.01)
+    monkeypatch.setattr(main_module, "SIGNAL_REPROCESS_DEADLINE_SECONDS", 0.01)
     monkeypatch.setattr(main_module, "reprocess_signal_candidates_batch", slow_reprocess)
     monkeypatch.setattr(main_module, "_load_evaluation_material", fake_load)
 
@@ -916,7 +916,7 @@ def test_maintenance_timer_reprocesses_when_eval_refresh_times_out(
         "rejection_reasons": {},
         "status": "partial",
         "deferred": ["eval_refresh"],
-        "deadline_seconds": 20.0,
+        "deadline_seconds": 60.0,
     }
 
 
