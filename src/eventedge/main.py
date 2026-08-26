@@ -1038,38 +1038,77 @@ async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONRespons
     results: dict[str, dict[str, object]] = {}
     for collector_name in dict.fromkeys(message.details.payload for message in envelope.messages):
         if collector_name == "maintenance":
-            try:
-                async with asyncio.timeout(MAINTENANCE_DEADLINE_SECONDS):
-                    reprocess = await reprocess_signal_candidates_batch(
-                        repository,
-                        limit=BACKFILL_BATCH_LIMIT,
-                        concurrency=BACKFILL_CONCURRENCY,
-                        ml_router=request.app.state.ml_router_runtime,
+            async def bounded_reprocess() -> dict[str, object] | None:
+                try:
+                    async with asyncio.timeout(MAINTENANCE_DEADLINE_SECONDS):
+                        return await reprocess_signal_candidates_batch(
+                            repository,
+                            limit=BACKFILL_BATCH_LIMIT,
+                            concurrency=BACKFILL_CONCURRENCY,
+                            ml_router=request.app.state.ml_router_runtime,
+                        )
+                except TimeoutError:
+                    logger.warning(
+                        "Maintenance signal reprocessing deadline exceeded; "
+                        "unfinished idempotent work was deferred"
                     )
-                    outcomes, _, _, _, epochs = await _load_evaluation_material(
-                        repository,
-                        request.app.state.market_data_client,
+                    return None
+
+            async def bounded_eval_refresh() -> tuple[object, ...] | None:
+                try:
+                    async with asyncio.timeout(MAINTENANCE_DEADLINE_SECONDS):
+                        return await _load_evaluation_material(
+                            repository,
+                            request.app.state.market_data_client,
+                        )
+                except TimeoutError:
+                    logger.warning(
+                        "Maintenance eval refresh deadline exceeded; "
+                        "unfinished idempotent work was deferred"
                     )
-            except TimeoutError:
-                logger.warning(
-                    "Maintenance deadline exceeded; unfinished idempotent work was deferred"
+                    return None
+
+            reprocess, evaluation = await asyncio.gather(
+                bounded_reprocess(),
+                bounded_eval_refresh(),
+            )
+            maintenance_result: dict[str, object] = {}
+            deferred: list[str] = []
+            if reprocess is None:
+                deferred.append("signal_reprocessing")
+            else:
+                reprocess_meta = reprocess["meta"]
+                assert isinstance(reprocess_meta, dict)
+                maintenance_result.update(
+                    {
+                        "reprocessed": int(reprocess_meta["completed"]),
+                        "failed": int(reprocess_meta.get("failed", 0)),
+                        "failure_types": list(reprocess_meta.get("failure_types", [])),
+                        "remaining": int(reprocess_meta["remaining_candidates"]),
+                        "rejection_reasons": dict(
+                            reprocess_meta.get("rejection_reasons", {})
+                        ),
+                    }
                 )
-                results[collector_name] = {
-                    "status": "deferred",
-                    "deadline_seconds": MAINTENANCE_DEADLINE_SECONDS,
-                }
-                continue
-            reprocess_meta = reprocess["meta"]
-            assert isinstance(reprocess_meta, dict)
-            results[collector_name] = {
-                "reprocessed": int(reprocess_meta["completed"]),
-                "failed": int(reprocess_meta.get("failed", 0)),
-                "failure_types": list(reprocess_meta.get("failure_types", [])),
-                "remaining": int(reprocess_meta["remaining_candidates"]),
-                "rejection_reasons": dict(reprocess_meta.get("rejection_reasons", {})),
-                "outcomes": len(outcomes),
-                "epochs": len(epochs),
-            }
+            if evaluation is None:
+                deferred.append("eval_refresh")
+            else:
+                outcomes, _, _, _, epochs = evaluation
+                maintenance_result.update(
+                    {
+                        "outcomes": len(outcomes),
+                        "epochs": len(epochs),
+                    }
+                )
+            if deferred:
+                maintenance_result.update(
+                    {
+                        "status": "deferred" if len(deferred) == 2 else "partial",
+                        "deferred": deferred,
+                        "deadline_seconds": MAINTENANCE_DEADLINE_SECONDS,
+                    }
+                )
+            results[collector_name] = maintenance_result
             continue
         collector = collectors.get(collector_name)
         if collector is None:
@@ -2266,6 +2305,19 @@ def evaluation_epoch_meta(epoch: EvaluationEpochRecord) -> dict[str, object]:
     return meta
 
 
+def latest_model_evaluation_epoch(
+    epochs: list[EvaluationEpochRecord],
+    model_version: str,
+) -> EvaluationEpochRecord | None:
+    """Select the newest snapshot of the highest config for one model."""
+    candidates = [epoch for epoch in epochs if epoch.model_version == model_version]
+    return max(
+        candidates,
+        key=lambda epoch: (epoch.config_version, epoch.evaluated_at, epoch.epoch_id),
+        default=None,
+    )
+
+
 @app.get("/v1/evals", tags=["Evals"])
 async def list_evals(
     request: Request,
@@ -2279,10 +2331,7 @@ async def list_evals(
         await repository.list_evaluation_epochs(include_observations=False)
     )
     selected_model_version = model_version or CURRENT_NEWS_MODEL_VERSION
-    selected_epoch = next(
-        (epoch for epoch in epochs if epoch.model_version == selected_model_version),
-        None,
-    )
+    selected_epoch = latest_model_evaluation_epoch(epochs, selected_model_version)
     selected_outcomes = directional_epoch_outcomes(selected_epoch)
     return JSONResponse(
         content={
@@ -2310,6 +2359,9 @@ async def list_evals(
                 ),
                 "snapshot_status": "ready" if selected_epoch else "pending",
                 "selected_model_version": selected_model_version,
+                "selected_config_version": (
+                    selected_epoch.config_version if selected_epoch else None
+                ),
                 "model_epochs": [evaluation_epoch_meta(epoch) for epoch in epochs],
                 "warning": (
                     "Only point-in-time timing-eligible live signals enter quality metrics. "

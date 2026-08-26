@@ -836,12 +836,20 @@ def test_maintenance_timer_refreshes_models_and_persisted_evals(
 def test_maintenance_timer_defers_work_before_trigger_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    eval_refreshed = False
+
     async def slow_reprocess(*args: object, **kwargs: object) -> dict[str, object]:
         await asyncio.sleep(60)
         raise AssertionError("maintenance should have been cancelled")
 
+    async def fake_load(*args: object, **kwargs: object) -> tuple[object, ...]:
+        nonlocal eval_refreshed
+        eval_refreshed = True
+        return ([{"signal_id": "sig_1"}], [], {}, {}, [])
+
     monkeypatch.setattr(main_module, "MAINTENANCE_DEADLINE_SECONDS", 0.01)
     monkeypatch.setattr(main_module, "reprocess_signal_candidates_batch", slow_reprocess)
+    monkeypatch.setattr(main_module, "_load_evaluation_material", fake_load)
 
     response = client.post(
         "/",
@@ -859,7 +867,55 @@ def test_maintenance_timer_defers_work_before_trigger_timeout(
 
     assert response.status_code == 200
     assert response.json()["collectors"]["maintenance"] == {
-        "status": "deferred",
+        "outcomes": 1,
+        "epochs": 0,
+        "status": "partial",
+        "deferred": ["signal_reprocessing"],
+        "deadline_seconds": 0.01,
+    }
+    assert eval_refreshed is True
+
+
+def test_maintenance_timer_reprocesses_when_eval_refresh_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_reprocess(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "data": [{"news_id": "news_1"}],
+            "meta": {"completed": 1, "remaining_candidates": 4},
+        }
+
+    async def slow_load(*args: object, **kwargs: object) -> tuple[object, ...]:
+        await asyncio.sleep(60)
+        raise AssertionError("eval refresh should have been cancelled")
+
+    monkeypatch.setattr(main_module, "MAINTENANCE_DEADLINE_SECONDS", 0.01)
+    monkeypatch.setattr(main_module, "reprocess_signal_candidates_batch", fake_reprocess)
+    monkeypatch.setattr(main_module, "_load_evaluation_material", slow_load)
+
+    response = client.post(
+        "/",
+        json={
+            "messages": [
+                {
+                    "event_metadata": {
+                        "event_type": "yandex.cloud.events.serverless.triggers.TimerMessage"
+                    },
+                    "details": {"payload": "maintenance"},
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["collectors"]["maintenance"] == {
+        "reprocessed": 1,
+        "failed": 0,
+        "failure_types": [],
+        "remaining": 4,
+        "rejection_reasons": {},
+        "status": "partial",
+        "deferred": ["eval_refresh"],
         "deadline_seconds": 0.01,
     }
 
@@ -1627,6 +1683,55 @@ def test_current_eval_method_is_selected_without_deleting_legacy_epoch() -> None
 
     assert [epoch.epoch_id for epoch in selected] == ["eval_current_method"]
     assert main_module.evaluation_epoch_methodology(newer_legacy) == "legacy-or-mixed"
+
+
+def test_evals_selects_highest_config_before_newest_evaluation_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lower_config = EvaluationEpochRecord(
+        epoch_id="eval_config_1",
+        model_version="signal-engine-0.6.1",
+        config_version=1,
+        evaluated_at=datetime(2026, 8, 18, 15, 2, tzinfo=UTC),
+        outcomes=(
+            {
+                "signal_id": "sig_config_1",
+                "direction": "up",
+                "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
+                "status": "excluded",
+                "eligibility": {"eligible": False, "reason": "test_fixture"},
+            },
+        ),
+        observations=(),
+    )
+    current_config = replace(
+        lower_config,
+        epoch_id="eval_config_2",
+        config_version=2,
+        evaluated_at=datetime(2026, 8, 18, 14, 57, tzinfo=UTC),
+        outcomes=(
+            {
+                "signal_id": "sig_config_2",
+                "direction": "down",
+                "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
+                "status": "excluded",
+                "eligibility": {"eligible": False, "reason": "test_fixture"},
+            },
+        ),
+    )
+    repository = MemoryNewsRepository()
+    asyncio.run(repository.upsert_evaluation_epoch(lower_config))
+    asyncio.run(repository.upsert_evaluation_epoch(current_config))
+    monkeypatch.setattr(app.state, "news_repository", repository)
+
+    response = client.get("/v1/evals")
+
+    assert response.status_code == 200
+    assert response.json()["meta"]["selected_config_version"] == 2
+    assert response.json()["meta"]["generated_at"] == "2026-08-18T14:57:00Z"
+    assert [row["signal_id"] for row in response.json()["data"]["outcomes"]] == [
+        "sig_config_2"
+    ]
 
 
 def test_retrospective_signal_is_excluded_without_moex_request() -> None:
