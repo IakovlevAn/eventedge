@@ -1486,6 +1486,10 @@ def test_assessments_cover_companies_without_fresh_news_signal() -> None:
     }
     assert response.json()["meta"]["returned"] == 2
     assert response.json()["meta"]["market_biases"] == 2
+    assert response.json()["meta"]["snapshot_as_of"] == "2026-08-08T16:00:08Z"
+    assert response.json()["meta"]["snapshot_id"].startswith("market_")
+    assert response.headers["etag"] == f'"{response.json()["meta"]["snapshot_id"]}"'
+    assert response.headers["cache-control"] == "public, max-age=15, stale-while-revalidate=15"
 
 
 def test_evals_endpoint_exposes_analysis_and_downloads() -> None:

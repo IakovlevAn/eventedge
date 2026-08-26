@@ -1203,6 +1203,18 @@ components:
         meta:
           type: object
           additionalProperties: true
+          required: [snapshot_id, snapshot_as_of, generated_at]
+          properties:
+            snapshot_id:
+              type: string
+              pattern: '^market_[a-f0-9]{24}$'
+            snapshot_as_of:
+              type: string
+              format: date-time
+              nullable: true
+            generated_at:
+              type: string
+              format: date-time
 
     EvalResponse:
       type: object
