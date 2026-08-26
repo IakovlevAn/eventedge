@@ -2054,7 +2054,7 @@ async def _load_evaluation_material(
     dict[str, NewsRecord],
     list[EvaluationEpochRecord],
 ]:
-    stored_signals, stored_news, stored_epochs = await asyncio.gather(
+    stored_signals, stored_epochs = await asyncio.gather(
         repository.list_signals(
             ticker=None,
             directions=None,
@@ -2062,8 +2062,10 @@ async def _load_evaluation_material(
             min_confidence=None,
             limit=1000,
         ),
-        repository.list_news(source_id=None, limit=1000),
         repository.list_evaluation_epochs(),
+    )
+    stored_news = await repository.get_news_by_ids(
+        frozenset(signal.news_id for signal in stored_signals)
     )
     news_by_id = {item.id: item for item in public_news(stored_news)}
     signals = deduplicate_eval_events(
