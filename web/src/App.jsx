@@ -30,6 +30,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { separateAssessmentLayers } from "./assessment.js";
 import { resolveSignalEvidence } from "./provenance.js";
 import { shouldAcceptSnapshot } from "./snapshot.js";
 
@@ -496,36 +497,46 @@ function signalFromApi(item, sourceNames = new Map()) {
 
 function assessmentFromApi(item, sourceNames = new Map()) {
   const [company, sector] = companyMeta[item.ticker] || [item.ticker, "Российский рынок"];
+  const layers = separateAssessmentLayers(item);
+  const newsSignal = layers.newsSignal ? signalFromApi(layers.newsSignal, sourceNames) : null;
+  const marketContext = layers.marketContext;
   return {
     ...item,
-    available: item.assessment_type === "hybrid",
-    displayDirection: item.direction,
-    marketBiasDirection: item.bias_direction,
+    available: Boolean(newsSignal),
+    displayDirection: newsSignal?.direction || "neutral",
+    direction: newsSignal?.direction || "neutral",
+    marketBiasDirection: marketContext.bias_direction,
+    marketScore: Number(marketContext.score || 0),
+    marketConfidence: Math.round(Number(marketContext.confidence || 0) * 100),
+    marketContextAt: marketContext.as_of || item.as_of,
+    marketFactors: (marketContext.factor_contributions || []).map((factor) => ({
+      ...factor,
+      contribution: Number(Number(factor.contribution || 0).toFixed(1)),
+    })),
+    combinedAssessment: layers.legacyCombined,
     company,
     sector,
-    confidence: Math.round(item.confidence * 100),
-    horizon: horizonLabel(item.horizon),
-    event: item.assessment_type === "hybrid" ? "Новость + рынок" : "Рыночная оценка",
+    score: newsSignal?.score ?? null,
+    confidence: newsSignal?.confidence ?? 0,
+    horizon: newsSignal?.horizon || horizonLabel(item.horizon),
+    event: newsSignal ? "Новостной сигнал" : "Рыночный контекст",
     price: formatPrice(item.market?.last_price),
     change: formatPct(item.market?.daily_change_pct),
     market: item.market || null,
-    scenario: item.scenario || null,
+    scenario: layers.marketScenario,
     series: item.market?.candles || [],
     updated: formatRelative(item.as_of),
-    signalAt: item.news_signal?.as_of || item.as_of,
-    signalCreatedAt: item.news_signal?.created_at || item.as_of,
-    evidenceRefs: item.news_signal?.evidence_refs || [],
-    provenance: item.news_signal?.provenance || null,
-    action: actionLabels[item.action] || item.action,
-    invalidation: item.assessment_type === "hybrid"
+    signalAt: newsSignal?.signalAt || null,
+    signalCreatedAt: newsSignal?.signalCreatedAt || null,
+    evidenceRefs: newsSignal?.evidenceRefs || [],
+    provenance: newsSignal?.provenance || null,
+    action: newsSignal?.action || "Нет активного news-сигнала",
+    summary: newsSignal?.summary || "Новых существенных событий по компании нет. Рыночный контекст показан отдельно и не считается сигналом.",
+    invalidation: newsSignal
       ? "Пересмотреть оценку при новой существенной новости или смене реакции рынка."
-      : "Рыночная оценка обновляется вместе с ценой и не заменяет новостной сигнал.",
-    factors: (item.factor_contributions || []).map((factor) => ({
-      ...factor,
-      label: factor.label,
-      contribution: Number(Number(factor.contribution || 0).toFixed(1)),
-    })),
-    evidence: (item.news_signal?.evidence || []).map((evidence) => evidenceFromApi(evidence, sourceNames)),
+      : "Рыночный контекст обновляется вместе с ценой и не заменяет новостной сигнал.",
+    factors: newsSignal?.factors || [],
+    evidence: newsSignal?.evidence || [],
   };
 }
 
@@ -1165,9 +1176,9 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
         <div className="market-strip">
           <span><i className={marketStatus === "error" ? "is-error" : ""} /> MOEX ISS · {marketStatus === "loading" && !marketUpdatedAt ? "загружаем котировки" : marketUpdatedAt ? `обновлено ${formatRelative(marketUpdatedAt)}` : "данные временно недоступны"}</span>
           <span>News engine <strong>signal-engine-0.6.1</strong></span>
-          <span>Live assessment <strong>hybrid-market-0.2.1</strong></span>
-          <span>Шкала сигнала <strong>от −100 до +100</strong></span>
-          <span className="market-strip__right"><strong>{assessmentMeta.directed || 0}</strong> сильных · {assessmentMeta.market_biases || 0} с уклоном · {assessmentMeta.news_backed || 0} с новостью</span>
+          <span>Market context <strong>hybrid-market-0.2.1 cfg 3</strong></span>
+          <span>News score <strong>от −100 до +100</strong></span>
+          <span className="market-strip__right"><strong>{assessmentMeta.directed || 0}</strong> направленных news · {assessmentMeta.market_biases || 0} market-уклонов · {assessmentMeta.news_backed || 0} с evidence</span>
         </div>
 
         <div className="company-card-area">
@@ -1194,26 +1205,26 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
                   </header>
                   <div className="company-signal-card__body">
                     <div className="company-signal-card__score">
-                      <span>{available ? signal.assessment_type === "hybrid" ? "Live оценка компании" : "Рыночный фон" : signal.sector}</span>
+                      <span>{available ? "Новостной сигнал" : signal.assessment_type ? "News-сигнала нет" : signal.sector}</span>
                       {available ? <strong className={`score-cell--${displayDirection}`}>{formatScore(signal.score)}<small> / 100</small></strong> : <strong>Нет сигнала</strong>}
                     </div>
                     <p>{signal.summary}</p>
                     {available && <span className={`company-signal-card__action company-signal-card__action--${signal.direction}`}><Check size={11} /> {signal.action}</span>}
                   </div>
-                  {available && (
+                  {signal.assessment_type && (
                     <div className="company-signal-card__scenario">
-                      <span><small>Сценарий движения</small><strong>{formatScenario(signal.scenario)}</strong></span>
-                      <span><small>Цена MOEX</small><strong>{signal.price} <em>{signal.change}</em></strong></span>
+                      <span><small>Market context · не сигнал</small><strong className={`score-cell--${signal.marketBiasDirection || "neutral"}`}>{signal.marketBiasDirection === "up" ? "Уклон вверх" : signal.marketBiasDirection === "down" ? "Уклон вниз" : "Без уклона"} · {formatScore(signal.marketScore)} п.</strong></span>
+                      <span><small>Диапазон волатильности</small><strong>{formatScenario(signal.scenario)}</strong></span>
                     </div>
                   )}
                   {available && <EventBubbles events={signal.evidence} onOpen={onReadNews} compact />}
                   <div className="company-signal-card__metrics">
-                    <span><small>Уверенность оценки</small><strong>{available ? `${signal.confidence}%` : "—"}</strong></span>
-                    <span><small>Горизонт</small><strong>{signal.horizon}</strong></span>
-                    <span><small>{signal.assessment_type === "quant" ? "Оценка рассчитана" : "Сигнал создан"}</small><strong>{formatPublicationTime(signal.signalAt)}</strong></span>
+                    <span><small>Уверенность news</small><strong>{available ? `${signal.confidence}%` : "—"}</strong></span>
+                    <span><small>Горизонт news</small><strong>{available ? signal.horizon : "—"}</strong></span>
+                    <span><small>{available ? "Сигнал создан" : "Market обновлён"}</small><strong>{formatPublicationTime(available ? signal.signalAt : signal.marketContextAt)}</strong></span>
                   </div>
                   <footer>
-                    <span>{evidence ? <Newspaper size={12} /> : <BarChart3 size={12} />} {evidence ? evidence.title : available ? signal.assessment_type === "quant" ? "Открыть рыночные факторы" : "Открыть расчёт сигнала" : "Посмотреть ленту компании"}</span>
+                    <span>{evidence ? <Newspaper size={12} /> : <BarChart3 size={12} />} {evidence ? evidence.title : signal.assessment_type ? "Открыть рыночный контекст" : "Посмотреть ленту компании"}</span>
                     <ArrowUpRight size={15} />
                   </footer>
                 </article>
@@ -1231,7 +1242,7 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
         </div>
 
         <footer className="terminal-footer">
-          <span><ShieldCheck size={13} /> Пункты — это сила сигнала, а не прогноз доходности</span>
+          <span><ShieldCheck size={13} /> News score, market context и volatility range — три разных показателя</span>
           <button type="button" onClick={onMethodology}>Как считается сигнал <ArrowUpRight size={12} /></button>
         </footer>
       </section>
@@ -1240,7 +1251,8 @@ function SignalsScreen({ signals, assessmentMeta, marketStatus, marketUpdatedAt,
 }
 
 function CompanyScreen({ signal, companyNews, marketStatus, marketUpdatedAt, onBack, onMethodology, onOpenNews, onReadNews }) {
-  const factors = signal.factors;
+  const hasNewsSignal = signal.available !== false;
+  const marketFactors = signal.marketFactors || [];
   const chartEvents = companyNews.length ? companyNews : signal.evidence;
   const [intradaySeries, setIntradaySeries] = useState([]);
   const [intradayStatus, setIntradayStatus] = useState("loading");
@@ -1284,7 +1296,7 @@ function CompanyScreen({ signal, companyNews, marketStatus, marketUpdatedAt, onB
           <strong>{signal.ticker}</strong>
           <span>{signal.company} · MOEX</span>
         </div>
-        <div className="company-header__signal"><Direction direction={signal.direction} /><span>{signal.horizon} · сигнал {formatPublicationTime(signal.signalAt)}</span></div>
+        <div className="company-header__signal"><Direction direction={hasNewsSignal ? signal.direction : "neutral"} /><span>{hasNewsSignal ? `${signal.horizon} · news-сигнал ${formatPublicationTime(signal.signalAt)}` : "Активного news-сигнала нет"}</span></div>
       </div>
 
       <section className="company-canvas">
@@ -1296,8 +1308,8 @@ function CompanyScreen({ signal, companyNews, marketStatus, marketUpdatedAt, onB
               <em className={Number(signal.market?.daily_change_pct) >= 0 ? "market-positive" : "market-negative"}>{signal.change} за сессию</em>
             </div>
             <div className="chart-signal">
-              <Direction direction={signal.direction} />
-              <span>{formatScenario(signal.scenario)} · {signal.horizon}</span>
+              <Direction direction={signal.marketBiasDirection || "neutral"} label="Market context" />
+              <span>{formatScenario(signal.scenario)} · симметричный volatility range</span>
             </div>
           </div>
           <PriceChart dailySeries={signal.series} intradaySeries={intradaySeries} intradayStatus={intradayStatus} direction={signal.direction} events={chartEvents} onOpen={onReadNews} />
@@ -1312,48 +1324,49 @@ function CompanyScreen({ signal, companyNews, marketStatus, marketUpdatedAt, onB
 
         <div className="analysis-grid">
           <section className="decision-card">
-            <div className="section-kicker"><CircleGauge size={14} /> {signal.assessment_type === "hybrid" ? "Live оценка · news + market" : "Рыночный фон без свежего news-сигнала"}</div>
+            <div className="section-kicker"><CircleGauge size={14} /> News signal · независимый слой</div>
             <div className="decision-headline">
               <div>
-                <h1>{signal.action}</h1>
+                <h1>{hasNewsSignal ? signal.action : "Нет активного news-сигнала"}</h1>
                 <p>{signal.summary}</p>
               </div>
               <div className="decision-score">
-              <strong className={`score-cell--${signal.displayDirection || signal.direction}`}>{formatScore(signal.score)}</strong>
-                <span>пунктов из 100</span>
+              <strong className={`score-cell--${hasNewsSignal ? signal.direction : "neutral"}`}>{hasNewsSignal ? formatScore(signal.score) : "—"}</strong>
+                <span>{hasNewsSignal ? "news score из 100" : "сигнала нет"}</span>
               </div>
             </div>
             <button className="score-explainer" type="button" onClick={onMethodology}>
               <Info size={14} />
-              <span><strong>Что означают пункты?</strong> Это сила и направление гипотезы, не ожидаемая доходность.</span>
+              <span><strong>Что означают пункты?</strong> Только сила news-гипотезы. Market context и диапазон волатильности в score не подмешаны.</span>
               <ArrowUpRight size={13} />
             </button>
             <div className="decision-stats">
-              <div><span>Уверенность оценки</span><strong>{signal.confidence}%</strong><small>{signal.confidence >= 70 ? "высокая" : signal.confidence >= 60 ? "средняя" : "ограниченная"}</small></div>
-              <div><span>Горизонт</span><strong>{signal.horizon}</strong><small>торговых</small></div>
-              <div><span>Сценарий движения</span><strong>{formatScenario(signal.scenario)}</strong><small>не ценовой таргет</small></div>
+              <div><span>Уверенность news</span><strong>{hasNewsSignal ? `${signal.confidence}%` : "—"}</strong><small>{hasNewsSignal ? signal.confidence >= 70 ? "высокая" : signal.confidence >= 60 ? "средняя" : "ограниченная" : "нет сигнала"}</small></div>
+              <div><span>Горизонт news</span><strong>{hasNewsSignal ? signal.horizon : "—"}</strong><small>не market range</small></div>
+              <div><span>Evidence</span><strong>{signal.evidence.length}</strong><small>точных публикаций</small></div>
             </div>
-            <div className={`action-note action-note--${signal.direction}`}>
+            <div className={`action-note action-note--${hasNewsSignal ? signal.direction : "neutral"}`}>
               <Check size={15} />
-              <div><strong>Что делать инвестору</strong><span>{signal.action}. {signal.invalidation}</span></div>
+              <div><strong>{hasNewsSignal ? "Действие по news-гипотезе" : "Только наблюдение"}</strong><span>{hasNewsSignal ? `${signal.action}. ${signal.invalidation}` : "Market context и volatility range не создают действие сами по себе."}</span></div>
             </div>
           </section>
 
           <section className="factors-card">
             <div className="section-heading">
-              <span><SlidersHorizontal size={14} /> Из чего состоит оценка</span>
-              <small>вклад в пунктах</small>
+              <span><SlidersHorizontal size={14} /> Market context · не сигнал</span>
+              <small>отдельный quant слой</small>
             </div>
             <div className="factor-list">
-              {factors.map((factor) => (
+              {marketFactors.map((factor) => (
                 <div className="factor-row" key={factor.label}>
                   <div><span>{factor.label}</span><strong className={factor.contribution >= 0 ? "factor--positive" : "factor--negative"}>{formatScore(factor.contribution)} п.</strong></div>
                   <i><b className={factor.contribution >= 0 ? "factor--positive" : "factor--negative"} style={{ width: `${Math.min(Math.abs(factor.contribution) * 3, 100)}%` }} /></i>
                 </div>
               ))}
             </div>
-            <div className="factor-total"><span>Сумма вкладов</span><strong>{formatScore(signal.score)} п.</strong></div>
-            <button className="method-link" type="button" onClick={onMethodology}><BookOpen size={13} /> Как считается сигнал <ArrowUpRight size={11} /></button>
+            <div className="factor-total"><span>Market bias · confidence {signal.marketConfidence}%</span><strong>{formatScore(signal.marketScore)} п.</strong></div>
+            <div className="market-context-note"><BarChart3 size={13} /><span><strong>{signal.marketBiasDirection === "up" ? "Уклон вверх" : signal.marketBiasDirection === "down" ? "Уклон вниз" : "Без выраженного уклона"}</strong>Диапазон {formatScenario(signal.scenario)} симметричен и построен только по реализованной волатильности.</span></div>
+            <button className="method-link" type="button" onClick={onMethodology}><BookOpen size={13} /> Как разделены слои <ArrowUpRight size={11} /></button>
           </section>
         </div>
 
@@ -1382,7 +1395,7 @@ function CompanyScreen({ signal, companyNews, marketStatus, marketUpdatedAt, onB
                 <span className="news-open"><BookOpen size={14} /></span>
               </button>
             ))}
-            {!signal.evidence.length && <div className="empty-state"><Newspaper size={22} /><strong>Evidence не разрешён</strong><span>EventEdge не подставляет другие новости с тем же тикером. До восстановления точной ссылки замена источника не показывается.</span></div>}
+            {!signal.evidence.length && <div className="empty-state"><Newspaper size={22} /><strong>{hasNewsSignal ? "Evidence не разрешён" : "News-сигнала нет"}</strong><span>{hasNewsSignal ? "EventEdge не подставляет другие новости с тем же тикером. До восстановления точной ссылки замена источника не показывается." : "Рыночные данные доступны выше, но они не считаются доказательством новостного сигнала."}</span></div>}
           </div>
         </section>
 
@@ -1808,7 +1821,7 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
   return (
     <main className="screen section-screen methodology-screen">
       <section className="page-hero methodology-hero">
-        <div><span className="eyebrow"><BookOpen size={13} /> Прозрачная методика</span><h1>Как считается сигнал</h1><p>LLM не предсказывает цену напрямую. Она разбирает новость, а независимый рыночный слой проверяет реакцию цены, объём, риск и доступную отчётность. Итог собирает детерминированная формула.</p></div>
+        <div><span className="eyebrow"><BookOpen size={13} /> Прозрачная методика</span><h1>Как считаются три независимых слоя</h1><p>LLM не предсказывает цену напрямую. News engine оценивает событие, market context описывает текущую реакцию, а volatility range показывает симметричный диапазон риска. В интерфейсе они больше не смешиваются в один показатель.</p></div>
         <div className="method-score-scale"><span>Вниз</span><i><b /></i><span>Нейтрально</span><i><b /></i><span>Вверх</span><small>−100</small><small>−18</small><small>+18</small><small>+100</small></div>
       </section>
 
@@ -1820,7 +1833,7 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
       <section className="model-stack">
         <article><span>01</span><div><strong>signal-engine-0.6.1</strong><small>Новостной сигнал</small><p>LLM извлекает событие, факты, полярность и существенность. Код отсекает сводки уже случившегося движения, выбирает target и рассчитывает score.</p></div></article>
         <i><ArrowDownRight size={15} /></i>
-        <article><span>02</span><div><strong>hybrid-market-0.2.1</strong><small>Live оценка компании</small><p>Для конкретной акции объединяет последний направленный news-сигнал с ценой, объёмом, волатильностью, ликвидностью и доступной отчётностью. Нейтральный фон не стирает активную гипотезу.</p></div></article>
+        <article><span>02</span><div><strong>hybrid-market-0.2.1 · cfg 3</strong><small>Market context + volatility range</small><p>Показывает цену, объём, волатильность, ликвидность и доступную отчётность отдельно от news-сигнала. Сам по себе этот слой не создаёт действие.</p></div></article>
         <i><ArrowDownRight size={15} /></i>
         <article><span>03</span><div><strong>Evals по эпохам</strong><small>Проверка после сигнала</small><p>Сохраняет результаты каждой версии отдельно и оценивает реакцию через 1 и 4 часа; сырые точки до 3 дней остаются в выгрузке.</p></div></article>
       </section>
@@ -1843,14 +1856,14 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
         </section>
         <section className="method-card threshold-card">
           <header><span>03</span><div><h2>Порог превращает оценку в действие</h2><p>Нейтральная зона защищает от решений на слабом информационном шуме.</p></div></header>
-          <div><span className="direction direction--down"><ArrowDownRight size={14} /> Вниз</span><strong>≤ −18</strong><p>Сократить риск или не входить</p></div>
-          <div><span className="direction direction--neutral"><Minus size={14} /> Нейтрально</span><strong>от −18 до +18</strong><p>Ждать нового факта</p></div>
+          <div><span className="direction direction--down"><ArrowDownRight size={14} /> Вниз</span><strong>≤ −30 и confidence ≥ 80%</strong><p>Только прямой company-сигнал; context DOWN не публикуется</p></div>
+          <div><span className="direction direction--neutral"><Minus size={14} /> Нейтрально</span><strong>от −30 до +18</strong><p>Ждать нового факта</p></div>
           <div><span className="direction direction--up"><ArrowUpRight size={14} /> Вверх</span><strong>≥ +18</strong><p>Рассмотреть позицию</p></div>
         </section>
       </div>
 
       <section className="quant-method">
-        <header><span>04</span><div><h2>Не‑LLM слой проверяет рынок</h2><p>Без направленной новости факторы показываются как рыночный уклон, но не превращаются в зелёный или красный торговый сигнал. Если сильная новость есть, итог считается по фиксированной пропорции 65% news / 35% market.</p></div></header>
+        <header><span>04</span><div><h2>Не‑LLM слой описывает рынок отдельно</h2><p>Факторы формируют только market bias и никогда не превращаются в зелёный или красный news-сигнал. Симметричный volatility range не имеет направления и не является ценовым таргетом.</p></div></header>
         <div className="quant-factor-grid">
           <article><strong>Реакция цены</strong><span>Движение за сессию и пять дней</span><b>направление</b></article>
           <article><strong>Объём</strong><span>Отклонение от медианы сессий</span><b>подтверждение</b></article>
@@ -1858,7 +1871,8 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
           <article><strong>Ликвидность</strong><span>Оборот и исполнимость идеи</span><b>уверенность</b></article>
           <article><strong>Отчётность</strong><span>Детерминированные факты из раскрытия</span><b>направление</b></article>
         </div>
-        <code>live score = news score × 0,65 + market score × 0,35</code>
+        <code>news score ≠ market bias ≠ volatility range</code>
+        <code>volatility range = ± дневная волатильность × √3 торговых дней</code>
       </section>
 
       <section className="scenario-method">
@@ -1918,7 +1932,7 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
 }
 
 const apiEndpoints = [
-  { id: "assessments", method: "GET", path: "/v1/assessments", title: "Live‑оценки рынка", description: "Гибридная оценка направленных news-сигналов и отдельный quant-уклон для остальных компаний.", parameter: { name: "tickers", type: "string", description: "Опциональный список тикеров MOEX через запятую" } },
+  { id: "assessments", method: "GET", path: "/v1/assessments", title: "News + market layers", description: "Раздельные news_signal, market_context и симметричный market_scenario; legacy combined-поля сохранены только для совместимости.", parameter: { name: "tickers", type: "string", description: "Опциональный список тикеров MOEX через запятую" } },
   { id: "evals", method: "GET", path: "/v1/evals", title: "Анализ качества сигналов", description: "Короткие 1ч/4ч метрики, Pearson и выбор сохранённой эпохи модели.", parameter: { name: "model_version", type: "string", description: "Версия news-модели; без параметра выбирается текущая эпоха" } },
   { id: "evals_export", method: "GET", path: "/v1/evals/export?format=csv&dataset=timeseries&model_version=all", title: "Выгрузка Evals", description: "CSV/JSON: все эпохи моделей и сырой event-time ряд свечей до +3 дней.", parameter: { name: "dataset", type: "string", description: "outcomes или timeseries; model_version — версия или all" } },
   { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Сигналы Signal Engine", description: "Версия signal-engine-0.6.1: target может быть инструментом, отраслью или рынком. Шум и сводки уже случившегося движения не становятся новыми сигналами.", parameter: { name: "limit", type: "integer", description: "Количество записей, максимум 100" } },
@@ -1943,12 +1957,9 @@ function ApiScreen() {
   "data": [{
     "ticker": "SBER",
     "assessment_type": "hybrid",
-    "direction": "up",
-    "score": 31.4,
-    "factor_contributions": [
-      {"code":"news_signal","contribution":25.4},
-      {"code":"price_reaction","contribution":6.0}
-    ]
+    "news_signal": {"direction":"up","score":42.7,"confidence":0.76},
+    "market_context": {"is_signal":false,"bias_direction":"neutral","score":3.4},
+    "market_scenario": {"low_pct":-2.46,"high_pct":2.46,"method":"realized_volatility_sqrt_time_v1"}
   }],
   "meta": {"returned":15,"directed":2,"market_biases":11,"news_backed":3}
 }` : endpoint.id === "evals" ? `{

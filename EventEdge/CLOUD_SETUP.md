@@ -90,6 +90,8 @@ Gateway и YDB-backed ревизия контейнера развёрнуты. 
 
 `/v1/signals` и news-backed элементы `/v1/assessments` разрешают immutable `evidence_refs` в конкретные исходные публикации и возвращают provenance: время решения, data cutoff, модель, конфигурацию и статус разрешения evidence. UI показывает только эти публикации; другие новости того же тикера больше не подставляются как доказательство сигнала.
 
+Assessment config 3 разделяет три сущности: `news_signal` остаётся единственным источником направления и действия, `market_context` возвращает самостоятельный quant-уклон с `is_signal=false`, а `market_scenario` — симметричный диапазон `± realized volatility × √time` без направления. Legacy combined-поля сохранены в API для совместимости, но UI не выдаёт их за один сигнал.
+
 ## Проверка
 
 Workflow [yc-connection.yml](../.github/workflows/yc-connection.yml) запускается вручную. Он запрашивает OIDC-токен GitHub, обменивает его на короткоживущий IAM-токен Yandex Cloud и не выводит токены в лог.

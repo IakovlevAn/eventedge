@@ -10,7 +10,7 @@ from eventedge.analysis import DEFAULT_MOEX_ALIASES
 from eventedge.storage import NewsRecord, SignalRecord, to_rfc3339
 
 ASSESSMENT_MODEL_VERSION = "hybrid-market-0.2.1"
-ASSESSMENT_CONFIG_VERSION = 2
+ASSESSMENT_CONFIG_VERSION = 3
 EVALUATION_METHODOLOGY_VERSION = "market-outcome-0.2.0"
 MAX_LIVE_PROCESSING_LAG = timedelta(minutes=15)
 MAX_HORIZON_OBSERVATION_LAG = timedelta(minutes=20)
@@ -259,6 +259,15 @@ def build_assessment(
     active_signal: SignalRecord | None,
 ) -> dict[str, object]:
     quant, quant_score, quant_confidence = quant_factors(ticker, market, news)
+    market_context = {
+        "as_of": str(market.get("observed_at")),
+        "is_signal": False,
+        "bias_direction": _bias_direction(quant_score),
+        "score": quant_score,
+        "confidence": quant_confidence,
+        "factor_contributions": quant,
+        "source": market.get("source"),
+    }
     if active_signal is None:
         score = quant_score
         confidence = quant_confidence
@@ -317,12 +326,14 @@ def build_assessment(
         "summary": summary,
         "factor_contributions": factors,
         "market": {key: value for key, value in market.items() if key not in {"ticker", "name"}},
+        "market_context": market_context,
         "news_signal": news_signal,
         "model_version": ASSESSMENT_MODEL_VERSION,
         "config_version": ASSESSMENT_CONFIG_VERSION,
         "limitations": [
             "Baseline не откалиброван на point-in-time backtest.",
             "Показатель отчётности доступен только при наличии распознанного раскрытия.",
+            "Market context и volatility scenario не являются самостоятельными сигналами.",
         ],
     }
 

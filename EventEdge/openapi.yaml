@@ -33,7 +33,7 @@ paths:
   /v1/assessments:
     get:
       tags: [Signals]
-      summary: List live hybrid and quant assessments
+      summary: List separate news signals, market context and volatility scenarios
       operationId: listAssessments
       security: []
       parameters:
@@ -45,7 +45,7 @@ paths:
             maxLength: 260
       responses:
         '200':
-          description: Assessments with current market factors and coverage metadata.
+          description: Backward-compatible assessments with explicit independent news_signal, market_context and market_scenario layers.
           content:
             application/json:
               schema:
@@ -1145,10 +1145,38 @@ components:
           type: string
           nullable: true
 
+    MarketContext:
+      type: object
+      additionalProperties: false
+      required: [as_of, is_signal, bias_direction, score, confidence, factor_contributions, source]
+      properties:
+        as_of:
+          type: string
+          format: date-time
+        is_signal:
+          type: boolean
+          enum: [false]
+        bias_direction:
+          $ref: '#/components/schemas/SignalDirection'
+        score:
+          type: number
+          minimum: -100
+          maximum: 100
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        factor_contributions:
+          type: array
+          items:
+            $ref: '#/components/schemas/AssessmentFactor'
+        source:
+          $ref: '#/components/schemas/MarketDataSource'
+
     Assessment:
       type: object
       additionalProperties: true
-      required: [id, ticker, as_of, assessment_type, direction, bias_direction, action, horizon, score, confidence, factor_contributions, market, model_version]
+      required: [id, ticker, as_of, assessment_type, direction, bias_direction, action, horizon, score, confidence, factor_contributions, market, market_context, market_scenario, news_signal, model_version, config_version]
       properties:
         id:
           type: string
@@ -1183,12 +1211,21 @@ components:
         market:
           type: object
           additionalProperties: true
+        market_context:
+          $ref: '#/components/schemas/MarketContext'
+        market_scenario:
+          allOf:
+            - $ref: '#/components/schemas/ScenarioRange'
+          nullable: true
         news_signal:
           allOf:
             - $ref: '#/components/schemas/Signal'
           nullable: true
         model_version:
           type: string
+        config_version:
+          type: integer
+          minimum: 1
 
     AssessmentListResponse:
       type: object
@@ -1777,7 +1814,7 @@ components:
           type: string
         method:
           type: string
-          enum: [realized_volatility_x_signal_strength_v1]
+          enum: [realized_volatility_x_signal_strength_v1, realized_volatility_sqrt_time_v1]
 
     InstrumentSnapshot:
       type: object

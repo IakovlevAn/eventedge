@@ -78,6 +78,7 @@ from eventedge.market import (
     MarketDataUnavailableError,
     MoexMarketDataClient,
     scenario_range,
+    volatility_scenario_range,
 )
 from eventedge.ml_router import (
     MlRouterDecision,
@@ -2099,6 +2100,11 @@ async def list_assessments(
             horizon_value=3,
             horizon_unit="trading_days",
         )
+        assessment["market_scenario"] = volatility_scenario_range(
+            result,
+            horizon_value=3,
+            horizon_unit="trading_days",
+        )
         data.append(assessment)
 
     snapshot_as_of = max((str(item["as_of"]) for item in data), default=None)
@@ -2120,8 +2126,14 @@ async def list_assessments(
             "generated_at": utc_now(),
             "requested": len(normalized),
             "returned": len(data),
-            "directed": sum(item["direction"] != "neutral" for item in data),
-            "market_biases": sum(item["bias_direction"] != "neutral" for item in data),
+            "directed": sum(
+                bool(item.get("news_signal"))
+                and item["news_signal"]["direction"] != "neutral"
+                for item in data
+            ),
+            "market_biases": sum(
+                item["market_context"]["bias_direction"] != "neutral" for item in data
+            ),
             "news_backed": sum(item["assessment_type"] == "hybrid" for item in data),
             "refresh_after_seconds": 30,
             "score_scale": {
