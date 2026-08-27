@@ -1,4 +1,27 @@
-from eventedge.events import classify_news_event, cluster_market_events, context_signal_specs
+from eventedge.events import (
+    classify_news_event,
+    cluster_market_events,
+    context_signal_specs,
+    is_product_event_candidate,
+)
+
+
+def test_product_event_candidate_uses_existing_routing_without_deleting_raw_news() -> None:
+    assert not is_product_event_candidate(
+        {
+            "event_candidate": False,
+            "analysis_candidate": False,
+            "signal_candidate": False,
+        }
+    )
+    assert is_product_event_candidate({"event_candidate": True})
+    assert is_product_event_candidate({}, [{"id": "signal_one"}])
+    assert is_product_event_candidate(
+        {"signal_outcome": {"status": "generated", "signal_count": 1}}
+    )
+    assert not is_product_event_candidate(
+        {"signal_outcome": {"status": "rejected_after_analysis", "signal_count": 0}}
+    )
 
 
 def test_company_event_wins_when_a_traded_ticker_is_known() -> None:

@@ -302,6 +302,33 @@ def classify_news_event(
     }
 
 
+def is_product_event_candidate(
+    source_metadata: Mapping[str, object],
+    related_signals: Iterable[Mapping[str, object]] = (),
+) -> bool:
+    """Keep only routed or signal-backed news on public event surfaces.
+
+    Raw collection remains untouched so a future router can recover false
+    negatives. A generated historical signal is also enough to retain an
+    event after that signal is no longer present in the active read model.
+    """
+    if any(True for _ in related_signals):
+        return True
+    if any(
+        source_metadata.get(field) is True
+        for field in ("event_candidate", "analysis_candidate", "signal_candidate")
+    ):
+        return True
+    outcome = source_metadata.get("signal_outcome")
+    signal_count = outcome.get("signal_count") if isinstance(outcome, Mapping) else None
+    return bool(
+        isinstance(outcome, Mapping)
+        and outcome.get("status") == "generated"
+        and isinstance(signal_count, int)
+        and signal_count > 0
+    )
+
+
 def signal_target(ticker: str) -> dict[str, str]:
     context = CONTEXT_SIGNAL_TARGETS.get(ticker)
     if context is not None:

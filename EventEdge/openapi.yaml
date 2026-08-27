@@ -126,7 +126,7 @@ paths:
   /v1/news:
     get:
       tags: [News]
-      summary: List source news with related signals
+      summary: List product-relevant source news with related signals
       operationId: listNews
       parameters:
         - name: source_id
@@ -149,7 +149,7 @@ paths:
             default: 20
       responses:
         '200':
-          description: News ordered by `published_at DESC, id DESC`.
+          description: Routed or signal-backed news ordered by `published_at DESC, id DESC`; excluded raw items remain stored for future reclassification.
           content:
             application/json:
               schema:
@@ -398,7 +398,7 @@ paths:
   /v1/events:
     get:
       tags: [Events]
-      summary: List normalized news events
+      summary: List product-relevant normalized news events
       operationId: listEvents
       parameters:
         - name: scope
@@ -2117,6 +2117,7 @@ components:
         - delivery_target_seconds
         - collection_lanes
         - processing_coverage
+        - excluded_irrelevant
         - sources
       properties:
         limit:
@@ -2148,6 +2149,10 @@ components:
             $ref: '#/components/schemas/NewsCollectionLane'
         processing_coverage:
           $ref: '#/components/schemas/NewsProcessingCoverage'
+        excluded_irrelevant:
+          type: integer
+          minimum: 0
+          description: Stored items hidden from public product surfaces by the relevance router.
         sources:
           type: array
           items:
