@@ -1078,6 +1078,7 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
     assert news.json()["meta"]["poll_interval_seconds"] == 60
     assert news.json()["meta"]["client_refresh_interval_seconds"] == 30
     assert news.json()["meta"]["delivery_target_seconds"] == 120
+    assert news.json()["meta"]["excluded_irrelevant"] == 0
     assert news.json()["meta"]["processing_coverage"] == {
         "stored": 1,
         "relevant": 1,
@@ -1193,6 +1194,60 @@ def test_news_coverage_aggregates_bounded_signal_rejection_reasons() -> None:
 
     coverage = payload["meta"]["processing_coverage"]
     assert coverage["rejection_reasons"] == {"event_other": 1}
+
+
+def test_public_news_and_event_surfaces_hide_unrouted_storage_noise() -> None:
+    timestamp = datetime(2026, 8, 18, 12, tzinfo=UTC)
+    common = {
+        "source_id": "interfax",
+        "published_at": timestamp,
+        "received_at": timestamp,
+        "url": "https://example.com/news",
+        "content": "Проверочный материал.",
+        "language": "ru",
+        "created_at": timestamp,
+    }
+    relevant = NewsRecord(
+        id="news_relevant_market_event",
+        external_id="relevant-market-event",
+        title="Банк России изменил ключевую ставку",
+        source_metadata={"event_candidate": True, "analysis_candidate": True},
+        **common,
+    )
+    irrelevant = NewsRecord(
+        id="news_unrouted_storage_noise",
+        external_id="unrouted-storage-noise",
+        title="Спортивная команда провела товарищеский матч",
+        source_metadata={
+            "event_candidate": False,
+            "analysis_candidate": False,
+            "signal_candidate": False,
+        },
+        **common,
+    )
+
+    news_payload = main_module.build_news_response_payload(
+        [relevant, irrelevant],
+        [],
+        source_id=None,
+        scope=None,
+        limit=100,
+    )
+    events = main_module.build_market_event_records([relevant, irrelevant], [])
+
+    assert [item["id"] for item in news_payload["data"]] == [relevant.id]
+    assert news_payload["meta"]["total"] == 1
+    assert news_payload["meta"]["excluded_irrelevant"] == 1
+    assert news_payload["meta"]["scope_counts"] == {
+        "market": 1,
+        "sector": 0,
+        "company": 0,
+    }
+    assert news_payload["meta"]["sources"][0]["count"] == 1
+    assert news_payload["meta"]["processing_coverage"]["stored"] == 2
+    assert news_payload["meta"]["processing_coverage"]["relevant"] == 1
+    assert len(events) == 1
+    assert events[0]["news_ids"] == [relevant.id]
 
 
 def test_signal_list_rejects_unknown_direction() -> None:

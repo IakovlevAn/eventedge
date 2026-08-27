@@ -64,7 +64,12 @@ from eventedge.evals import (
     event_time_export_rows,
     outcome_export_rows,
 )
-from eventedge.events import classify_news_event, cluster_market_events, signal_target
+from eventedge.events import (
+    classify_news_event,
+    cluster_market_events,
+    is_product_event_candidate,
+    signal_target,
+)
 from eventedge.llm import analyzer_from_environment
 from eventedge.market import (
     EVALUATION_INDEX_BENCHMARKS,
@@ -676,27 +681,32 @@ def build_news_response_payload(
         )
         for item in visible_news
     }
-    scoped_news = [
+    all_scoped_news = [
         item for item in visible_news if scope is None or event_by_news[item.id]["scope"] == scope
     ]
-    processing_rows = [item.as_api_dict()["processing"] for item in scoped_news]
-    signaled_count = sum(bool(signals_by_news.get(item.id)) for item in scoped_news)
-    relevant_count = sum(
-        bool(row["event_candidate"] or row["analysis_candidate"] or signals_by_news.get(item.id))
-        for item, row in zip(scoped_news, processing_rows, strict=True)
-    )
+    scoped_news = [
+        item
+        for item in all_scoped_news
+        if is_product_event_candidate(
+            item.source_metadata,
+            signals_by_news.get(item.id, []),
+        )
+    ]
+    processing_rows = [item.as_api_dict()["processing"] for item in all_scoped_news]
+    signaled_count = sum(bool(signals_by_news.get(item.id)) for item in all_scoped_news)
+    relevant_count = len(scoped_news)
     analysis_candidate_count = sum(
         bool(row["analysis_candidate"] or signals_by_news.get(item.id))
-        for item, row in zip(scoped_news, processing_rows, strict=True)
+        for item, row in zip(all_scoped_news, processing_rows, strict=True)
     )
     rejection_reasons: dict[str, int] = {}
-    for item in scoped_news:
+    for item in all_scoped_news:
         outcome = item.source_metadata.get("signal_outcome")
         reason = outcome.get("reason") if isinstance(outcome, Mapping) else None
         if isinstance(reason, str) and reason in SIGNAL_REJECTION_REASONS:
             rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
     processing_coverage = {
-        "stored": len(scoped_news),
+        "stored": len(all_scoped_news),
         "relevant": relevant_count,
         "analysis_candidates": analysis_candidate_count,
         "signaled": signaled_count,
@@ -732,8 +742,12 @@ def build_news_response_payload(
         record["event"] = event_by_news[item.id]
         data.append(record)
     scope_counts = {"market": 0, "sector": 0, "company": 0}
-    for event in event_by_news.values():
-        scope_counts[str(event["scope"])] += 1
+    for item in visible_news:
+        if is_product_event_candidate(
+            item.source_metadata,
+            signals_by_news.get(item.id, []),
+        ):
+            scope_counts[str(event_by_news[item.id]["scope"])] += 1
     return {
         "data": data,
         "meta": {
@@ -743,6 +757,7 @@ def build_news_response_payload(
             "next_cursor": None,
             "scope": scope,
             "scope_counts": scope_counts,
+            "excluded_irrelevant": len(all_scoped_news) - len(scoped_news),
             "processing_coverage": processing_coverage,
             "last_ingested_at": (
                 max(item.received_at for item in visible_news)
@@ -835,6 +850,8 @@ def build_market_event_records(
     )
     signals_by_news: dict[str, list[dict[str, object]]] = {}
     for signal in signals:
+        if signal.model_version != CURRENT_NEWS_MODEL_VERSION:
+            continue
         signals_by_news.setdefault(signal.news_id, []).append(
             {
                 "id": signal.id,
@@ -850,6 +867,8 @@ def build_market_event_records(
     candidates: list[dict[str, object]] = []
     for item in news:
         related_signals = signals_by_news.get(item.id, [])
+        if not is_product_event_candidate(item.source_metadata, related_signals):
+            continue
         projection = classify_news_event(
             title=item.title,
             content=item.content,
