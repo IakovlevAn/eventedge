@@ -11,7 +11,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -111,6 +111,8 @@ NEWS_COLLECTION_INTERVAL_SECONDS = next(
 NEWS_CLIENT_REFRESH_INTERVAL_SECONDS = 30
 NEWS_DELIVERY_TARGET_SECONDS = 120
 EVALUATION_CACHE_TTL_SECONDS = 60
+ASSESSMENT_SNAPSHOT_BUCKET_SECONDS = 30
+ASSESSMENT_SNAPSHOT_RETENTION_SECONDS = 600
 BACKFILL_BATCH_LIMIT = min(40, max(1, int(os.environ.get("BACKFILL_BATCH_LIMIT", "4"))))
 BACKFILL_CONCURRENCY = min(4, max(1, int(os.environ.get("BACKFILL_CONCURRENCY", "1"))))
 # One attempt can spend up to 3 seconds obtaining an IAM token and 18 seconds
@@ -2007,25 +2009,46 @@ async def list_assessments(
         for item in data
     ]
     snapshot_id = f"market_{canonical_payload_hash(snapshot_basis)[:24]}"
-    response = JSONResponse(
-        content={
-            "data": data,
-            "errors": errors,
-            "meta": {
-                "snapshot_id": snapshot_id,
-                "snapshot_as_of": snapshot_as_of,
-                "generated_at": utc_now(),
-                "requested": len(normalized),
-                "returned": len(data),
-                "directed": sum(item["direction"] != "neutral" for item in data),
-                "market_biases": sum(item["bias_direction"] != "neutral" for item in data),
-                "news_backed": sum(item["assessment_type"] == "hybrid" for item in data),
-                "refresh_after_seconds": 30,
-                "score_scale": {"min": -100, "neutral_low": -18, "neutral_high": 18, "max": 100},
+    local_payload = {
+        "data": data,
+        "errors": errors,
+        "meta": {
+            "snapshot_id": snapshot_id,
+            "snapshot_as_of": snapshot_as_of,
+            "generated_at": utc_now(),
+            "requested": len(normalized),
+            "returned": len(data),
+            "directed": sum(item["direction"] != "neutral" for item in data),
+            "market_biases": sum(item["bias_direction"] != "neutral" for item in data),
+            "news_backed": sum(item["assessment_type"] == "hybrid" for item in data),
+            "refresh_after_seconds": 30,
+            "score_scale": {
+                "min": -100,
+                "neutral_low": -18,
+                "neutral_high": 18,
+                "max": 100,
             },
-        }
-    )
-    response.headers["ETag"] = f'"{snapshot_id}"'
+        },
+    }
+    repository: NewsRepository = request.app.state.news_repository
+    created_at = datetime.now(UTC)
+    query_hash = canonical_payload_hash(normalized)[:16]
+    snapshot_bucket = int(created_at.timestamp()) // ASSESSMENT_SNAPSHOT_BUCKET_SECONDS
+    snapshot_key = f"{snapshot_bucket}:{query_hash}"
+    try:
+        payload = await repository.get_or_create_assessment_snapshot(
+            snapshot_key,
+            local_payload,
+            created_at=created_at,
+            expires_before=created_at - timedelta(seconds=ASSESSMENT_SNAPSHOT_RETENTION_SECONDS),
+        )
+    except Exception:
+        logger.exception("Shared assessment snapshot unavailable; serving the local payload")
+        payload = local_payload
+
+    canonical_snapshot_id = str(payload["meta"]["snapshot_id"])
+    response = JSONResponse(content=payload)
+    response.headers["ETag"] = f'"{canonical_snapshot_id}"'
     response.headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=15"
     return response
 
