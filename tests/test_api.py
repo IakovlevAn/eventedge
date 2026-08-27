@@ -986,6 +986,62 @@ def test_signal_list_reads_repository_instead_of_stale_empty_snapshot(
     snapshot_read.assert_not_awaited()
 
 
+def test_active_signal_list_hides_legacy_context_down_but_keeps_strong_company_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = MemoryNewsRepository()
+    timestamp = datetime.now(UTC).replace(microsecond=0)
+    news = NewsRecord(
+        id="news_down_publication_gate",
+        source_id="interfax",
+        external_id="down-publication-gate",
+        published_at=timestamp,
+        received_at=timestamp,
+        title="Санкции затронули компанию и рынок",
+        url="https://example.com/down-publication-gate",
+        content="Опубликованы новые существенные ограничения.",
+        language="ru",
+        source_metadata={"analysis_candidate": True, "signal_candidate": True},
+        created_at=timestamp,
+    )
+
+    def signal(ticker: str) -> SignalRecord:
+        return SignalRecord(
+            id=f"sig_down_{ticker.lower()}",
+            news_id=news.id,
+            ticker=ticker,
+            as_of=timestamp,
+            data_cutoff_at=timestamp,
+            status="active",
+            direction="down",
+            action="review_position" if ticker == "SBER" else "risk_off",
+            horizon_value=3,
+            horizon_unit="calendar_days",
+            score=-45.0,
+            strength=0.8,
+            confidence=0.85,
+            summary="Проверка защитного down-gate.",
+            factor_contributions=(),
+            evidence_refs=(news.id,),
+            expires_at=timestamp + timedelta(days=3),
+            invalidation_conditions=(),
+            model_version="signal-engine-0.6.1",
+            config_version=2,
+            created_at=timestamp,
+        )
+
+    repository._news[news.id] = news
+    repository._signals = {
+        item.id: item for item in (signal("RUEQ"), signal("SBER"))
+    }
+    monkeypatch.setattr(app.state, "news_repository", repository)
+
+    response = client.get("/v1/signals", params={"direction": "down", "limit": 100})
+
+    assert response.status_code == 200
+    assert [item["ticker"] for item in response.json()["data"]] == ["SBER"]
+
+
 def test_signal_list_rejects_incomplete_repository_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

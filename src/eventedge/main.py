@@ -68,6 +68,7 @@ from eventedge.events import (
     classify_news_event,
     cluster_market_events,
     is_product_event_candidate,
+    is_publishable_news_signal,
     signal_target,
 )
 from eventedge.llm import analyzer_from_environment
@@ -660,6 +661,13 @@ def build_news_response_payload(
     for signal in latest_model_signal_per_news(deduplicate_signals(signals)):
         if signal.model_version != CURRENT_NEWS_MODEL_VERSION:
             continue
+        if not is_publishable_news_signal(
+            ticker=signal.ticker,
+            direction=signal.direction,
+            score=signal.score,
+            confidence=signal.confidence,
+        ):
+            continue
         signals_by_news.setdefault(signal.news_id, []).append(
             {
                 "id": signal.id,
@@ -851,6 +859,13 @@ def build_market_event_records(
     signals_by_news: dict[str, list[dict[str, object]]] = {}
     for signal in signals:
         if signal.model_version != CURRENT_NEWS_MODEL_VERSION:
+            continue
+        if not is_publishable_news_signal(
+            ticker=signal.ticker,
+            direction=signal.direction,
+            score=signal.score,
+            confidence=signal.confidence,
+        ):
             continue
         signals_by_news.setdefault(signal.news_id, []).append(
             {
@@ -1789,6 +1804,15 @@ async def list_signals(
             signal
             for signal in signals
             if signal.news_id not in hidden_ids
+            and (
+                (status or "active") != "active"
+                or is_publishable_news_signal(
+                    ticker=signal.ticker,
+                    direction=signal.direction,
+                    score=signal.score,
+                    confidence=signal.confidence,
+                )
+            )
         ),
         news_by_id,
     )[:limit]
@@ -1907,6 +1931,12 @@ def active_signals_from_content(
         if (
             signal.model_version == CURRENT_NEWS_MODEL_VERSION
             and signal.news_id not in hidden_ids
+            and is_publishable_news_signal(
+                ticker=signal.ticker,
+                direction=signal.direction,
+                score=signal.score,
+                confidence=signal.confidence,
+            )
         ):
             current = result.get(signal.ticker)
             if current is None or (
@@ -1984,6 +2014,12 @@ async def list_assessments(
         if (
             signal.model_version == CURRENT_NEWS_MODEL_VERSION
             and signal.news_id not in hidden_ids
+            and is_publishable_news_signal(
+                ticker=signal.ticker,
+                direction=signal.direction,
+                score=signal.score,
+                confidence=signal.confidence,
+            )
         ):
             current = active_by_ticker.get(signal.ticker)
             if current is None or (

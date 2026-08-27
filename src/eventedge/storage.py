@@ -20,7 +20,12 @@ from eventedge.analysis import (
     SignalAction,
     score_features,
 )
-from eventedge.events import classify_news_event, context_signal_specs, signal_target
+from eventedge.events import (
+    classify_news_event,
+    context_signal_specs,
+    is_publishable_news_signal,
+    signal_target,
+)
 from eventedge.llm import NewsAnalyzer, RuleBasedNewsAnalyzer
 
 CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -32,6 +37,7 @@ SIGNAL_REJECTION_REASONS = frozenset(
         "low_materiality",
         "no_instrument",
         "product_or_marketing_noise",
+        "unvalidated_context_down",
         "weak_direction",
     }
 )
@@ -425,6 +431,12 @@ def process_document(
                 }
             )
             for signal in baseline_signals
+            if is_publishable_news_signal(
+                ticker=signal.ticker,
+                direction=signal.direction.value,
+                score=signal.score,
+                confidence=signal.confidence,
+            )
         ]
     # A semantic analysis result is not automatically a signal. Neutral context
     # stays attached to the news feature set; only a high-recall direct company
@@ -522,6 +534,8 @@ def signal_rejection_reason(
         return "low_materiality"
     if abs(features.polarity) < 0.15:
         return "weak_direction"
+    if not signal_instruments and features.polarity < 0:
+        return "unvalidated_context_down"
     return "below_score_threshold"
 
 

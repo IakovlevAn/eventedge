@@ -9,6 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from eventedge.configs.scoring import load_scoring_config
 
 CURRENT_NEWS_MODEL_VERSION = "signal-engine-0.6.1"
+CURRENT_SIGNAL_CONFIG_VERSION = 3
+DOWN_SCORE_THRESHOLD = -30.0
+MINIMUM_DOWN_CONFIDENCE = 0.80
 
 
 class EventType(StrEnum):
@@ -129,9 +132,10 @@ class BaselineScoringConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     model_version: Literal["signal-engine-0.6.1"] = "signal-engine-0.6.1"
-    config_version: Annotated[int, Field(ge=1)] = 2
+    config_version: Annotated[int, Field(ge=1)] = CURRENT_SIGNAL_CONFIG_VERSION
     positive_threshold: Annotated[float, Field(ge=0, le=100)] = 18
-    negative_threshold: Annotated[float, Field(ge=-100, le=0)] = -18
+    negative_threshold: Annotated[float, Field(ge=-100, le=0)] = DOWN_SCORE_THRESHOLD
+    minimum_down_confidence: Annotated[float, Field(ge=0, le=1)] = MINIMUM_DOWN_CONFIDENCE
     calibration_scale: Annotated[float, Field(gt=0, le=1)] = 0.55
     semantic_weight: Annotated[float, Field(ge=0, le=1)] = 0.55
     materiality_weight: Annotated[float, Field(ge=0, le=1)] = 0.20
@@ -536,16 +540,6 @@ def score_features(
             for code, value in raw_contributions.items()
         }
         score = round(max(-100.0, min(100.0, sum(scaled.values()) * 100)), 1)
-        if score >= scoring.positive_threshold:
-            direction = SignalDirection.UP
-            action = SignalAction.CONSIDER_BUY
-        elif score <= scoring.negative_threshold:
-            direction = SignalDirection.DOWN
-            action = SignalAction.REVIEW_POSITION
-        else:
-            direction = SignalDirection.NEUTRAL
-            action = SignalAction.NO_ACTION
-
         confidence = min(
             0.95,
             0.10
@@ -556,6 +550,19 @@ def score_features(
             + 0.10 * fact_coverage
             + 0.05 * abs(features.polarity),
         )
+        if score >= scoring.positive_threshold:
+            direction = SignalDirection.UP
+            action = SignalAction.CONSIDER_BUY
+        elif (
+            score <= scoring.negative_threshold
+            and confidence >= scoring.minimum_down_confidence
+        ):
+            direction = SignalDirection.DOWN
+            action = SignalAction.REVIEW_POSITION
+        else:
+            direction = SignalDirection.NEUTRAL
+            action = SignalAction.NO_ACTION
+
         signals.append(
             BaselineSignal(
                 ticker=instrument.ticker,
