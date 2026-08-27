@@ -219,7 +219,21 @@ jobs:
               && curl --fail --silent --show-error \
                 --max-time 30 \
                 "${EVENTEDGE_API_URL}/v1/sources" \
-              | jq -e '.meta.telegram_limit == 18 and (.data | length) > 0' >/dev/null; then
+              | jq -e '
+                  .meta.telegram_limit == 18
+                  and .meta.freshness_basis == "latest_stored_publication"
+                  and (.meta.observation_status | IN(
+                    "live", "cached", "shared_snapshot", "stale"
+                  ))
+                  and (.data | length) > 0
+                  and all(.data[];
+                    has("last_received_at")
+                    and has("latest_delivery_lag_seconds")
+                    and has("collection_lane")
+                    and has("poll_interval_seconds")
+                    and has("freshness_status")
+                  )
+                ' >/dev/null; then
               break
             fi
             if [[ "${attempt}" == "6" ]]; then exit 1; fi

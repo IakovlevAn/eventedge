@@ -136,6 +136,9 @@ CANONICAL_NEWS_RESPONSE_LIMIT = 500
 RECENT_REPOSITORY_SUCCESS_TTL_SECONDS = 120 if os.environ.get("APP_ENV") == "prod" else 0
 SOURCE_REGISTRY_TTL_SECONDS = 60.0
 SOURCE_REGISTRY_TIMEOUT_SECONDS = 2.0
+SOURCE_OBSERVATION_TTL_SECONDS = 60.0
+SOURCE_OBSERVATION_TIMEOUT_SECONDS = 8.0
+SOURCE_FRESHNESS_INTERVAL_MULTIPLIER = 3
 MAX_TELEGRAM_CHANNELS = 18
 DEFAULT_ASSESSMENT_TICKERS = (
     "SBER",
@@ -346,6 +349,7 @@ app.state.event_response_cache = None
 app.state.event_response_lock = asyncio.Lock()
 app.state.repository_last_success_at = None
 app.state.source_registry_cache = None
+app.state.source_observation_cache = None
 app.state.collectors = {
     "cbr_press": collect_cbr_press,
     "fast_news": collect_fast_news,
@@ -371,6 +375,11 @@ def public_news(items: list[NewsRecord]) -> list[NewsRecord]:
         if item.source_id not in PUBLIC_HIDDEN_SOURCE_IDS
         and (item.source_id != "moex_news" or is_moex_equity_title(item.title))
     ]
+
+
+def source_observation_news(items: list[NewsRecord]) -> list[NewsRecord]:
+    """Keep source telemetry independent from product-feed relevance filters."""
+    return [item for item in items if item.source_id not in PUBLIC_HIDDEN_SOURCE_IDS]
 
 
 def hidden_news_ids(items: list[NewsRecord]) -> set[str]:
@@ -567,6 +576,7 @@ def invalidate_content_snapshot(request: Request) -> None:
         signal_inflight.cancel()
     request.app.state.signal_feed_inflight = None
     request.app.state.signal_feed_cache = None
+    request.app.state.source_observation_cache = None
     request.app.state.news_response_cache = None
     request.app.state.event_response_cache = None
 
@@ -1359,18 +1369,73 @@ async def get_market_event(
 async def list_sources(request: Request) -> JSONResponse:
     repository: NewsRepository = request.app.state.news_repository
     cached = request.app.state.content_snapshot_cache
-    stored_news = (
-        public_news(cached["news"])
-        if cached is not None and cached["repository"] is repository
-        else []
-    )
+    now = time.monotonic()
+    shared_snapshot_available = cached is not None and cached["repository"] is repository
+    observation_status = "shared_snapshot"
+    if shared_snapshot_available and cached["expires_at"] > now:
+        stored_news = source_observation_news(cached["news"])
+    else:
+        observation_cache = request.app.state.source_observation_cache
+        if (
+            observation_cache is not None
+            and observation_cache["repository"] is repository
+            and observation_cache["expires_at"] > now
+        ):
+            stored_news = observation_cache["news"]
+            observation_status = "cached"
+        else:
+            try:
+                stored_news = source_observation_news(
+                    await asyncio.wait_for(
+                        repository.list_news(source_id=None, limit=1000),
+                        timeout=SOURCE_OBSERVATION_TIMEOUT_SECONDS,
+                    )
+                )
+            except Exception as error:
+                logger.warning(
+                    "Source freshness observation unavailable error=%s",
+                    type(error).__name__,
+                )
+                if observation_cache is not None and observation_cache["repository"] is repository:
+                    stored_news = observation_cache["news"]
+                    observation_status = "stale"
+                elif shared_snapshot_available:
+                    stored_news = source_observation_news(cached["news"])
+                    observation_status = "stale"
+                else:
+                    stored_news = []
+                    observation_status = "unavailable"
+            else:
+                request.app.state.source_observation_cache = {
+                    "repository": repository,
+                    "expires_at": now + SOURCE_OBSERVATION_TTL_SECONDS,
+                    "news": stored_news,
+                }
+                observation_status = "live"
+
     stats: dict[str, dict[str, object]] = {}
     for item in stored_news:
         stat = stats.setdefault(
             item.source_id,
-            {"count": 0, "last_published_at": item.as_api_dict()["published_at"]},
+            {
+                "count": 0,
+                "last_published_at": item.published_at,
+                "last_received_at": item.received_at,
+                "latest_delivery_lag_seconds": max(
+                    0,
+                    int((item.received_at - item.published_at).total_seconds()),
+                ),
+            },
         )
         stat["count"] = int(stat["count"]) + 1
+        if item.published_at > stat["last_published_at"]:
+            stat["last_published_at"] = item.published_at
+        if item.received_at > stat["last_received_at"]:
+            stat["last_received_at"] = item.received_at
+            stat["latest_delivery_lag_seconds"] = max(
+                0,
+                int((item.received_at - item.published_at).total_seconds()),
+            )
 
     now = time.monotonic()
     registry_cache = request.app.state.source_registry_cache
@@ -1407,8 +1472,76 @@ async def list_sources(request: Request) -> JSONResponse:
     for source in dynamic_sources:
         if source.source_id not in configured_ids:
             sources.append(source.as_api_dict())
+    observed_at = datetime.now(UTC)
+    lane_by_source = {
+        source_id: (lane.id, lane.interval_seconds)
+        for lane in COLLECTION_CONFIG.lanes
+        for source_id in lane.source_ids
+    }
+    discovery_lane = next(lane for lane in COLLECTION_CONFIG.lanes if lane.id == "discovery")
+    freshness_counts: dict[str, int] = {}
     for source in sources:
-        source.update(stats.get(str(source["source_id"]), {"count": 0, "last_published_at": None}))
+        source_id = str(source["source_id"])
+        stat = stats.get(source_id)
+        if source_id == "moex_iss":
+            lane_id, poll_interval_seconds = "on_demand", None
+            freshness_status = "not_applicable"
+            freshness_age_seconds = None
+            freshness_threshold_seconds = None
+        else:
+            lane_id, poll_interval_seconds = lane_by_source.get(
+                source_id,
+                (
+                    (discovery_lane.id, discovery_lane.interval_seconds)
+                    if source.get("kind") == "Telegram"
+                    else ("unassigned", None)
+                ),
+            )
+            freshness_threshold_seconds = (
+                poll_interval_seconds * SOURCE_FRESHNESS_INTERVAL_MULTIPLIER
+                if poll_interval_seconds is not None
+                else None
+            )
+            if not source.get("enabled", False):
+                freshness_status = "disabled"
+                freshness_age_seconds = None
+            elif observation_status == "unavailable":
+                freshness_status = "unknown"
+                freshness_age_seconds = None
+            elif stat is None:
+                freshness_status = "no_data"
+                freshness_age_seconds = None
+            else:
+                freshness_age_seconds = max(
+                    0,
+                    int((observed_at - stat["last_received_at"]).total_seconds()),
+                )
+                freshness_status = (
+                    "fresh"
+                    if freshness_threshold_seconds is not None
+                    and freshness_age_seconds <= freshness_threshold_seconds
+                    else "delayed"
+                )
+        freshness_counts[freshness_status] = freshness_counts.get(freshness_status, 0) + 1
+        source.update(
+            {
+                "count": int(stat["count"]) if stat is not None else 0,
+                "last_published_at": (
+                    to_rfc3339(stat["last_published_at"]) if stat is not None else None
+                ),
+                "last_received_at": (
+                    to_rfc3339(stat["last_received_at"]) if stat is not None else None
+                ),
+                "latest_delivery_lag_seconds": (
+                    int(stat["latest_delivery_lag_seconds"]) if stat is not None else None
+                ),
+                "collection_lane": lane_id,
+                "poll_interval_seconds": poll_interval_seconds,
+                "freshness_status": freshness_status,
+                "freshness_age_seconds": freshness_age_seconds,
+                "freshness_threshold_seconds": freshness_threshold_seconds,
+            }
+        )
     return JSONResponse(
         content={
             "data": sources,
@@ -1419,6 +1552,11 @@ async def list_sources(request: Request) -> JSONResponse:
                 ),
                 "poll_interval_seconds": NEWS_COLLECTION_INTERVAL_SECONDS,
                 "registry_status": registry_status,
+                "observation_status": observation_status,
+                "observed_at": to_rfc3339(observed_at),
+                "observed_news": len(stored_news),
+                "freshness_basis": "latest_stored_publication",
+                "freshness_counts": dict(sorted(freshness_counts.items())),
             },
         }
     )

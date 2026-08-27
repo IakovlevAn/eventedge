@@ -33,6 +33,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { separateAssessmentLayers } from "./assessment.js";
 import { resolveSignalEvidence } from "./provenance.js";
 import { shouldAcceptSnapshot } from "./snapshot.js";
+import { sourceFreshnessView, sourceScheduleLabel } from "./sourceHealth.js";
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "");
 const apiUrl = (path) => `${API_BASE}${path}`;
@@ -1786,6 +1787,13 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
     url: source.url,
     count: source.count,
     lastPublishedAt: source.last_published_at,
+    lastReceivedAt: source.last_received_at,
+    latestDeliveryLagSeconds: source.latest_delivery_lag_seconds,
+    collectionLane: source.collection_lane,
+    pollIntervalSeconds: source.poll_interval_seconds,
+    freshnessStatus: source.freshness_status,
+    freshnessAgeSeconds: source.freshness_age_seconds,
+    freshnessThresholdSeconds: source.freshness_threshold_seconds,
     managed: source.managed,
   })) || methodologySources;
 
@@ -1895,6 +1903,9 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
         <div className="section-heading"><span><Database size={15} /> Источники и их роль</span><button type="button" onClick={() => setShowSourceForm((value) => !value)}><Plus size={13} /> Добавить Telegram</button></div>
         {sourceRegistryStatus === "error" && <div className="source-registry-warning"><Server size={14} /><span><strong>Live-реестр временно недоступен</strong>Показываем последний сохранённый список. Каналы в YDB не удалены.</span></div>}
         {sourceRegistryStatus === "cached" && <div className="source-registry-warning is-cached"><Database size={14} /><span><strong>Показываем сохранённый реестр</strong>Проверяем актуальное состояние в фоне.</span></div>}
+        {sourceRegistry?.meta?.observation_status === "unavailable" && <div className="source-registry-warning"><Server size={14} /><span><strong>Freshness сейчас недоступна</strong>Хранилище не ответило в лимит времени. Нули не выдаются за отсутствие публикаций.</span></div>}
+        {sourceRegistry?.meta?.observation_status === "stale" && <div className="source-registry-warning is-cached"><Database size={14} /><span><strong>Freshness из последнего snapshot</strong>Показываем сохранённые timestamps, пока read model восстанавливается.</span></div>}
+        {sourceRegistry?.meta?.freshness_counts && <div className="source-health-summary"><span><i className="is-fresh" /> Свежие <strong>{sourceRegistry.meta.freshness_counts.fresh || 0}</strong></span><span><i className="is-delayed" /> Без новых публикаций дольше окна <strong>{sourceRegistry.meta.freshness_counts.delayed || 0}</strong></span><span><i className="is-unknown" /> Нет наблюдения <strong>{(sourceRegistry.meta.freshness_counts.no_data || 0) + (sourceRegistry.meta.freshness_counts.unknown || 0)}</strong></span><small>Снимок {sourceRegistry.meta.observed_at ? formatRelative(sourceRegistry.meta.observed_at) : "недоступен"}</small></div>}
         {showSourceForm && <form className="telegram-source-form" onSubmit={addTelegramSource}>
           <div><strong>Новый публичный Telegram-канал</strong><span>EventEdge читает публичную web-ленту без бота. Лимит — {sourceRegistry?.meta?.telegram_limit || 18} каналов, пользовательские каналы опрашиваются раз в 5 минут.</span></div>
           <label><span>Канал</span><input required pattern="@?[A-Za-z0-9_]{3,48}" value={channel} onChange={(event) => setChannel(event.target.value)} placeholder="@channel_name" /></label>
@@ -1906,20 +1917,23 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
         </form>}
         <div className="source-method__grid">
           {sources.map((source) => {
-            const lastSeen = source.lastPublishedAt || recentBySource.get(source.id);
+            const lastSeen = source.lastReceivedAt || source.lastPublishedAt || recentBySource.get(source.id);
             const sourceStat = source.count !== undefined ? { count: source.count } : newsMeta.sources?.find((item) => item.source_id === source.id);
-            const hasData = source.id === "moex_iss" || Boolean(lastSeen);
+            const freshness = sourceFreshnessView(source);
+            const schedule = sourceScheduleLabel(source);
             return (
               <a href={source.url} target="_blank" rel="noreferrer" key={source.id} className="source-card">
                 <header><span>{source.kind}{source.managed ? " · UI" : ""}</span><strong>{source.quality}/100</strong></header>
                 <h3>{source.name}<ArrowUpRight size={12} /></h3>
                 <p>{source.role}</p>
-                <footer><span className={hasData ? "is-live" : "is-waiting"}><i /> {hasData ? sourceStat ? `${sourceStat.count} публикаций` : "Есть данные" : "Подключён · без событий"}</span><time>{lastSeen ? formatRelative(lastSeen) : source.freshness}</time></footer>
+                <div className="source-card__telemetry"><span>{schedule.lane}</span><span>{schedule.lag}</span></div>
+                <footer><span className={`source-freshness is-${freshness.status}`}><i /> {freshness.label}</span><time>{lastSeen ? `получено ${formatRelative(lastSeen)}` : freshness.detail}</time></footer>
+                <small className="source-card__count">{sourceStat ? `${sourceStat.count} публикаций в наблюдаемом окне` : source.freshness}</small>
               </a>
             );
           })}
         </div>
-        <p className="source-note">Все Telegram- и RSS-публикации сохраняются. High-recall фильтр отправляет в LLM только экономически релевантные события; компания, отрасль или рынок выбираются кодом после семантического разбора. Качество пользовательского канала по умолчанию — 65/100.</p>
+        <p className="source-note">Freshness основана на времени последней сохранённой публикации в read model и не является мониторингом uptime коллектора: редкий источник может быть «delayed», даже если опрос исправен. Timeout хранилища показывается как unknown, а не как ложный ноль. Все Telegram- и RSS-публикации сохраняются; high-recall фильтр отдельно решает, какие события анализировать.</p>
       </section>
 
       <section className="method-reality">
@@ -2002,9 +2016,9 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,signal-engine-0.6.1,1,2026-08-08T0
   "meta": {"requested":2,"returned":2,"refresh_after_seconds":30}
 }` : endpoint.id === "sources" ? `{
   "data": [
-    {"source_id":"telegram_bcs_express","name":"БКС Экспресс","kind":"Telegram","count":12,"freshness":"цель ≤ 2 мин"}
+    {"source_id":"telegram_bcs_express","name":"БКС Экспресс","kind":"Telegram","count":12,"last_received_at":"2026-08-27T11:42:00Z","latest_delivery_lag_seconds":48,"collection_lane":"discovery","poll_interval_seconds":300,"freshness_status":"fresh","freshness_age_seconds":96}
   ],
-  "meta": {"telegram_active":18,"telegram_limit":18,"poll_interval_seconds":60,"managed_telegram_poll_interval_seconds":300}
+  "meta": {"telegram_active":18,"telegram_limit":18,"registry_status":"live","observation_status":"live","observed_news":1000,"freshness_basis":"latest_stored_publication","freshness_counts":{"fresh":9,"delayed":11,"no_data":5,"not_applicable":1}}
 }` : endpoint.id === "source_create" ? `{
   "data": {"source_id":"telegram_example","channel":"example","enabled":true,"managed":true}
 }` : endpoint.id === "events" ? `{
