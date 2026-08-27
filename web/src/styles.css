@@ -1747,6 +1747,50 @@ kbd {
   padding: 20px 21px 4px;
 }
 
+.signal-provenance {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 14px;
+  border: 1px solid #25282f;
+  border-radius: 8px;
+  background: #111319;
+}
+
+.signal-provenance > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+  padding: 13px 15px;
+  color: #69717d;
+  border-right: 1px solid #25282f;
+}
+
+.signal-provenance > div:last-child {
+  border-right: 0;
+}
+
+.signal-provenance span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.signal-provenance small {
+  color: #5f6570;
+  font-size: 7px;
+}
+
+.signal-provenance strong {
+  overflow: hidden;
+  margin-top: 3px;
+  color: #b4bac4;
+  font-size: 8px;
+  font-weight: 560;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .news-list {
   margin-top: 13px;
 }
@@ -2316,6 +2360,18 @@ kbd {
   .factors-card,
   .news-card {
     padding: 17px 14px;
+  }
+
+  .signal-provenance {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .signal-provenance > div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .signal-provenance > div:nth-child(-n + 2) {
+    border-bottom: 1px solid #25282f;
   }
 
   .decision-headline {
