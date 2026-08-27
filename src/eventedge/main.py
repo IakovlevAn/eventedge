@@ -247,6 +247,16 @@ class SignalReprocessRequest(BaseModel):
 
     limit: Annotated[int, Field(ge=1, le=20)] = 12
     news_ids: list[str] = Field(default_factory=list, max_length=20)
+    tickers: list[str] = Field(default_factory=list, max_length=20)
+    dry_run: bool = True
+
+    @field_validator("tickers")
+    @classmethod
+    def normalize_tickers(cls, value: list[str]) -> list[str]:
+        normalized = list(dict.fromkeys(ticker.strip().upper() for ticker in value))
+        if any(ticker not in DEFAULT_MOEX_ALIASES for ticker in normalized):
+            raise ValueError("tickers must contain only supported MOEX instruments")
+        return normalized
 
 
 def repository_from_environment(environment: Mapping[str, str]) -> NewsRepository:
@@ -784,6 +794,56 @@ def build_news_response_payload(
         "rejection_reasons": dict(sorted(rejection_reasons.items())),
         "signal_model_version": CURRENT_NEWS_MODEL_VERSION,
     }
+    company_rows = {
+        ticker: {
+            "ticker": ticker,
+            "relevant_news": 0,
+            "analysis_candidates": 0,
+            "signaled_news": 0,
+            "last_published_at": None,
+        }
+        for ticker in DEFAULT_ASSESSMENT_TICKERS
+    }
+    for item in visible_news:
+        related = signals_by_news.get(item.id, [])
+        if not is_product_event_candidate(item.source_metadata, related):
+            continue
+        processing = item.as_api_dict()["processing"]
+        item_tickers = event_by_news[item.id]["tickers"]
+        for ticker in item_tickers:
+            row = company_rows.get(str(ticker))
+            if row is None:
+                continue
+            row["relevant_news"] = int(row["relevant_news"]) + 1
+            if processing["analysis_candidate"] or any(
+                signal.get("ticker") == ticker for signal in related
+            ):
+                row["analysis_candidates"] = int(row["analysis_candidates"]) + 1
+            if any(signal.get("ticker") == ticker for signal in related):
+                row["signaled_news"] = int(row["signaled_news"]) + 1
+            published_at = to_rfc3339(item.published_at)
+            if row["last_published_at"] is None or published_at > row["last_published_at"]:
+                row["last_published_at"] = published_at
+    company_items = []
+    for row in company_rows.values():
+        if row["signaled_news"]:
+            status = "signal_available"
+        elif row["relevant_news"]:
+            status = "awaiting_signal"
+        else:
+            status = "no_relevant_news"
+        company_items.append({**row, "status": status})
+    company_coverage = {
+        "basis": "current_content_snapshot",
+        "window_news": len(visible_news),
+        "supported": len(company_items),
+        "with_relevant_news": sum(bool(row["relevant_news"]) for row in company_items),
+        "with_analysis_candidates": sum(
+            bool(row["analysis_candidates"]) for row in company_items
+        ),
+        "with_signal": sum(bool(row["signaled_news"]) for row in company_items),
+        "items": company_items,
+    }
     news = scoped_news[:limit]
     source_stats: dict[str, dict[str, object]] = {}
     for item in scoped_news:
@@ -822,6 +882,7 @@ def build_news_response_payload(
             "scope_counts": scope_counts,
             "excluded_irrelevant": len(all_scoped_news) - len(scoped_news),
             "processing_coverage": processing_coverage,
+            "company_coverage": company_coverage,
             "last_ingested_at": (
                 max(item.received_at for item in visible_news)
                 .astimezone(UTC)
@@ -1632,6 +1693,8 @@ async def reprocess_signal_candidates_batch(
     *,
     limit: int,
     news_ids: list[str] | None = None,
+    tickers: list[str] | None = None,
+    dry_run: bool = False,
     concurrency: int = BACKFILL_CONCURRENCY,
     ml_router: MlRouterRuntime | None = None,
 ) -> dict[str, object]:
@@ -1652,7 +1715,10 @@ async def reprocess_signal_candidates_batch(
         if signal.model_version == CURRENT_NEWS_MODEL_VERSION
     }
     requested_news_ids = set(news_ids or [])
-    candidates: list[tuple[int, NewsRecord, RssItem, MlRouterDecision | None]] = []
+    requested_tickers = set(tickers or [])
+    candidates: list[
+        tuple[int, NewsRecord, RssItem, MlRouterDecision | None, tuple[str, ...]]
+    ] = []
     for item in public_news(stored_news):
         if requested_news_ids and item.id not in requested_news_ids:
             continue
@@ -1672,6 +1738,22 @@ async def reprocess_signal_candidates_batch(
             else (),
         )
         if is_signal_analysis_candidate(candidate):
+            detected_tickers = tuple(
+                instrument.ticker
+                for instrument in RuleBasedNewsExtractor()
+                .extract(
+                    NewsAnalysisInput(
+                        source_id=item.source_id,
+                        title=item.title,
+                        content=item.content,
+                        language=item.language,
+                    )
+                )
+                .instruments
+                if instrument.relevance >= 0.9 and instrument.ticker != "MOEX"
+            )
+            if requested_tickers and requested_tickers.isdisjoint(detected_tickers):
+                continue
             decision = (
                 ml_router.predict(
                     title=candidate.title,
@@ -1681,10 +1763,67 @@ async def reprocess_signal_candidates_batch(
                 if ml_router is not None
                 else None
             )
-            candidates.append((signal_analysis_priority(candidate), item, candidate, decision))
+            candidates.append(
+                (signal_analysis_priority(candidate), item, candidate, decision, detected_tickers)
+            )
 
     candidates.sort(key=lambda row: row[0], reverse=True)
     selected = candidates[:limit]
+    initial_llm_calls = sum(
+        not (
+            ml_router is not None
+            and ml_router.mode is MlRouterMode.ENFORCE
+            and decision is not None
+            and decision.action == "reject"
+        )
+        for _, _, _, decision, _ in selected
+    )
+    maximum_llm_calls = initial_llm_calls * 2
+    if dry_run:
+        return {
+            "data": [
+                {
+                    "news_id": item.id,
+                    "source_id": item.source_id,
+                    "published_at": to_rfc3339(item.published_at),
+                    "title": item.title,
+                    "priority": priority,
+                    "detected_tickers": list(detected_tickers),
+                    "would_generate_signals": not (
+                        ml_router is not None
+                        and ml_router.mode is MlRouterMode.ENFORCE
+                        and decision is not None
+                        and decision.action == "reject"
+                    ),
+                    **({"ml_router_action": decision.action} if decision is not None else {}),
+                }
+                for priority, item, _, decision, detected_tickers in selected
+            ],
+            "meta": {
+                "mode": "dry_run",
+                "mutations_performed": 0,
+                "selected": len(selected),
+                "completed": 0,
+                "failed": 0,
+                "failure_types": [],
+                "remaining_candidates": max(0, len(candidates) - len(selected)),
+                "model_version": CURRENT_NEWS_MODEL_VERSION,
+                "batch_limit": limit,
+                "concurrency": min(max(concurrency, 1), 4),
+                "candidate_policy": "material-event-priority-0.5.0",
+                "selected_priority_counts": {
+                    str(priority): sum(
+                        1 for selected_priority, *_ in selected if selected_priority == priority
+                    )
+                    for priority in sorted({row[0] for row in selected}, reverse=True)
+                },
+                "requested_tickers": sorted(requested_tickers),
+                "estimated_llm_calls": initial_llm_calls,
+                "maximum_llm_calls": maximum_llm_calls,
+                "rejection_reasons": {},
+                **({"ml_router": ml_router.status()} if ml_router is not None else {}),
+            },
+        }
     semaphore = asyncio.Semaphore(min(max(concurrency, 1), 4))
 
     async def reprocess_one(
@@ -1811,13 +1950,13 @@ async def reprocess_signal_candidates_batch(
     results = await asyncio.gather(
         *(
             reprocess_one(priority, item, candidate, decision)
-            for priority, item, candidate, decision in selected
+            for priority, item, candidate, decision, _ in selected
         ),
         return_exceptions=True,
     )
     completed = [result for result in results if isinstance(result, dict)]
     failed = [type(result).__name__ for result in results if isinstance(result, BaseException)]
-    for (_, item, _, _), result in zip(selected, results, strict=True):
+    for (_, item, _, _, _), result in zip(selected, results, strict=True):
         if isinstance(result, BaseException):
             logger.warning(
                 "Signal reprocess failed news_id=%s error=%s",
@@ -1837,6 +1976,8 @@ async def reprocess_signal_candidates_batch(
     return {
         "data": completed,
         "meta": {
+            "mode": "execution",
+            "mutations_performed": sum(not bool(result.get("replayed")) for result in completed),
             "selected": len(selected),
             "completed": len(completed),
             "failed": len(failed),
@@ -1847,6 +1988,9 @@ async def reprocess_signal_candidates_batch(
             "concurrency": min(max(concurrency, 1), 4),
             "candidate_policy": "material-event-priority-0.5.0",
             "selected_priority_counts": priority_counts,
+            "requested_tickers": sorted(requested_tickers),
+            "estimated_llm_calls": initial_llm_calls,
+            "maximum_llm_calls": maximum_llm_calls,
             "rejection_reasons": dict(sorted(rejection_reasons.items())),
             **({"ml_router": ml_router.status()} if ml_router is not None else {}),
         },
@@ -1883,10 +2027,13 @@ async def reprocess_signal_candidates(
         repository,
         limit=payload.limit,
         news_ids=payload.news_ids,
+        tickers=payload.tickers,
+        dry_run=payload.dry_run,
         ml_router=request.app.state.ml_router_runtime,
     )
-    request.app.state.evaluation_material_cache = None
-    invalidate_content_snapshot(request)
+    if not payload.dry_run:
+        request.app.state.evaluation_material_cache = None
+        invalidate_content_snapshot(request)
     return JSONResponse(content=result)
 
 

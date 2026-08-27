@@ -233,6 +233,24 @@ jobs:
                     and has("poll_interval_seconds")
                     and has("freshness_status")
                   )
+                ' >/dev/null \
+              && curl --fail --silent --show-error \
+                --max-time 30 \
+                "${EVENTEDGE_API_URL}/v1/news?limit=1" \
+              | jq -e '
+                  .meta.company_coverage.supported == 20
+                  and .meta.company_coverage.basis == "current_content_snapshot"
+                  and .meta.company_coverage.window_news >= 0
+                  and (.meta.company_coverage.items | length) == 20
+                  and all(.meta.company_coverage.items[];
+                    has("ticker")
+                    and has("relevant_news")
+                    and has("analysis_candidates")
+                    and has("signaled_news")
+                    and (.status | IN(
+                      "signal_available", "awaiting_signal", "no_relevant_news"
+                    ))
+                  )
                 ' >/dev/null; then
               break
             fi

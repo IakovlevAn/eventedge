@@ -94,6 +94,8 @@ Assessment config 3 разделяет три сущности: `news_signal` о
 
 `/v1/sources` читает bounded-окно последних 1000 публикаций из YDB при холодном serverless-инстансе и кэширует наблюдение на 60 секунд. Для каждого источника он возвращает последний `published/received` timestamp, фактический delivery lag, collection lane, интервал опроса и freshness status. Timeout хранилища обозначается как `unknown`, а не как ложные нулевые счётчики. Эти поля описывают свежесть сохранённых данных, но не доказывают uptime коллектора; MOEX ISS проверяется отдельно market API.
 
+`/v1/news` отдельно возвращает coverage всех 20 MVP-компаний в текущем bounded content snapshot: наличие релевантных публикаций, кандидатов анализа и текущего news-сигнала. `basis` и `window_news` не дают трактовать отсутствие новости в окне как абсолютное историческое отсутствие. Admin reprocess по умолчанию выполняет только `dry_run`, не пишет в YDB и не вызывает YandexGPT; preview можно ограничить тикерами, а `maximum_llm_calls` учитывает возможный retry и служит верхней оценкой. Запись требует явного `dry_run: false`. Production backfill этим deployment не запускается.
+
 ## Проверка
 
 Workflow [yc-connection.yml](../.github/workflows/yc-connection.yml) запускается вручную. Он запрашивает OIDC-токен GitHub, обменивает его на короткоживущий IAM-токен Yandex Cloud и не выводит токены в лог.
