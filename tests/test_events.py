@@ -3,6 +3,7 @@ from eventedge.events import (
     cluster_market_events,
     context_signal_specs,
     is_product_event_candidate,
+    is_publishable_news_signal,
 )
 
 
@@ -21,6 +22,39 @@ def test_product_event_candidate_uses_existing_routing_without_deleting_raw_news
     )
     assert not is_product_event_candidate(
         {"signal_outcome": {"status": "rejected_after_analysis", "signal_count": 0}}
+    )
+
+
+def test_down_publication_gate_abstains_on_context_and_weak_company_signals() -> None:
+    assert not is_publishable_news_signal(
+        ticker="RUEQ",
+        direction="down",
+        score=-55,
+        confidence=0.95,
+    )
+    assert not is_publishable_news_signal(
+        ticker="SBER",
+        direction="down",
+        score=-29.9,
+        confidence=0.95,
+    )
+    assert not is_publishable_news_signal(
+        ticker="SBER",
+        direction="down",
+        score=-40,
+        confidence=0.79,
+    )
+    assert is_publishable_news_signal(
+        ticker="SBER",
+        direction="down",
+        score=-40,
+        confidence=0.80,
+    )
+    assert is_publishable_news_signal(
+        ticker="RUEQ",
+        direction="up",
+        score=20,
+        confidence=0.70,
     )
 
 

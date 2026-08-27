@@ -103,6 +103,38 @@ def test_neutral_market_context_is_analyzed_without_becoming_a_signal() -> None:
     assert processed.signals == ()
 
 
+def test_unvalidated_market_down_context_is_stored_without_a_signal() -> None:
+    timestamp = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    document = NewsDocument(
+        source_id="interfax",
+        external_id="broad-sanctions-context",
+        published_at=timestamp,
+        received_at=timestamp,
+        title="Новые санкции затронули российский рынок",
+        url="https://example.com/broad-sanctions-context",
+        content="Ограничения создают отрицательный рыночный фон.",
+        language="ru",
+        source_metadata={"analysis_candidate": True, "event_candidate": True},
+        payload_hash="broad-sanctions-context-payload",
+    )
+    features = SemanticFeatures(
+        extractor_version="test-0.1.0",
+        event_type=EventType.SANCTIONS,
+        instruments=[],
+        facts=[],
+        polarity=-1,
+        materiality=0.9,
+        novelty=1,
+        temporal_status=TemporalStatus.CURRENT,
+        rationale="Широкий негативный контекст без проверенного инструмента.",
+    )
+
+    processed = process_document(document, features, now=timestamp, generate_signals=True)
+
+    assert processed.signals == ()
+    assert signal_rejection_reason(document, features) == "unvalidated_context_down"
+
+
 def test_generate_signals_false_is_a_hard_storage_boundary() -> None:
     timestamp = datetime(2026, 8, 10, 12, tzinfo=UTC)
     document = NewsDocument(

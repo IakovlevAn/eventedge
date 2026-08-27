@@ -4,7 +4,12 @@ import re
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 
-from eventedge.analysis import NewsAnalysisInput, RuleBasedNewsExtractor
+from eventedge.analysis import (
+    DOWN_SCORE_THRESHOLD,
+    MINIMUM_DOWN_CONFIDENCE,
+    NewsAnalysisInput,
+    RuleBasedNewsExtractor,
+)
 
 TICKER_SECTORS = {
     "SBER": "Финансы",
@@ -338,6 +343,23 @@ def signal_target(ticker: str) -> dict[str, str]:
         "id": ticker,
         "label": ticker,
     }
+
+
+def is_publishable_news_signal(
+    *,
+    ticker: str,
+    direction: str,
+    score: float,
+    confidence: float,
+) -> bool:
+    """Apply the asymmetric downside abstention policy to product surfaces."""
+    if direction != "down":
+        return True
+    return bool(
+        ticker not in CONTEXT_SIGNAL_TARGETS
+        and score <= DOWN_SCORE_THRESHOLD
+        and confidence >= MINIMUM_DOWN_CONFIDENCE
+    )
 
 
 def context_signal_specs(
