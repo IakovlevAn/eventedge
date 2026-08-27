@@ -28,6 +28,9 @@ def test_production_smoke_accounts_for_partial_moex_and_checks_new_routes() -> N
     assert '"${EVENTEDGE_API_URL}/v1/sources"' in workflow
     assert 'freshness_basis == "latest_stored_publication"' in workflow
     assert 'has("freshness_status")' in workflow
+    assert '"${EVENTEDGE_API_URL}/v1/news?limit=1"' in workflow
+    assert ".meta.company_coverage.supported == 20" in workflow
+    assert '.meta.company_coverage.basis == "current_content_snapshot"' in workflow
     assert '"${EVENTEDGE_API_URL}/v1/events?limit=1"' in workflow
     assert '"${EVENTEDGE_API_URL}/v1/events/${event_id}"' in workflow
     assert ".data.id == $event_id and (.data.evidence | length) > 0" in workflow

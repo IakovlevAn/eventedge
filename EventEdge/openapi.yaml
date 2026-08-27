@@ -237,13 +237,23 @@ paths:
                 limit:
                   type: integer
                   minimum: 1
-                  maximum: 3
-                  default: 3
+                  maximum: 20
+                  default: 12
                 news_ids:
                   type: array
-                  maxItems: 3
+                  maxItems: 20
                   items:
                     type: string
+                tickers:
+                  type: array
+                  maxItems: 20
+                  items:
+                    type: string
+                  description: Optional supported MOEX company filter, normalized to uppercase.
+                dry_run:
+                  type: boolean
+                  default: true
+                  description: Preview candidates without writes or LLM calls. Set false explicitly to execute.
       responses:
         '200':
           description: Budget-capped batch result and remaining candidate count.
@@ -2351,6 +2361,7 @@ components:
         - delivery_target_seconds
         - collection_lanes
         - processing_coverage
+        - company_coverage
         - excluded_irrelevant
         - sources
       properties:
@@ -2383,6 +2394,8 @@ components:
             $ref: '#/components/schemas/NewsCollectionLane'
         processing_coverage:
           $ref: '#/components/schemas/NewsProcessingCoverage'
+        company_coverage:
+          $ref: '#/components/schemas/NewsCompanyCoverage'
         excluded_irrelevant:
           type: integer
           minimum: 0
@@ -2428,6 +2441,71 @@ components:
           maximum: 100
         signal_model_version:
           type: string
+
+    NewsCompanyCoverage:
+      type: object
+      additionalProperties: false
+      required:
+        - basis
+        - window_news
+        - supported
+        - with_relevant_news
+        - with_analysis_candidates
+        - with_signal
+        - items
+      properties:
+        basis:
+          type: string
+          enum: [current_content_snapshot]
+        window_news:
+          type: integer
+          minimum: 0
+        supported:
+          type: integer
+          minimum: 0
+        with_relevant_news:
+          type: integer
+          minimum: 0
+        with_analysis_candidates:
+          type: integer
+          minimum: 0
+        with_signal:
+          type: integer
+          minimum: 0
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/NewsCompanyCoverageItem'
+
+    NewsCompanyCoverageItem:
+      type: object
+      additionalProperties: false
+      required:
+        - ticker
+        - relevant_news
+        - analysis_candidates
+        - signaled_news
+        - last_published_at
+        - status
+      properties:
+        ticker:
+          type: string
+        relevant_news:
+          type: integer
+          minimum: 0
+        analysis_candidates:
+          type: integer
+          minimum: 0
+        signaled_news:
+          type: integer
+          minimum: 0
+        last_published_at:
+          type: string
+          format: date-time
+          nullable: true
+        status:
+          type: string
+          enum: [signal_available, awaiting_signal, no_relevant_news]
 
     SignalResponse:
       type: object

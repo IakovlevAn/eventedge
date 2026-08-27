@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { separateAssessmentLayers } from "./assessment.js";
+import { companyCoverageView } from "./companyCoverage.js";
 import { resolveSignalEvidence } from "./provenance.js";
 import { shouldAcceptSnapshot } from "./snapshot.js";
 import { sourceFreshnessView, sourceScheduleLabel } from "./sourceHealth.js";
@@ -1483,6 +1484,10 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
       modelVersion: "signal-engine-0.6.1",
     };
   }, [allNews, newsMeta.processing_coverage]);
+  const companyCoverage = useMemo(
+    () => companyCoverageView(newsMeta.company_coverage),
+    [newsMeta.company_coverage],
+  );
   const activeFilterCount = [ticker, scope, sourceId, signalState, direction, period, sortMode]
     .filter((value, index) => value !== ["all", "all", "all", "all", "all", "7d", "newest"][index]).length + (query ? 1 : 0);
   const resetFilters = () => {
@@ -1523,7 +1528,11 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
         <article><span>Экономически релевантные</span><strong>{processingStats.relevant}</strong><small>рынок · отрасли · компании</small></article>
         <article><span>Переданы в Signal Engine</span><strong>{processingStats.coverage}%</strong><small>{processingStats.analyzed} из {processingStats.relevant} · {processingStats.modelVersion}</small></article>
         <article><span>Публикации с сигналом</span><strong>{processingStats.withSignal}</strong><small>включая отраслевые и рыночные</small></article>
-        <p><Info size={13} /> Исторический backfill идёт небольшими пакетами; покрытие растёт без удаления старых версий сигналов.</p>
+        <article><span>MVP-компании с news-сигналом</span><strong>{companyCoverage.available ? `${companyCoverage.withSignal}/${companyCoverage.supported}` : "—"}</strong><small>{companyCoverage.available ? `${companyCoverage.withRelevantNews} компаний имеют релевантные новости` : "coverage недоступен"}</small></article>
+        <p><Info size={13} /> {companyCoverage.available ? `Coverage рассчитан по текущему окну из ${companyCoverage.windowNews} сохранённых публикаций: отсутствие сигнала отделено от отсутствия новостей в этом окне.` : "Company coverage недоступен в текущем API snapshot."} Повторная обработка сначала показывает бесплатный dry-run и сама не запускается из интерфейса.</p>
+        {companyCoverage.available && <div className="company-coverage-list" aria-label="Покрытие MVP-компаний">
+          {companyCoverage.items.map((item) => <span className={`company-coverage-chip company-coverage-chip--${item.status}`} key={item.ticker} title={`${item.ticker}: ${item.relevantNews} новостей · ${item.analysisCandidates} кандидатов · ${item.signaledNews} с сигналом`}><strong>{item.ticker}</strong><small>{item.label}</small></span>)}
+        </div>}
       </section>
       <section className="news-feed">
         <div className="feed-heading"><span>{items.length} из {allNews.length} публикаций</span><small>{newsMeta.sources?.length || sources.length} источников · повторы одного события объединяются</small></div>
@@ -2043,6 +2052,7 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,signal-engine-0.6.1,1,2026-08-08T0
     "client_refresh_interval_seconds":30,
     "delivery_target_seconds":120,
     "processing_coverage":{"stored":84,"relevant":61,"analysis_candidates":54,"signaled":27,"candidate_coverage_pct":88.5,"signal_yield_pct":50.0,"signal_model_version":"signal-engine-0.6.1"},
+    "company_coverage":{"basis":"current_content_snapshot","window_news":84,"supported":20,"with_relevant_news":12,"with_analysis_candidates":10,"with_signal":5,"items":[{"ticker":"SBER","relevant_news":3,"analysis_candidates":3,"signaled_news":1,"last_published_at":"2026-08-27T12:00:00Z","status":"signal_available"}]},
     "collection_lanes":[{"id":"fast","interval_seconds":60,"source_ids":["interfax","tass","rbc","moex_news"]}],
     "sources":[{"source_id":"interfax","count":24,"signal_count":5}]
   }

@@ -728,7 +728,7 @@ def test_admin_reprocesses_one_explicit_stored_candidate(
 
             response = isolated_client.post(
                 "/v1/admin/signals/reprocess",
-                json={"limit": 1, "news_ids": [stored.id]},
+                json={"limit": 1, "news_ids": [stored.id], "dry_run": False},
                 headers={"X-EventEdge-Admin-Key": "test-admin-key"},
             )
             updated = asyncio.run(repository.list_news(source_id="interfax", limit=10))[0]
@@ -743,6 +743,81 @@ def test_admin_reprocesses_one_explicit_stored_candidate(
     assert response.json()["data"][0]["news_id"] == stored.id
     assert response.json()["data"][0]["result_ref"].startswith("sig_")
     assert updated.source_metadata["reprocess_version"] == "signal-engine-0.6.1"
+
+
+def test_admin_reprocess_defaults_to_a_free_non_mutating_preview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EVENTEDGE_ADMIN_KEY", "test-admin-key")
+    original_repository = app.state.news_repository
+    app.state.news_repository = MemoryNewsRepository()
+    try:
+        with TestClient(app) as isolated_client:
+            repository = app.state.news_repository
+            document = NewsDocument(
+                source_id="interfax",
+                external_id="preview-sber-1",
+                published_at=datetime(2026, 8, 9, 10, tzinfo=UTC),
+                received_at=datetime(2026, 8, 9, 10, 1, tzinfo=UTC),
+                title="Сбербанк рекомендовал дивиденды за полугодие",
+                url="https://example.com/preview-sber-1",
+                content="Совет директоров рекомендовал выплатить 20 рублей на акцию.",
+                language="ru",
+                source_metadata={"signal_candidate": False, "tickers": []},
+                payload_hash="preview-sber-original",
+            )
+            asyncio.run(repository.ingest("preview-sber-key", document, generate_signals=False))
+            stored = asyncio.run(repository.list_news(source_id="interfax", limit=10))[0]
+
+            response = isolated_client.post(
+                "/v1/admin/signals/reprocess",
+                json={"limit": 1, "news_ids": [stored.id], "tickers": ["sber", "SBER"]},
+                headers={"X-EventEdge-Admin-Key": "test-admin-key"},
+            )
+            unchanged = asyncio.run(repository.list_news(source_id="interfax", limit=10))[0]
+            signals = asyncio.run(
+                repository.list_signals(
+                    ticker=None,
+                    directions=None,
+                    status=None,
+                    min_confidence=None,
+                    limit=10,
+                )
+            )
+    finally:
+        app.state.news_repository = original_repository
+        app.state.evaluation_material_cache = None
+
+    assert response.status_code == 200
+    assert response.json()["meta"] | {
+        "mode": "dry_run",
+        "mutations_performed": 0,
+        "completed": 0,
+        "requested_tickers": ["SBER"],
+        "estimated_llm_calls": 1,
+        "maximum_llm_calls": 2,
+    } == response.json()["meta"]
+    assert response.json()["data"][0] | {
+        "news_id": stored.id,
+        "detected_tickers": ["SBER"],
+        "would_generate_signals": True,
+    } == response.json()["data"][0]
+    assert "reprocess_version" not in unchanged.source_metadata
+    assert signals == []
+
+
+def test_admin_reprocess_rejects_unknown_company_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EVENTEDGE_ADMIN_KEY", "test-admin-key")
+
+    response = client.post(
+        "/v1/admin/signals/reprocess",
+        json={"tickers": ["NOTREAL"]},
+        headers={"X-EventEdge-Admin-Key": "test-admin-key"},
+    )
+
+    assert response.status_code == 400
 
 
 def test_admin_reprocess_accepts_a_refreshed_copy_of_the_same_news(
@@ -774,7 +849,7 @@ def test_admin_reprocess_accepts_a_refreshed_copy_of_the_same_news(
 
             first = isolated_client.post(
                 "/v1/admin/signals/reprocess",
-                json={"limit": 1, "news_ids": [stored.id]},
+                json={"limit": 1, "news_ids": [stored.id], "dry_run": False},
                 headers={"X-EventEdge-Admin-Key": "test-admin-key"},
             )
             refreshed = replace(
@@ -786,7 +861,13 @@ def test_admin_reprocess_accepts_a_refreshed_copy_of_the_same_news(
             asyncio.run(repository.ingest("refresh-second-copy", refreshed, generate_signals=False))
             second = isolated_client.post(
                 "/v1/admin/signals/reprocess",
-                json={"limit": 1, "news_ids": [stored.id]},
+                json={"limit": 1, "news_ids": [stored.id], "dry_run": False},
+                headers={"X-EventEdge-Admin-Key": "test-admin-key"},
+            )
+            asyncio.run(repository.ingest("refresh-third-copy", original, generate_signals=False))
+            replayed = isolated_client.post(
+                "/v1/admin/signals/reprocess",
+                json={"limit": 1, "news_ids": [stored.id], "dry_run": False},
                 headers={"X-EventEdge-Admin-Key": "test-admin-key"},
             )
     finally:
@@ -798,6 +879,11 @@ def test_admin_reprocess_accepts_a_refreshed_copy_of_the_same_news(
     assert second.status_code == 200
     assert second.json()["meta"]["completed"] == 1
     assert second.json()["meta"]["failed"] == 0
+    assert second.json()["meta"]["mutations_performed"] == 1
+    assert replayed.status_code == 200
+    assert replayed.json()["meta"]["completed"] == 1
+    assert replayed.json()["meta"]["mutations_performed"] == 0
+    assert replayed.json()["data"][0]["replayed"] is True
 
 
 def test_backfill_reclassifies_stored_sector_news_without_ticker(
@@ -837,7 +923,7 @@ def test_backfill_reclassifies_stored_sector_news_without_ticker(
 
             response = isolated_client.post(
                 "/v1/admin/signals/reprocess",
-                json={"limit": 1, "news_ids": [stored.id]},
+                json={"limit": 1, "news_ids": [stored.id], "dry_run": False},
                 headers={"X-EventEdge-Admin-Key": "test-admin-key"},
             )
             signals = asyncio.run(
@@ -1304,6 +1390,25 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
         "rejection_reasons": {},
         "signal_model_version": "signal-engine-0.6.1",
     }
+    company_coverage = news.json()["meta"]["company_coverage"]
+    assert company_coverage["basis"] == "current_content_snapshot"
+    assert company_coverage["window_news"] == 1
+    assert company_coverage["supported"] == 20
+    assert company_coverage["with_relevant_news"] == 1
+    assert company_coverage["with_analysis_candidates"] == 1
+    assert company_coverage["with_signal"] == 1
+    sber_coverage = next(
+        item for item in company_coverage["items"] if item["ticker"] == "SBER"
+    )
+    assert sber_coverage == {
+        "ticker": "SBER",
+        "relevant_news": 1,
+        "analysis_candidates": 1,
+        "signaled_news": 1,
+        "last_published_at": NEWS_PAYLOAD["published_at"],
+        "status": "signal_available",
+    }
+    assert sum(item["status"] == "no_relevant_news" for item in company_coverage["items"]) == 19
     assert news.json()["meta"]["collection_lanes"] == [
         {
             "id": "fast",
@@ -1409,6 +1514,12 @@ def test_news_coverage_aggregates_bounded_signal_rejection_reasons() -> None:
 
     coverage = payload["meta"]["processing_coverage"]
     assert coverage["rejection_reasons"] == {"event_other": 1}
+    company_coverage = payload["meta"]["company_coverage"]
+    sber = next(item for item in company_coverage["items"] if item["ticker"] == "SBER")
+    assert sber["status"] == "awaiting_signal"
+    assert sber["relevant_news"] == 1
+    assert sber["analysis_candidates"] == 1
+    assert sber["signaled_news"] == 0
 
 
 def test_public_news_and_event_surfaces_hide_unrouted_storage_noise() -> None:
