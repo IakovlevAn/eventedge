@@ -92,6 +92,8 @@ Gateway и YDB-backed ревизия контейнера развёрнуты. 
 
 Assessment config 3 разделяет три сущности: `news_signal` остаётся единственным источником направления и действия, `market_context` возвращает самостоятельный quant-уклон с `is_signal=false`, а `market_scenario` — симметричный диапазон `± realized volatility × √time` без направления. Legacy combined-поля сохранены в API для совместимости, но UI не выдаёт их за один сигнал.
 
+`/v1/sources` читает bounded-окно последних 1000 публикаций из YDB при холодном serverless-инстансе и кэширует наблюдение на 60 секунд. Для каждого источника он возвращает последний `published/received` timestamp, фактический delivery lag, collection lane, интервал опроса и freshness status. Timeout хранилища обозначается как `unknown`, а не как ложные нулевые счётчики. Эти поля описывают свежесть сохранённых данных, но не доказывают uptime коллектора; MOEX ISS проверяется отдельно market API.
+
 ## Проверка
 
 Workflow [yc-connection.yml](../.github/workflows/yc-connection.yml) запускается вручную. Он запрашивает OIDC-токен GitHub, обменивает его на короткоживущий IAM-токен Yandex Cloud и не выводит токены в лог.

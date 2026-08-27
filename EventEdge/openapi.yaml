@@ -167,12 +167,11 @@ paths:
       security: []
       responses:
         '200':
-          description: Static and UI-managed sources with recent collection statistics.
+          description: Static and UI-managed sources with observed content freshness. Freshness is based on stored publications and is not collector uptime.
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: '#/components/schemas/LiveSourceRegistryResponse'
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
@@ -2186,6 +2185,142 @@ components:
         last_published_at:
           type: string
           format: date-time
+
+    LiveSourceRegistryItem:
+      type: object
+      additionalProperties: true
+      required:
+        - source_id
+        - name
+        - kind
+        - quality
+        - freshness
+        - role
+        - url
+        - enabled
+        - managed
+        - count
+        - last_published_at
+        - last_received_at
+        - latest_delivery_lag_seconds
+        - collection_lane
+        - poll_interval_seconds
+        - freshness_status
+        - freshness_age_seconds
+        - freshness_threshold_seconds
+      properties:
+        source_id:
+          type: string
+        name:
+          type: string
+        kind:
+          type: string
+        quality:
+          type: integer
+          minimum: 0
+          maximum: 100
+        freshness:
+          type: string
+          description: Human-readable collection target retained for compatibility.
+        role:
+          type: string
+        url:
+          type: string
+          format: uri
+        enabled:
+          type: boolean
+        managed:
+          type: boolean
+        count:
+          type: integer
+          minimum: 0
+          description: Publications represented in the bounded observation window.
+        last_published_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_received_at:
+          type: string
+          format: date-time
+          nullable: true
+        latest_delivery_lag_seconds:
+          type: integer
+          minimum: 0
+          nullable: true
+        collection_lane:
+          type: string
+          enum: [fast, discovery, slow, on_demand, unassigned]
+        poll_interval_seconds:
+          type: integer
+          minimum: 1
+          nullable: true
+        freshness_status:
+          type: string
+          enum: [fresh, delayed, no_data, unknown, not_applicable, disabled]
+        freshness_age_seconds:
+          type: integer
+          minimum: 0
+          nullable: true
+        freshness_threshold_seconds:
+          type: integer
+          minimum: 1
+          nullable: true
+
+    LiveSourceRegistryMeta:
+      type: object
+      additionalProperties: false
+      required:
+        - telegram_limit
+        - telegram_active
+        - poll_interval_seconds
+        - registry_status
+        - observation_status
+        - observed_at
+        - observed_news
+        - freshness_basis
+        - freshness_counts
+      properties:
+        telegram_limit:
+          type: integer
+          minimum: 1
+        telegram_active:
+          type: integer
+          minimum: 0
+        poll_interval_seconds:
+          type: integer
+          minimum: 1
+        registry_status:
+          type: string
+          enum: [live, cached, stale, unavailable]
+        observation_status:
+          type: string
+          enum: [live, cached, shared_snapshot, stale, unavailable]
+        observed_at:
+          type: string
+          format: date-time
+        observed_news:
+          type: integer
+          minimum: 0
+        freshness_basis:
+          type: string
+          enum: [latest_stored_publication]
+        freshness_counts:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+
+    LiveSourceRegistryResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/LiveSourceRegistryItem'
+        meta:
+          $ref: '#/components/schemas/LiveSourceRegistryMeta'
 
     NewsCollectionLane:
       type: object

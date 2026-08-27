@@ -508,7 +508,14 @@ def test_source_registry_and_protected_telegram_addition(
     assert registry.json()["meta"]["telegram_limit"] == 18
     assert registry.json()["meta"]["telegram_active"] >= 6
     assert registry.json()["meta"]["registry_status"] in {"live", "cached"}
+    assert registry.json()["meta"]["observation_status"] in {
+        "live",
+        "cached",
+        "shared_snapshot",
+    }
+    assert registry.json()["meta"]["freshness_basis"] == "latest_stored_publication"
     assert any(source["source_id"] == "telegram_bcs_express" for source in registry.json()["data"])
+    assert all("freshness_status" in source for source in registry.json()["data"])
 
     unavailable = client.post(
         "/v1/sources/telegram",
@@ -563,6 +570,130 @@ def test_source_registry_timeout_serves_static_sources(
     assert response.status_code == 200
     assert response.json()["meta"]["registry_status"] == "unavailable"
     assert any(source["source_id"] == "interfax" for source in response.json()["data"])
+
+
+def test_source_registry_reports_actual_freshness_and_delivery_lag() -> None:
+    repository = MemoryNewsRepository()
+    observed_at = datetime.now(UTC).replace(microsecond=0)
+    fresh_received_at = observed_at - timedelta(seconds=30)
+    delayed_received_at = observed_at - timedelta(minutes=10)
+    for idempotency_key, document in (
+        (
+            "source-fresh-interfax",
+            NewsDocument(
+                source_id="interfax",
+                external_id="source-fresh-interfax",
+                published_at=fresh_received_at - timedelta(seconds=15),
+                received_at=fresh_received_at,
+                title="Сбербанк сообщил о решении совета директоров",
+                url="https://example.com/source-fresh-interfax",
+                content="Совет директоров рассмотрел вопрос о дивидендах.",
+                language="ru",
+                source_metadata={},
+                payload_hash="source-fresh-interfax",
+            ),
+        ),
+        (
+            "source-delayed-tass",
+            NewsDocument(
+                source_id="tass",
+                external_id="source-delayed-tass",
+                published_at=delayed_received_at - timedelta(seconds=20),
+                received_at=delayed_received_at,
+                title="Компания раскрыла операционные результаты",
+                url="https://example.com/source-delayed-tass",
+                content="Опубликованы операционные результаты за период.",
+                language="ru",
+                source_metadata={},
+                payload_hash="source-delayed-tass",
+            ),
+        ),
+        (
+            "source-fresh-moex-non-equity",
+            NewsDocument(
+                source_id="moex_news",
+                external_id="source-fresh-moex-non-equity",
+                published_at=fresh_received_at - timedelta(seconds=10),
+                received_at=fresh_received_at,
+                title="Московская биржа сообщила об инфраструктурном обновлении",
+                url="https://example.com/source-fresh-moex-non-equity",
+                content="Обновление инфраструктуры не относится к отдельной акции.",
+                language="ru",
+                source_metadata={},
+                payload_hash="source-fresh-moex-non-equity",
+            ),
+        ),
+    ):
+        asyncio.run(repository.ingest(idempotency_key, document, generate_signals=False))
+
+    original_repository = app.state.news_repository
+    original_content_cache = app.state.content_snapshot_cache
+    original_observation_cache = app.state.source_observation_cache
+    original_registry_cache = app.state.source_registry_cache
+    app.state.news_repository = repository
+    app.state.content_snapshot_cache = None
+    app.state.source_observation_cache = None
+    app.state.source_registry_cache = None
+    try:
+        response = client.get("/v1/sources")
+    finally:
+        app.state.news_repository = original_repository
+        app.state.content_snapshot_cache = original_content_cache
+        app.state.source_observation_cache = original_observation_cache
+        app.state.source_registry_cache = original_registry_cache
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["meta"]["observation_status"] == "live"
+    assert payload["meta"]["observed_news"] == 3
+    sources = {source["source_id"]: source for source in payload["data"]}
+    assert sources["interfax"]["count"] == 1
+    assert sources["interfax"]["last_received_at"] is not None
+    assert sources["interfax"]["latest_delivery_lag_seconds"] == 15
+    assert sources["interfax"]["collection_lane"] == "fast"
+    assert sources["interfax"]["poll_interval_seconds"] == 60
+    assert sources["interfax"]["freshness_threshold_seconds"] == 180
+    assert sources["interfax"]["freshness_status"] == "fresh"
+    assert sources["tass"]["freshness_status"] == "delayed"
+    assert sources["moex_news"]["count"] == 1
+    assert sources["moex_news"]["freshness_status"] == "fresh"
+    assert sources["cbr_press"]["freshness_status"] == "no_data"
+    assert sources["moex_iss"]["freshness_status"] == "not_applicable"
+
+
+def test_source_registry_does_not_turn_observation_timeout_into_false_no_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = MemoryNewsRepository()
+
+    async def slow_news(*, source_id: str | None, limit: int) -> list[NewsRecord]:
+        del source_id, limit
+        await asyncio.sleep(60)
+        return []
+
+    monkeypatch.setattr(repository, "list_news", slow_news)
+    monkeypatch.setattr(main_module, "SOURCE_OBSERVATION_TIMEOUT_SECONDS", 0.01)
+    original_repository = app.state.news_repository
+    original_content_cache = app.state.content_snapshot_cache
+    original_observation_cache = app.state.source_observation_cache
+    original_registry_cache = app.state.source_registry_cache
+    app.state.news_repository = repository
+    app.state.content_snapshot_cache = None
+    app.state.source_observation_cache = None
+    app.state.source_registry_cache = None
+    try:
+        response = client.get("/v1/sources")
+    finally:
+        app.state.news_repository = original_repository
+        app.state.content_snapshot_cache = original_content_cache
+        app.state.source_observation_cache = original_observation_cache
+        app.state.source_registry_cache = original_registry_cache
+
+    assert response.status_code == 200
+    assert response.json()["meta"]["observation_status"] == "unavailable"
+    sources = {source["source_id"]: source for source in response.json()["data"]}
+    assert sources["interfax"]["freshness_status"] == "unknown"
+    assert sources["moex_iss"]["freshness_status"] == "not_applicable"
 
 
 def test_admin_reprocesses_one_explicit_stored_candidate(
