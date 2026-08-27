@@ -30,6 +30,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { resolveSignalEvidence } from "./provenance.js";
 import { shouldAcceptSnapshot } from "./snapshot.js";
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "");
@@ -447,7 +448,25 @@ function horizonLabel(horizon) {
   return `${horizon.value} ${units}`;
 }
 
-function signalFromApi(item) {
+function evidenceFromApi(item, sourceNames = new Map()) {
+  return {
+    id: item.id,
+    source: sourceNames.get(item.source_id) || sourceLabels[item.source_id] || item.source_id,
+    sourceId: item.source_id,
+    time: formatTime(item.published_at),
+    publishedAt: item.published_at,
+    receivedAt: item.received_at,
+    deliveryLagMinutes: deliveryLagMinutes(item.published_at, item.received_at),
+    tag: "Формирует сигнал",
+    title: item.title,
+    content: "",
+    url: item.url,
+    sourceCount: 1,
+    sources: [{ id: item.source_id, name: item.source_id, url: item.url }],
+  };
+}
+
+function signalFromApi(item, sourceNames = new Map()) {
   const [company, sector] = companyMeta[item.ticker] || [item.ticker, "Российский рынок"];
   return {
     ...item,
@@ -463,17 +482,19 @@ function signalFromApi(item) {
     updated: formatRelative(item.as_of),
     signalAt: item.as_of,
     signalCreatedAt: item.created_at,
+    evidenceRefs: item.evidence_refs || [],
+    provenance: item.provenance || null,
     action: actionLabels[item.action] || item.action,
     invalidation: (item.invalidation_conditions || []).join(" "),
     factors: (item.factor_contributions || []).map((factor) => ({
       label: factor.label,
       contribution: Number((factor.contribution * 100).toFixed(1)),
     })),
-    evidence: [],
+    evidence: (item.evidence || []).map((evidence) => evidenceFromApi(evidence, sourceNames)),
   };
 }
 
-function assessmentFromApi(item) {
+function assessmentFromApi(item, sourceNames = new Map()) {
   const [company, sector] = companyMeta[item.ticker] || [item.ticker, "Российский рынок"];
   return {
     ...item,
@@ -493,6 +514,8 @@ function assessmentFromApi(item) {
     updated: formatRelative(item.as_of),
     signalAt: item.news_signal?.as_of || item.as_of,
     signalCreatedAt: item.news_signal?.created_at || item.as_of,
+    evidenceRefs: item.news_signal?.evidence_refs || [],
+    provenance: item.news_signal?.provenance || null,
     action: actionLabels[item.action] || item.action,
     invalidation: item.assessment_type === "hybrid"
       ? "Пересмотреть оценку при новой существенной новости или смене реакции рынка."
@@ -502,7 +525,7 @@ function assessmentFromApi(item) {
       label: factor.label,
       contribution: Number(Number(factor.contribution || 0).toFixed(1)),
     })),
-    evidence: [],
+    evidence: (item.news_signal?.evidence || []).map((evidence) => evidenceFromApi(evidence, sourceNames)),
   };
 }
 
@@ -603,6 +626,7 @@ function groupNewsEvents(items) {
     if (!group) {
       groups.push({
         ...item,
+        evidenceIds: [item.id],
         sourceCount: 1,
         sources: [{ id: item.sourceId, name: item.source, url: item.url, publishedAt: item.publishedAt, receivedAt: item.receivedAt }],
         corroborations: [],
@@ -614,12 +638,13 @@ function groupNewsEvents(items) {
     const groupWeight = Math.abs(group.signal?.score || 0) + Math.min(group.content?.length || 0, 600) / 120;
     const itemWeight = Math.abs(item.signal?.score || 0) + Math.min(item.content?.length || 0, 600) / 120;
     if (itemWeight > groupWeight) {
-      const { sources, corroborations, sourceCount } = group;
-      Object.assign(group, item, { sources, corroborations, sourceCount });
+      const { sources, corroborations, sourceCount, evidenceIds } = group;
+      Object.assign(group, item, { sources, corroborations, sourceCount, evidenceIds });
     } else if (!group.signal && item.signal) group.signal = item.signal;
     group.signals = mergedSignals;
     if (!group.signal && mergedSignals.length) group.signal = mergedSignals[0];
     group.tickers = [...new Set([...(group.tickers || []), ...(item.tickers || [])])];
+    group.evidenceIds = [...new Set([...(group.evidenceIds || []), item.id])];
     group.corroborations.push(item);
     if (!group.sources.some((source) => source.name === item.source && source.url === item.url)) {
       group.sources.push({ id: item.sourceId, name: item.source, url: item.url, publishedAt: item.publishedAt, receivedAt: item.receivedAt });
@@ -1332,25 +1357,32 @@ function CompanyScreen({ signal, companyNews, marketStatus, marketUpdatedAt, onB
           </section>
         </div>
 
+        {signal.provenance && <section className="signal-provenance" aria-label="Происхождение сигнала">
+          <div><ShieldCheck size={14} /><span><small>Решение зафиксировано</small><strong>{formatPublicationTime(signal.provenance.decision_at)}</strong></span></div>
+          <div><Clock3 size={14} /><span><small>Данные не позднее</small><strong>{formatPublicationTime(signal.provenance.data_cutoff_at)}</strong></span></div>
+          <div><Database size={14} /><span><small>Расчёт</small><strong>{signal.provenance.model_version} · cfg {signal.provenance.config_version}</strong></span></div>
+          <div><FileText size={14} /><span><small>Evidence refs</small><strong>{signal.provenance.evidence_resolved} из {signal.provenance.evidence_expected} разрешено</strong></span></div>
+        </section>}
+
         <section className="news-card">
           <div className="section-heading">
-            <span><Newspaper size={15} /> Новости, изменившие сигнал</span>
+            <span><Newspaper size={15} /> Доказательства сигнала</span>
             <button type="button" onClick={onOpenNews}>Все новости {signal.ticker} <ArrowUpRight size={11} /></button>
           </div>
           <div className="news-list">
             {signal.evidence.map((item, index) => (
-              <button className="news-item news-item--button" type="button" key={`${item.source}-${item.time}-${index}`} onClick={() => onReadNews({ ...item, signal, index })}>
+              <button className="news-item news-item--button" type="button" key={item.id || `${item.source}-${item.time}-${index}`} onClick={() => onReadNews({ ...item, signal, index })}>
                 <span className="news-index">0{index + 1}</span>
                 <div className="news-content">
                   <div><span>{item.source}</span><i>{item.tag}</i></div>
                   <h2>{item.title}</h2>
-                  <p>{item.sourceCount > 1 ? `${item.sourceCount} подтверждающих источника · ` : ""}{signal.summary}</p>
+                  <p>Опубликовано {formatPublicationTime(item.publishedAt)}{item.receivedAt ? ` · получено EventEdge ${formatPublicationTime(item.receivedAt)}` : ""}</p>
                 </div>
                 <span className="news-time"><Clock3 size={12} /> {item.time}</span>
                 <span className="news-open"><BookOpen size={14} /></span>
               </button>
             ))}
-            {!signal.evidence.length && <div className="empty-state"><Newspaper size={22} /><strong>Источник не найден</strong><span>Новость могла быть удалена или ещё не загружена в ленту.</span></div>}
+            {!signal.evidence.length && <div className="empty-state"><Newspaper size={22} /><strong>Evidence не разрешён</strong><span>EventEdge не подставляет другие новости с тем же тикером. До восстановления точной ссылки замена источника не показывается.</span></div>}
           </div>
         </section>
 
@@ -2083,10 +2115,10 @@ function NewsReader({ item, onClose }) {
         <header><div>{companySignal ? <CompanyMark signal={companySignal} /> : <span className={`company-mark company-mark--${item.event?.scope || "market"}`}><ScopeIcon size={17} /></span>}<span><strong>{companySignal?.ticker || relatedSignals[0]?.target?.label || "Новость"}</strong><small>{companySignal ? `${companySignal.company} · ` : ""}{item.source}</small></span></div><button type="button" onClick={onClose} aria-label="Закрыть"><X size={18} /></button></header>
         <div className="reader-meta"><span>{scopeMeta.label}{item.event?.sectors?.length ? ` · ${item.event.sectors.join(", ")}` : ""}</span><time><Clock3 size={12} /> Опубликовано источником {formatPublicationTime(item.publishedAt)}</time>{item.receivedAt && <time>EventEdge получил {formatPublicationTime(item.receivedAt)}{item.deliveryLagMinutes === null ? "" : ` · лаг ${item.deliveryLagMinutes} мин`}</time>}</div>
         <h1>{item.title}</h1>
-        <div className="reader-body"><p>{item.content}</p>{relatedSignals.length ? <p>EventEdge рассчитал {signalCountText} влияния события. Это оценка силы события, а не обещанная доходность акции.</p> : <p>Событие сохранено как <strong>{scopeMeta.label.toLocaleLowerCase("ru-RU")}</strong>-контекст. Сигнал из него пока не рассчитан.</p>}</div>
+        <div className="reader-body">{item.content ? <p>{item.content}</p> : <p>Полный текст не входит в компактный evidence-ответ. Проверьте первичную публикацию по ссылке ниже.</p>}{relatedSignals.length ? <p>EventEdge рассчитал {signalCountText} влияния события. Это оценка силы события, а не обещанная доходность акции.</p> : <p>Событие сохранено как <strong>{scopeMeta.label.toLocaleLowerCase("ru-RU")}</strong>-контекст. Сигнал из него пока не рассчитан.</p>}</div>
         {relatedSignals.length > 0 && <section className="reader-signal-list"><span>Связанные сигналы</span>{relatedSignals.map((signal) => <article key={signal.id}><div><strong>{signal.target?.label || signal.company || signal.ticker}</strong><small>{signal.target?.type === "sector" ? "Отрасль" : signal.target?.type === "market" ? "Рынок" : "Компания"}</small></div><Direction direction={signal.direction} /><b>{formatScore(signal.score)} п.</b><p>{signal.summary}</p></article>)}</section>}
         {item.sources?.length > 1 && <section className="reader-sources"><span>Подтверждающие публикации</span>{item.sources.map((source) => <a href={source.url} target="_blank" rel="noreferrer" key={`${source.name}-${source.url}`}>{source.name}<ArrowUpRight size={11} /></a>)}</section>}
-        <footer><FileText size={13} /> Показан текст, полученный от источника. <a href={item.url} target="_blank" rel="noreferrer">Открыть оригинал <ArrowUpRight size={11} /></a></footer>
+        <footer><FileText size={13} /> {item.content ? "Показан текст, полученный от источника." : "Показаны метаданные точного evidence-источника."} <a href={item.url} target="_blank" rel="noreferrer">Открыть оригинал <ArrowUpRight size={11} /></a></footer>
       </article>
     </div>
   );
@@ -2162,26 +2194,21 @@ export default function App() {
           sourcePayload = await sourceResponse.json();
           cacheSourceRegistry(sourcePayload);
         }
-        const allSignals = signalPayload.data.map(signalFromApi);
+        const sourceNames = new Map((sourcePayload?.data || methodologySources.map((source) => ({ source_id: source.id, name: source.name }))).map((source) => [source.source_id, source.name]));
+        const allSignals = signalPayload.data.map((item) => signalFromApi(item, sourceNames));
         const instrumentSignals = allSignals.filter((item) => !item.target || item.target.type === "instrument");
         const signalsById = new Map(allSignals.map((item) => [item.id, item]));
-        const sourceNames = new Map((sourcePayload?.data || methodologySources.map((source) => ({ source_id: source.id, name: source.name }))).map((source) => [source.source_id, source.name]));
         const nextNews = groupNewsEvents(newsPayload.data.map((item) => newsFromApi(item, signalsById, sourceNames)));
-        const evidenceByTicker = new Map();
-        nextNews.forEach((item) => {
-          if (item.signal) item.signal.evidence.push(item);
-          (item.tickers || []).forEach((ticker) => {
-            if (!evidenceByTicker.has(ticker)) evidenceByTicker.set(ticker, []);
-            evidenceByTicker.get(ticker).push(item);
-          });
-        });
+        allSignals.forEach((item) => { item.evidence = resolveSignalEvidence(item, nextNews); });
         let nextVisibleSignals = instrumentSignals;
         let shouldCommitSignals = true;
         if (assessmentResponse?.ok) {
           const assessmentPayload = await assessmentResponse.json();
           if (shouldAcceptSnapshot(acceptedAssessmentSnapshot.current, assessmentPayload.meta)) {
             acceptedAssessmentSnapshot.current = assessmentPayload.meta;
-            const nextAssessments = assessmentPayload.data.map(assessmentFromApi);
+            const nextAssessments = assessmentPayload.data
+              .map((item) => assessmentFromApi(item, sourceNames))
+              .map((item) => ({ ...item, evidence: resolveSignalEvidence(item, nextNews) }));
             const assessedTickers = new Set(nextAssessments.map((item) => item.ticker));
             const newsOnlySignals = instrumentSignals.filter((item) => !assessedTickers.has(item.ticker));
             nextVisibleSignals = [...nextAssessments, ...newsOnlySignals];
@@ -2201,7 +2228,7 @@ export default function App() {
             if (seenTickers.has(item.ticker)) return false;
             seenTickers.add(item.ticker);
             return true;
-          }).map((item) => ({ ...item, evidence: evidenceByTicker.get(item.ticker)?.slice(0, 8) || [] })));
+          }));
         }
         setAllNews(nextNews);
         setNewsMeta(newsPayload.meta || { total: nextNews.length, sources: [] });

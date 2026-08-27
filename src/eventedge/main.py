@@ -643,6 +643,50 @@ def store_news_response(
     cached["responses"][key] = payload
 
 
+def signal_api_payload(
+    signal: SignalRecord,
+    news_by_id: Mapping[str, NewsRecord],
+) -> dict[str, object]:
+    """Resolve immutable evidence references without substituting ticker-related news."""
+    evidence = []
+    for news_id in signal.evidence_refs:
+        item = news_by_id.get(news_id)
+        if item is None:
+            continue
+        evidence.append(
+            {
+                "id": item.id,
+                "source_id": item.source_id,
+                "title": item.title,
+                "url": item.url,
+                "published_at": to_rfc3339(item.published_at),
+                "received_at": to_rfc3339(item.received_at),
+            }
+        )
+    resolved = len(evidence)
+    expected = len(signal.evidence_refs)
+    evidence_status = (
+        "complete"
+        if resolved == expected and expected > 0
+        else "partial"
+        if resolved > 0
+        else "missing"
+    )
+    payload = signal.as_api_dict()
+    payload["evidence"] = evidence
+    payload["provenance"] = {
+        "method": "deterministic_news_event_scoring",
+        "decision_at": to_rfc3339(signal.created_at),
+        "data_cutoff_at": to_rfc3339(signal.data_cutoff_at),
+        "model_version": signal.model_version,
+        "config_version": signal.config_version,
+        "evidence_status": evidence_status,
+        "evidence_expected": expected,
+        "evidence_resolved": resolved,
+    }
+    return payload
+
+
 def build_news_response_payload(
     stored_news: list[NewsRecord],
     stored_signals: list[SignalRecord],
@@ -1816,7 +1860,7 @@ async def list_signals(
         ),
         news_by_id,
     )[:limit]
-    data = [signal.as_api_dict() for signal in signals]
+    data = [signal_api_payload(signal, news_by_id) for signal in signals]
     cache_payload = {
         "ticker": ticker,
         "directions": sorted(requested_directions or ()),
@@ -1876,7 +1920,7 @@ async def get_signal(
         [signal],
         {item.id: item for item in stored_news},
     )[0]
-    data = signal.as_api_dict()
+    data = signal_api_payload(signal, {item.id: item for item in stored_news})
     etag = f'"{canonical_payload_hash(data)[:24]}"'
     if if_none_match == etag:
         return Response(status_code=304, headers={"ETag": etag})
@@ -2044,6 +2088,9 @@ async def list_assessments(
             visible_news,
             active_by_ticker.get(ticker),
         )
+        active_signal = active_by_ticker.get(ticker)
+        if active_signal is not None:
+            assessment["news_signal"] = signal_api_payload(active_signal, news_by_id)
         assessment["scenario"] = scenario_range(
             result,
             direction=str(assessment["direction"]),

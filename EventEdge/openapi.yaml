@@ -1183,6 +1183,10 @@ components:
         market:
           type: object
           additionalProperties: true
+        news_signal:
+          allOf:
+            - $ref: '#/components/schemas/Signal'
+          nullable: true
         model_version:
           type: string
 
@@ -1345,6 +1349,57 @@ components:
           minimum: -1
           maximum: 1
 
+    SignalEvidence:
+      type: object
+      additionalProperties: false
+      required: [id, source_id, title, url, published_at, received_at]
+      properties:
+        id:
+          type: string
+        source_id:
+          type: string
+        title:
+          type: string
+          maxLength: 500
+        url:
+          type: string
+          format: uri
+        published_at:
+          type: string
+          format: date-time
+        received_at:
+          type: string
+          format: date-time
+
+    SignalProvenance:
+      type: object
+      additionalProperties: false
+      required: [method, decision_at, data_cutoff_at, model_version, config_version, evidence_status, evidence_expected, evidence_resolved]
+      properties:
+        method:
+          type: string
+          enum: [deterministic_news_event_scoring]
+        decision_at:
+          type: string
+          format: date-time
+        data_cutoff_at:
+          type: string
+          format: date-time
+        model_version:
+          type: string
+        config_version:
+          type: integer
+          minimum: 1
+        evidence_status:
+          type: string
+          enum: [complete, partial, missing]
+        evidence_expected:
+          type: integer
+          minimum: 0
+        evidence_resolved:
+          type: integer
+          minimum: 0
+
     Signal:
       type: object
       additionalProperties: false
@@ -1421,6 +1476,13 @@ components:
           maxItems: 50
           items:
             type: string
+        evidence:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/SignalEvidence'
+        provenance:
+          $ref: '#/components/schemas/SignalProvenance'
         expires_at:
           type: string
           format: date-time

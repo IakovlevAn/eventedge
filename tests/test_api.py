@@ -982,7 +982,35 @@ def test_signal_list_reads_repository_instead_of_stale_empty_snapshot(
     response = client.get("/v1/signals", params={"ticker": "SBER"})
 
     assert response.status_code == 200
-    assert [item["id"] for item in response.json()["data"]] == [result.job.result_ref]
+    payload = response.json()["data"]
+    assert [item["id"] for item in payload] == [result.job.result_ref]
+    assert payload[0]["evidence"] == [
+        {
+            "id": payload[0]["evidence_refs"][0],
+            "source_id": "interfax",
+            "title": document.title,
+            "url": document.url,
+            "published_at": timestamp.isoformat().replace("+00:00", "Z"),
+            "received_at": timestamp.isoformat().replace("+00:00", "Z"),
+        }
+    ]
+    assert payload[0]["provenance"] == {
+        "method": "deterministic_news_event_scoring",
+        "decision_at": payload[0]["created_at"],
+        "data_cutoff_at": timestamp.isoformat().replace("+00:00", "Z"),
+        "model_version": "signal-engine-0.6.1",
+        "config_version": 3,
+        "evidence_status": "complete",
+        "evidence_expected": 1,
+        "evidence_resolved": 1,
+    }
+    unresolved = main_module.signal_api_payload(
+        repository._signals[result.job.result_ref],
+        {},
+    )
+    assert unresolved["evidence"] == []
+    assert unresolved["provenance"]["evidence_status"] == "missing"
+    assert unresolved["provenance"]["evidence_expected"] == 1
     snapshot_read.assert_not_awaited()
 
 
