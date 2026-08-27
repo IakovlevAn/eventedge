@@ -364,3 +364,28 @@ def scenario_range(
         "label": "Сценарный диапазон, не таргет",
         "method": "realized_volatility_x_signal_strength_v1",
     }
+
+
+def volatility_scenario_range(
+    market: dict[str, object],
+    *,
+    horizon_value: int,
+    horizon_unit: str,
+) -> dict[str, object] | None:
+    """Return a symmetric volatility envelope without a directional signal input."""
+    daily_volatility = market.get("daily_volatility_pct")
+    if not isinstance(daily_volatility, (int, float)):
+        return None
+    if horizon_unit == "hours":
+        horizon_days = max(1, math.ceil(horizon_value / 24))
+    else:
+        horizon_days = max(1, horizon_value)
+    expected_move = float(daily_volatility) * math.sqrt(horizon_days)
+    return {
+        "low_pct": round(-expected_move, 2),
+        "high_pct": round(expected_move, 2),
+        "horizon_trading_days": horizon_days,
+        "kind": "volatility_scenario",
+        "label": "Симметричный диапазон волатильности, не прогноз",
+        "method": "realized_volatility_sqrt_time_v1",
+    }

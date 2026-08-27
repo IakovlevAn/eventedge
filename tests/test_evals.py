@@ -175,6 +175,11 @@ def test_hybrid_assessment_is_not_an_llm_only_signal() -> None:
     assert assessment["assessment_type"] == "hybrid"
     assert assessment["bias_direction"] == "up"
     assert assessment["news_signal"]["id"] == "sig_test"
+    assert assessment["config_version"] == 3
+    assert assessment["market_context"]["is_signal"] is False
+    assert assessment["market_context"]["bias_direction"] == "up"
+    assert assessment["market_context"]["score"] != assessment["score"]
+    assert assessment["market_context"]["as_of"] == assessment["as_of"]
     codes = {factor["code"] for factor in assessment["factor_contributions"]}
     assert {
         "news_signal",

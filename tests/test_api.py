@@ -1620,6 +1620,20 @@ def test_assessments_cover_companies_without_fresh_news_signal(
     assert response.status_code == 200
     assert [item["ticker"] for item in response.json()["data"]] == ["SBER", "LKOH"]
     assert all(item["assessment_type"] in {"hybrid", "quant"} for item in response.json()["data"])
+    assert all(item["config_version"] == 3 for item in response.json()["data"])
+    assert all(item["market_context"]["is_signal"] is False for item in response.json()["data"])
+    assert all(
+        item["market_context"]["bias_direction"] in {"up", "neutral", "down"}
+        for item in response.json()["data"]
+    )
+    assert all(
+        item["market_scenario"]["low_pct"] == -item["market_scenario"]["high_pct"]
+        for item in response.json()["data"]
+    )
+    assert all(
+        item["market_scenario"]["method"] == "realized_volatility_sqrt_time_v1"
+        for item in response.json()["data"]
+    )
     assert {
         "price_reaction",
         "volume",

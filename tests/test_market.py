@@ -11,6 +11,7 @@ from eventedge.market import (
     MAX_INTRADAY_CANDLES,
     MoexMarketDataClient,
     scenario_range,
+    volatility_scenario_range,
 )
 
 
@@ -269,6 +270,31 @@ def test_scenario_is_unavailable_without_price_history() -> None:
             confidence=0.7,
             horizon_value=3,
             horizon_unit="calendar_days",
+        )
+        is None
+    )
+
+
+def test_market_volatility_scenario_is_symmetric_and_has_no_direction_input() -> None:
+    result = volatility_scenario_range(
+        {"daily_volatility_pct": 1.5},
+        horizon_value=3,
+        horizon_unit="trading_days",
+    )
+
+    assert result is not None
+    assert result["low_pct"] == -result["high_pct"]
+    assert result["low_pct"] == -2.6
+    assert result["method"] == "realized_volatility_sqrt_time_v1"
+    assert result["label"] == "Симметричный диапазон волатильности, не прогноз"
+
+
+def test_market_volatility_scenario_is_unavailable_without_volatility() -> None:
+    assert (
+        volatility_scenario_range(
+            {},
+            horizon_value=3,
+            horizon_unit="trading_days",
         )
         is None
     )
