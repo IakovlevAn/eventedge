@@ -25,7 +25,7 @@ def test_product_event_candidate_uses_existing_routing_without_deleting_raw_news
     )
 
 
-def test_down_publication_gate_abstains_on_context_and_weak_company_signals() -> None:
+def test_publication_gate_abstains_on_context_and_weak_company_downside() -> None:
     assert not is_publishable_news_signal(
         ticker="RUEQ",
         direction="down",
@@ -50,8 +50,20 @@ def test_down_publication_gate_abstains_on_context_and_weak_company_signals() ->
         score=-40,
         confidence=0.80,
     )
-    assert is_publishable_news_signal(
+    assert not is_publishable_news_signal(
         ticker="RUEQ",
+        direction="up",
+        score=20,
+        confidence=0.70,
+    )
+    assert not is_publishable_news_signal(
+        ticker="RUFIN",
+        direction="neutral",
+        score=0,
+        confidence=0.95,
+    )
+    assert is_publishable_news_signal(
+        ticker="SBER",
         direction="up",
         score=20,
         confidence=0.70,

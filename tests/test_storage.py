@@ -103,7 +103,8 @@ def test_neutral_market_context_is_analyzed_without_becoming_a_signal() -> None:
     assert processed.signals == ()
 
 
-def test_unvalidated_market_down_context_is_stored_without_a_signal() -> None:
+@pytest.mark.parametrize("polarity", [-1.0, 1.0])
+def test_unvalidated_market_context_is_stored_without_a_signal(polarity: float) -> None:
     timestamp = datetime(2026, 8, 10, 12, tzinfo=UTC)
     document = NewsDocument(
         source_id="interfax",
@@ -122,7 +123,7 @@ def test_unvalidated_market_down_context_is_stored_without_a_signal() -> None:
         event_type=EventType.SANCTIONS,
         instruments=[],
         facts=[],
-        polarity=-1,
+        polarity=polarity,
         materiality=0.9,
         novelty=1,
         temporal_status=TemporalStatus.CURRENT,
@@ -132,7 +133,7 @@ def test_unvalidated_market_down_context_is_stored_without_a_signal() -> None:
     processed = process_document(document, features, now=timestamp, generate_signals=True)
 
     assert processed.signals == ()
-    assert signal_rejection_reason(document, features) == "unvalidated_context_down"
+    assert signal_rejection_reason(document, features) == "unvalidated_context_signal"
 
 
 def test_generate_signals_false_is_a_hard_storage_boundary() -> None:

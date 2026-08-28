@@ -183,10 +183,13 @@ def test_sector_news_without_ticker_is_analyzed_and_stored() -> None:
         "analysis_candidate": True,
         "classification_version": "candidate-gate-0.6.0",
     }
-    assert {signal["ticker"] for signal in signals} == {"RUAGRI", "RUTRANS"}
-    assert {signal["target"]["type"] for signal in signals} == {"sector"}
-    assert {signal["direction"] for signal in signals} == {"up"}
-    assert {signal["action"] for signal in signals} == {"risk_on"}
+    assert signals == []
+    assert stored["source_metadata"]["signal_outcome"] == {
+        "status": "rejected_after_analysis",
+        "signal_count": 0,
+        "model_version": "signal-engine-0.6.1",
+        "reason": "unvalidated_context_signal",
+    }
 
 
 def test_timer_collection_persists_candidate_before_semantic_analysis() -> None:

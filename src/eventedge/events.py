@@ -352,12 +352,19 @@ def is_publishable_news_signal(
     score: float,
     confidence: float,
 ) -> bool:
-    """Apply the asymmetric downside abstention policy to product surfaces."""
+    """Fail closed for synthetic targets and weak company downside signals.
+
+    Market and sector projections remain useful as readable context, but the
+    current rules do not validate their target or direction well enough to
+    publish them as trading signals. Keeping this boundary in the shared read
+    model also hides context signals persisted by older revisions.
+    """
+    if ticker in CONTEXT_SIGNAL_TARGETS:
+        return False
     if direction != "down":
         return True
     return bool(
-        ticker not in CONTEXT_SIGNAL_TARGETS
-        and score <= DOWN_SCORE_THRESHOLD
+        score <= DOWN_SCORE_THRESHOLD
         and confidence >= MINIMUM_DOWN_CONFIDENCE
     )
 

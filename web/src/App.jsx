@@ -2052,7 +2052,7 @@ function ApiScreen() {
     "relationships": [{"code":"signal_strength_vs_4h_return","value":0.21}],
     "outcomes": [{"ticker":"SBER","model_version":"signal-engine-0.6.1","returns":{"1h":0.4,"4h":0.8,"1d":1.2,"3d":2.1},"verdict":true}]
   },
-  "meta": {"selected_model_version":"signal-engine-0.6.1","primary_horizon":"4h","evaluation_scope":"directional_signals_only"}
+  "meta": {"selected_model_version":"signal-engine-0.6.1","primary_horizon":"4h","evaluation_scope":"company_directional_signals_only"}
 }` : endpoint.id === "evals_export" ? `signal_id,ticker,signal_as_of,direction,score,confidence,model_version,config_version,observation_at,offset_minutes,return_pct
 sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,signal-engine-0.6.1,1,2026-08-08T08:00:00Z,60,0.42` : endpoint.id === "snapshot" ? `{
   "data": {
