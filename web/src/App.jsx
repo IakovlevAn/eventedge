@@ -35,6 +35,7 @@ import { companyCoverageView } from "./companyCoverage.js";
 import { resolveSignalEvidence } from "./provenance.js";
 import { shouldAcceptSnapshot } from "./snapshot.js";
 import { sourceFreshnessView, sourceScheduleLabel } from "./sourceHealth.js";
+import { signalHistoryFromApi } from "./signalHistory.js";
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "");
 const apiUrl = (path) => `${API_BASE}${path}`;
@@ -1258,6 +1259,29 @@ function CompanyScreen({ signal, companyNews, marketStatus, marketUpdatedAt, onB
   const chartEvents = companyNews.length ? companyNews : signal.evidence;
   const [intradaySeries, setIntradaySeries] = useState([]);
   const [intradayStatus, setIntradayStatus] = useState("loading");
+  const [signalHistory, setSignalHistory] = useState([]);
+  const [signalHistoryStatus, setSignalHistoryStatus] = useState("loading");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const loadHistory = async () => {
+      setSignalHistory([]);
+      setSignalHistoryStatus("loading");
+      try {
+        const response = await fetch(apiUrl(`/v1/signals/history?ticker=${encodeURIComponent(signal.ticker)}&limit=12`), { signal: controller.signal });
+        if (!response.ok) throw new Error("Signal history unavailable");
+        setSignalHistory(signalHistoryFromApi(await response.json()));
+        setSignalHistoryStatus("ready");
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          setSignalHistory([]);
+          setSignalHistoryStatus("error");
+        }
+      }
+    };
+    loadHistory();
+    return () => controller.abort();
+  }, [signal.ticker]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1378,6 +1402,42 @@ function CompanyScreen({ signal, companyNews, marketStatus, marketUpdatedAt, onB
           <div><Database size={14} /><span><small>Расчёт</small><strong>{signal.provenance.model_version} · cfg {signal.provenance.config_version}</strong></span></div>
           <div><FileText size={14} /><span><small>Evidence refs</small><strong>{signal.provenance.evidence_resolved} из {signal.provenance.evidence_expected} разрешено</strong></span></div>
         </section>}
+
+        <section className="signal-history-card" aria-label="История news-сигнала">
+          <div className="section-heading">
+            <span><Activity size={15} /> История news-сигнала</span>
+            <small>сохранённые события · новые сверху</small>
+          </div>
+          <p className="signal-history-card__note">Сравниваются соседние решения по новостям компании. Изменение фактора — точная разница сохранённых вкладов, а не доказательство причинности.</p>
+          {signalHistoryStatus === "loading" && <div className="signal-history-state"><RefreshCw size={14} /> Загружаем историю…</div>}
+          {signalHistoryStatus === "error" && <div className="signal-history-state"><Info size={14} /> История временно недоступна; текущий сигнал выше остаётся актуальным.</div>}
+          {signalHistoryStatus === "ready" && !signalHistory.length && <div className="signal-history-state"><Clock3 size={14} /> Сохранённых news-сигналов по компании пока нет.</div>}
+          {signalHistoryStatus === "ready" && signalHistory.length > 0 && <div className="signal-history-list">
+            {signalHistory.map((entry) => (
+              <article className="signal-history-item" key={entry.id}>
+                <div className="signal-history-item__rail"><i className={`signal-history-item__dot signal-history-item__dot--${entry.direction}`} /></div>
+                <div className="signal-history-item__body">
+                  <header>
+                    <div className="signal-history-item__transition">
+                      {entry.fromDirection ? <><Direction direction={entry.fromDirection} /><ArrowUpRight size={12} /><Direction direction={entry.direction} /></> : <><Direction direction={entry.direction} /><small>первый сигнал в доступной истории</small></>}
+                    </div>
+                    <div className="signal-history-item__timestamps"><time>Событие {formatPublicationTime(entry.asOf)}</time><small>Решение {formatPublicationTime(entry.createdAt)}</small></div>
+                  </header>
+                  <p>{entry.summary}</p>
+                  <div className="signal-history-item__metrics">
+                    <span><small>News score</small><strong className={`score-cell--${entry.direction}`}>{formatScore(entry.score)} п.</strong></span>
+                    <span><small>Уверенность</small><strong>{entry.confidence}%</strong></span>
+                    <span><small>{entry.expired === true ? "Горизонт истёк" : entry.expired === false ? "Горизонт истекает" : "Истечение горизонта"}</small><strong>{formatPublicationTime(entry.expiresAt)}</strong></span>
+                  </div>
+                  <div className="signal-history-item__explanation">
+                    <div><SlidersHorizontal size={13} /><span><small>Сильнее всего изменился фактор</small>{entry.primaryFactor ? <strong>{entry.primaryFactor.label}: {formatScore(entry.primaryFactor.previousContribution)} → {formatScore(entry.primaryFactor.currentContribution)} п. ({formatScore(entry.primaryFactor.delta)} п.)</strong> : <strong>Сопоставимого изменения факторов нет</strong>}</span></div>
+                    <div><ShieldCheck size={13} /><span><small>Что отменяет гипотезу</small><strong>{entry.invalidationConditions.length ? entry.invalidationConditions.join(" ") : "Условие не зафиксировано"}</strong></span></div>
+                  </div>
+                </div>
+              </article>
+            ))}
+          </div>}
+        </section>
 
         <section className="news-card">
           <div className="section-heading">

@@ -19,6 +19,7 @@ from eventedge.storage import (
     NewsRecord,
     SignalRecord,
     TelegramSourceRecord,
+    to_rfc3339,
 )
 
 client = TestClient(app)
@@ -1162,6 +1163,140 @@ def test_signal_list_has_contract_shape_and_etag() -> None:
     )
     assert cached.status_code == 304
     assert cached.content == b""
+
+
+def test_signal_history_compares_consecutive_stored_news_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = MemoryNewsRepository()
+    now = datetime.now(UTC).replace(microsecond=0)
+
+    def news(news_id: str, published_at: datetime, title: str) -> NewsRecord:
+        return NewsRecord(
+            id=news_id,
+            source_id="interfax",
+            external_id=news_id,
+            published_at=published_at,
+            received_at=published_at,
+            title=title,
+            url=f"https://example.com/{news_id}",
+            content=title,
+            language="ru",
+            source_metadata={"signal_candidate": True},
+            created_at=published_at,
+        )
+
+    first_news = news("news_history_first", now - timedelta(days=2), "Сбербанк сохранил прогноз")
+    second_news = news("news_history_second", now - timedelta(days=1), "Прибыль Сбербанка выросла")
+
+    def signal(
+        signal_id: str,
+        item: NewsRecord,
+        direction: str,
+        score: float,
+        contribution: float,
+    ) -> SignalRecord:
+        return SignalRecord(
+            id=signal_id,
+            news_id=item.id,
+            ticker="SBER",
+            as_of=item.published_at,
+            data_cutoff_at=item.received_at,
+            status="active",
+            direction=direction,
+            action="consider_buy" if direction == "up" else "no_action",
+            horizon_value=3,
+            horizon_unit="calendar_days",
+            score=score,
+            strength=abs(score) / 100,
+            confidence=0.72,
+            summary=f"Сохранённый {direction} news-сигнал.",
+            factor_contributions=(
+                {
+                    "code": "event_impact",
+                    "label": "Влияние события",
+                    "contribution": contribution,
+                },
+            ),
+            evidence_refs=(item.id,),
+            expires_at=item.published_at + timedelta(days=3),
+            invalidation_conditions=(
+                "Появилась новая существенная информация по компании.",
+                "Истёк горизонт сигнала.",
+            ),
+            model_version="signal-engine-0.6.1",
+            config_version=3,
+            created_at=item.received_at,
+        )
+
+    first_signal = signal("sig_history_first", first_news, "neutral", 5.0, 0.05)
+    second_signal = signal("sig_history_second", second_news, "up", 31.0, 0.31)
+    repository._news = {item.id: item for item in (first_news, second_news)}
+    repository._signals = {item.id: item for item in (first_signal, second_signal)}
+    monkeypatch.setattr(app.state, "news_repository", repository)
+
+    response = client.get("/v1/signals/history", params={"ticker": "SBER", "limit": 12})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["meta"] == {
+        "ticker": "SBER",
+        "limit": 12,
+        "has_more": False,
+        "order": "as_of_desc",
+        "basis": "chronological_news_signals",
+        "model_version": "signal-engine-0.6.1",
+    }
+    assert [item["signal"]["id"] for item in payload["data"]] == [
+        second_signal.id,
+        first_signal.id,
+    ]
+    assert payload["data"][0]["change_from_previous"] == {
+        "previous_signal_id": first_signal.id,
+        "from_direction": "neutral",
+        "to_direction": "up",
+        "direction_changed": True,
+        "score_delta": 26.0,
+        "confidence_delta": 0.0,
+        "primary_factor_change": {
+            "code": "event_impact",
+            "label": "Влияние события",
+            "previous_contribution": 0.05,
+            "current_contribution": 0.31,
+            "delta": 0.26,
+        },
+        "factor_changes": [
+            {
+                "code": "event_impact",
+                "label": "Влияние события",
+                "previous_contribution": 0.05,
+                "current_contribution": 0.31,
+                "delta": 0.26,
+            }
+        ],
+    }
+    assert payload["data"][1]["change_from_previous"] is None
+    assert payload["data"][0]["signal"]["invalidation_conditions"] == list(
+        second_signal.invalidation_conditions
+    )
+    assert payload["data"][0]["signal"]["expires_at"] == to_rfc3339(
+        second_signal.expires_at
+    )
+    assert payload["data"][0]["signal"]["evidence"][0]["id"] == second_news.id
+
+    cached = client.get(
+        "/v1/signals/history",
+        params={"ticker": "SBER", "limit": 12},
+        headers={"If-None-Match": response.headers["ETag"]},
+    )
+    assert cached.status_code == 304
+
+
+def test_signal_history_requires_ticker_and_precedes_signal_id_route() -> None:
+    response = client.get("/v1/signals/history")
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "INVALID_PARAMETER"
 
 
 def test_signal_list_reads_repository_instead_of_stale_empty_snapshot(

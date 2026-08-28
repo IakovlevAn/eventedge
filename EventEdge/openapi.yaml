@@ -5,8 +5,8 @@ info:
   description: |
     API-first contract for the EventEdge MVP.
 
-    All timestamps are UTC RFC 3339. Published signals are immutable: a recalculation
-    creates a new revision and marks the previous revision as superseded.
+    All timestamps are UTC RFC 3339. News signals are stored per event. The history
+    endpoint compares consecutive stored decisions and does not claim causal revisions.
   contact:
     name: EventEdge team
 servers:
@@ -272,7 +272,7 @@ paths:
   /v1/signals:
     get:
       tags: [Signals]
-      summary: List signal revisions
+      summary: List stored news-event signals
       operationId: listSignals
       parameters:
         - $ref: '#/components/parameters/TickerQuery'
@@ -335,18 +335,55 @@ paths:
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 
+  /v1/signals/history:
+    get:
+      tags: [Signals]
+      summary: List chronological news-signal changes for one ticker
+      description: Compares consecutive stored news-event decisions. Factor deltas are arithmetic differences, not causal claims.
+      operationId: listSignalHistory
+      parameters:
+        - $ref: '#/components/parameters/TickerQueryRequired'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 12
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        '200':
+          description: Stored news-signal events ordered by `as_of DESC, created_at DESC, id DESC`.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignalHistoryResponse'
+        '304':
+          description: The cached representation is still current.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      x-yc-apigateway-integration:
+        $ref: '#/components/x-yc-apigateway-integrations/api'
+
   /v1/signals/{signal_id}:
     parameters:
       - $ref: '#/components/parameters/SignalId'
     get:
       tags: [Signals]
-      summary: Get one immutable signal revision
+      summary: Get one stored news-event signal
       operationId: getSignal
       parameters:
         - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
-          description: Signal revision.
+          description: Stored news-event signal.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestId'
@@ -996,6 +1033,14 @@ components:
         type: string
         pattern: '^[A-Z0-9]{1,12}$'
         example: SBER
+    TickerQueryRequired:
+      name: ticker
+      in: query
+      required: true
+      schema:
+        type: string
+        pattern: '^[A-Z0-9]{1,12}$'
+        example: SBER
     Cursor:
       name: cursor
       in: query
@@ -1395,6 +1440,63 @@ components:
           minimum: -1
           maximum: 1
 
+    SignalFactorChange:
+      type: object
+      additionalProperties: false
+      required: [code, label, previous_contribution, current_contribution, delta]
+      properties:
+        code:
+          type: string
+        label:
+          type: string
+        previous_contribution:
+          type: number
+          nullable: true
+        current_contribution:
+          type: number
+          nullable: true
+        delta:
+          type: number
+          nullable: true
+
+    SignalChange:
+      type: object
+      additionalProperties: false
+      required: [previous_signal_id, from_direction, to_direction, direction_changed, score_delta, confidence_delta, primary_factor_change, factor_changes]
+      properties:
+        previous_signal_id:
+          type: string
+        from_direction:
+          $ref: '#/components/schemas/SignalDirection'
+        to_direction:
+          $ref: '#/components/schemas/SignalDirection'
+        direction_changed:
+          type: boolean
+        score_delta:
+          type: number
+        confidence_delta:
+          type: number
+        primary_factor_change:
+          allOf:
+            - $ref: '#/components/schemas/SignalFactorChange'
+          nullable: true
+        factor_changes:
+          type: array
+          items:
+            $ref: '#/components/schemas/SignalFactorChange'
+
+    SignalHistoryEvent:
+      type: object
+      additionalProperties: false
+      required: [signal, change_from_previous]
+      properties:
+        signal:
+          $ref: '#/components/schemas/Signal'
+        change_from_previous:
+          allOf:
+            - $ref: '#/components/schemas/SignalChange'
+          nullable: true
+
     SignalEvidence:
       type: object
       additionalProperties: false
@@ -1446,12 +1548,26 @@ components:
           type: integer
           minimum: 0
 
+    SignalTarget:
+      type: object
+      additionalProperties: false
+      required: [type, id, label]
+      properties:
+        type:
+          type: string
+          enum: [instrument, sector, market]
+        id:
+          type: string
+        label:
+          type: string
+
     Signal:
       type: object
       additionalProperties: false
       required:
         - id
         - ticker
+        - target
         - as_of
         - data_cutoff_at
         - status
@@ -1473,12 +1589,11 @@ components:
         id:
           type: string
           example: sig_01JZK6K5GDX90Q2X8C0R4D7M9P
-        previous_revision_id:
-          type: string
-          nullable: true
         ticker:
           type: string
           example: SBER
+        target:
+          $ref: '#/components/schemas/SignalTarget'
         as_of:
           type: string
           format: date-time
@@ -1591,17 +1706,7 @@ components:
         ticker:
           type: string
         target:
-          type: object
-          additionalProperties: false
-          required: [type, id, label]
-          properties:
-            type:
-              type: string
-              enum: [instrument, sector, market]
-            id:
-              type: string
-            label:
-              type: string
+          $ref: '#/components/schemas/SignalTarget'
         direction:
           $ref: '#/components/schemas/SignalDirection'
         score:
@@ -2526,6 +2631,35 @@ components:
             $ref: '#/components/schemas/Signal'
         meta:
           $ref: '#/components/schemas/PageMeta'
+
+    SignalHistoryResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/SignalHistoryEvent'
+        meta:
+          type: object
+          additionalProperties: false
+          required: [ticker, limit, has_more, order, basis, model_version]
+          properties:
+            ticker:
+              type: string
+            limit:
+              type: integer
+            has_more:
+              type: boolean
+            order:
+              type: string
+              enum: [as_of_desc]
+            basis:
+              type: string
+              enum: [chronological_news_signals]
+            model_version:
+              type: string
 
     NewsListResponse:
       type: object
