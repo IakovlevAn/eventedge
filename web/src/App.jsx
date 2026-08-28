@@ -32,6 +32,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { separateAssessmentLayers } from "./assessment.js";
 import { companyCoverageView } from "./companyCoverage.js";
+import { CANONICAL_NEWS_PATH, newsCoverageView } from "./newsCoverage.js";
 import { resolveSignalEvidence } from "./provenance.js";
 import { shouldAcceptSnapshot } from "./snapshot.js";
 import { sourceFreshnessView, sourceScheduleLabel } from "./sourceHealth.js";
@@ -1524,6 +1525,7 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
     return result;
   }, {}), [allNews]);
   const visibleItems = items.slice(0, visibleCount);
+  const newsCoverage = newsCoverageView(newsMeta, newsMeta.loaded);
   const processingStats = useMemo(() => {
     const apiStats = newsMeta.processing_coverage;
     if (apiStats) return {
@@ -1595,7 +1597,7 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
         </div>}
       </section>
       <section className="news-feed">
-        <div className="feed-heading"><span>{items.length} из {allNews.length} публикаций</span><small>{newsMeta.sources?.length || sources.length} источников · повторы одного события объединяются</small></div>
+        <div className="feed-heading"><span>{items.length} из {allNews.length} событий</span><small>{newsCoverage.partial ? `Загружено ${newsCoverage.loaded} из ${newsCoverage.total} публикаций · ` : ""}{newsMeta.sources?.length || sources.length} источников · повторы одного события объединяются</small></div>
         {visibleItems.map((item) => {
           const scopeMeta = eventScopeMeta[item.event?.scope || "market"];
           const ScopeIcon = scopeMeta.Icon;
@@ -2272,7 +2274,7 @@ export default function App() {
         const assessmentRequest = fetch(apiUrl("/v1/assessments"), { signal: controller.signal }).catch(() => null);
         const [signalResponse, newsResponse, assessmentResponse] = await Promise.all([
           fetch(apiUrl("/v1/signals?status=active&limit=100"), { signal: controller.signal }),
-          fetch(apiUrl("/v1/news?limit=100"), { signal: controller.signal }),
+          fetch(apiUrl(CANONICAL_NEWS_PATH), { signal: controller.signal }),
           Promise.race([
             assessmentRequest,
             new Promise((resolve) => window.setTimeout(() => resolve(null), 6000)),
@@ -2326,7 +2328,7 @@ export default function App() {
           }));
         }
         setAllNews(nextNews);
-        setNewsMeta(newsPayload.meta || { total: nextNews.length, sources: [] });
+        setNewsMeta({ ...(newsPayload.meta || { total: nextNews.length, sources: [] }), loaded: newsPayload.data.length });
         setDataStatus("ready");
         loaded = true;
       } catch (error) {
