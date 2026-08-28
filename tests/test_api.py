@@ -945,8 +945,8 @@ def test_backfill_reclassifies_stored_sector_news_without_ticker(
 
     assert response.status_code == 200
     assert response.json()["meta"]["candidate_policy"] == "material-event-priority-0.5.0"
-    assert {signal.ticker for signal in signals} == {"RUAGRI", "RUTRANS"}
-    assert {signal.model_version for signal in signals} == {"signal-engine-0.6.1"}
+    assert signals == []
+    assert response.json()["meta"]["rejection_reasons"] == {"unvalidated_context_signal": 1}
     assert updated.source_metadata["classification_status"] == "semantic_candidate"
     assert updated.source_metadata["analysis_candidate"] is True
 
@@ -1366,7 +1366,7 @@ def test_signal_list_reads_repository_instead_of_stale_empty_snapshot(
     snapshot_read.assert_not_awaited()
 
 
-def test_active_signal_list_hides_legacy_context_down_but_keeps_strong_company_down(
+def test_signal_list_hides_context_history_but_keeps_strong_company_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = MemoryNewsRepository()
@@ -1412,7 +1412,17 @@ def test_active_signal_list_hides_legacy_context_down_but_keeps_strong_company_d
 
     repository._news[news.id] = news
     repository._signals = {
-        item.id: item for item in (signal("RUEQ"), signal("SBER"))
+        item.id: item
+        for item in (
+            signal("RUEQ"),
+            signal("SBER"),
+            replace(
+                signal("RUEQ"),
+                id="sig_expired_rueq",
+                status="expired",
+                expires_at=timestamp - timedelta(seconds=1),
+            ),
+        )
     }
     monkeypatch.setattr(app.state, "news_repository", repository)
 
@@ -1420,6 +1430,11 @@ def test_active_signal_list_hides_legacy_context_down_but_keeps_strong_company_d
 
     assert response.status_code == 200
     assert [item["ticker"] for item in response.json()["data"]] == ["SBER"]
+
+    expired_response = client.get("/v1/signals", params={"status": "expired", "limit": 100})
+
+    assert expired_response.status_code == 200
+    assert expired_response.json()["data"] == []
 
 
 def test_signal_list_rejects_incomplete_repository_read(
@@ -2095,7 +2110,10 @@ def test_evals_endpoint_exposes_analysis_and_downloads() -> None:
     }
     assert len(response.json()["data"]["breakdowns"]["by_horizon"]) == 4
     assert response.json()["meta"]["primary_horizon"] == "4h"
-    assert response.json()["meta"]["evaluation_scope"] == "directional_signals_only"
+    assert (
+        response.json()["meta"]["evaluation_scope"]
+        == "company_directional_signals_only"
+    )
     assert response.json()["meta"]["model_epochs"]
     assert all(
         outcome["direction"] in {"up", "down"} for outcome in response.json()["data"]["outcomes"]
@@ -2240,6 +2258,7 @@ def test_evals_selects_highest_config_before_newest_evaluation_time(
         outcomes=(
             {
                 "signal_id": "sig_config_1",
+                "ticker": "SBER",
                 "direction": "up",
                 "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
                 "status": "excluded",
@@ -2256,6 +2275,7 @@ def test_evals_selects_highest_config_before_newest_evaluation_time(
         outcomes=(
             {
                 "signal_id": "sig_config_2",
+                "ticker": "SBER",
                 "direction": "down",
                 "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
                 "status": "excluded",
@@ -2326,7 +2346,7 @@ def test_retrospective_signal_is_excluded_without_moex_request() -> None:
     asyncio.run(scenario())
 
 
-def test_context_signal_is_evaluated_against_index_benchmark() -> None:
+def test_context_signal_is_excluded_from_evaluation() -> None:
     async def scenario() -> None:
         repository = MemoryNewsRepository()
         timestamp = datetime(2026, 8, 10, 7, tzinfo=UTC)
@@ -2369,7 +2389,7 @@ def test_context_signal_is_evaluated_against_index_benchmark() -> None:
         repository._news[news.id] = news
         repository._signals[signal.id] = signal
 
-        class IndexMarketData:
+        class NoMarketDataExpected:
             calls: list[str] = []
 
             async def candles(
@@ -2380,31 +2400,18 @@ def test_context_signal_is_evaluated_against_index_benchmark() -> None:
                 lookback_days: int,
             ) -> dict[str, object]:
                 self.calls.append(ticker)
-                return {
-                    "ticker": ticker,
-                    "benchmark_ticker": "IMOEX",
-                    "candles": [
-                        {"begin": "2026-08-10T07:00:00Z", "open": 2300, "close": 2300},
-                        {"begin": "2026-08-10T08:00:00Z", "open": 2290, "close": 2280},
-                    ],
-                }
+                raise AssertionError("hidden context signals must not request market outcomes")
 
-        market = IndexMarketData()
+        market = NoMarketDataExpected()
         outcomes, signals, _, _, epochs = await main_module._load_evaluation_material(
             repository,
             market,  # type: ignore[arg-type]
         )
 
-        assert market.calls == ["RUEQ"]
-        assert [item.ticker for item in signals] == ["RUEQ"]
-        assert outcomes[0]["status"] == "partial"
-        assert outcomes[0]["evaluation_benchmark"] == {
-            "ticker": "IMOEX",
-            "source": "MOEX ISS",
-            "kind": "index",
-        }
-        assert epochs[-1].outcomes[0]["signal_id"] == signal.id
-        assert {row["evaluation_benchmark"] for row in epochs[-1].observations} == {"IMOEX"}
+        assert market.calls == []
+        assert signals == []
+        assert outcomes == []
+        assert epochs == []
 
     asyncio.run(scenario())
 

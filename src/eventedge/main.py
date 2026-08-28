@@ -2226,14 +2226,11 @@ async def list_signals(
             signal
             for signal in signals
             if signal.news_id not in hidden_ids
-            and (
-                (status or "active") != "active"
-                or is_publishable_news_signal(
-                    ticker=signal.ticker,
-                    direction=signal.direction,
-                    score=signal.score,
-                    confidence=signal.confidence,
-                )
+            and is_publishable_news_signal(
+                ticker=signal.ticker,
+                direction=signal.direction,
+                score=signal.score,
+                confidence=signal.confidence,
             )
         ),
         news_by_id,
@@ -2692,10 +2689,7 @@ async def _load_evaluation_material(
             signal
             for signal in deduplicate_eval_signals(deduplicate_signals(stored_signals))
             if signal.news_id in news_by_id
-            and (
-                signal.ticker in DEFAULT_MOEX_ALIASES
-                or signal.ticker in EVALUATION_INDEX_BENCHMARKS
-            )
+            and signal.ticker in DEFAULT_MOEX_ALIASES
             and signal.direction in {"up", "down"}
         ),
         news_by_id,
@@ -2920,7 +2914,12 @@ def directional_epoch_outcomes(
 ) -> list[dict[str, object]]:
     if epoch is None:
         return []
-    return [outcome for outcome in epoch.outcomes if outcome.get("direction") in {"up", "down"}]
+    return [
+        outcome
+        for outcome in epoch.outcomes
+        if outcome.get("direction") in {"up", "down"}
+        and outcome.get("ticker") in DEFAULT_MOEX_ALIASES
+    ]
 
 
 def evaluation_epoch_meta(epoch: EvaluationEpochRecord) -> dict[str, object]:
@@ -2974,7 +2973,7 @@ async def list_evals(
                 "refresh_after_seconds": 600,
                 "primary_horizon": "4h",
                 "evaluation_window": "1h / 4h for product metrics; raw 1d / 3d retained",
-                "evaluation_scope": "directional_signals_only",
+                "evaluation_scope": "company_directional_signals_only",
                 "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
                 "live_processing_lag_limit_seconds": int(
                     MAX_LIVE_PROCESSING_LAG.total_seconds()

@@ -37,6 +37,7 @@ SIGNAL_REJECTION_REASONS = frozenset(
         "low_materiality",
         "no_instrument",
         "product_or_marketing_noise",
+        "unvalidated_context_signal",
         "unvalidated_context_down",
         "weak_direction",
     }
@@ -534,8 +535,8 @@ def signal_rejection_reason(
         return "low_materiality"
     if abs(features.polarity) < 0.15:
         return "weak_direction"
-    if not signal_instruments and features.polarity < 0:
-        return "unvalidated_context_down"
+    if not signal_instruments:
+        return "unvalidated_context_signal"
     return "below_score_threshold"
 
 
