@@ -2210,31 +2210,45 @@ async def list_signals(
             detail="The structured data store did not return a complete signal feed.",
         )
     request.app.state.repository_last_success_at = time.monotonic()
-    hidden_ids = hidden_news_ids(news)
     news_by_id = {item.id: item for item in news}
-    signals = filter_signals(
-        normalize_signal_freshness(stored_signals, news_by_id),
-        ticker=ticker,
-        directions=requested_directions,
-        status=status or "active",
-        min_confidence=min_confidence,
-        limit=1000,
-        model_version=selected_model_version,
-    )
-    signals = deduplicate_eval_events(
-        deduplicate_signals(
-            signal
-            for signal in signals
-            if signal.news_id not in hidden_ids
-            and is_publishable_news_signal(
-                ticker=signal.ticker,
-                direction=signal.direction,
-                score=signal.score,
-                confidence=signal.confidence,
-            )
-        ),
-        news_by_id,
-    )[:limit]
+    if (
+        (status or "active") == "active"
+        and selected_model_version == CURRENT_NEWS_MODEL_VERSION
+    ):
+        signals = filter_signals(
+            list(active_signals_from_content(news, stored_signals).values()),
+            ticker=ticker,
+            directions=requested_directions,
+            status="active",
+            min_confidence=min_confidence,
+            limit=limit,
+            model_version=selected_model_version,
+        )
+    else:
+        hidden_ids = hidden_news_ids(news)
+        signals = filter_signals(
+            normalize_signal_freshness(stored_signals, news_by_id),
+            ticker=ticker,
+            directions=requested_directions,
+            status=status or "active",
+            min_confidence=min_confidence,
+            limit=1000,
+            model_version=selected_model_version,
+        )
+        signals = deduplicate_eval_events(
+            deduplicate_signals(
+                signal
+                for signal in signals
+                if signal.news_id not in hidden_ids
+                and is_publishable_news_signal(
+                    ticker=signal.ticker,
+                    direction=signal.direction,
+                    score=signal.score,
+                    confidence=signal.confidence,
+                )
+            ),
+            news_by_id,
+        )[:limit]
     data = [signal_api_payload(signal, news_by_id) for signal in signals]
     cache_payload = {
         "ticker": ticker,
@@ -2319,19 +2333,16 @@ async def list_signal_history(
     request.app.state.repository_last_success_at = time.monotonic()
     news_by_id = {item.id: item for item in news}
     hidden_ids = hidden_news_ids(news)
-    signals = deduplicate_eval_events(
-        deduplicate_signals(
-            signal
-            for signal in normalize_signal_freshness(stored_signals, news_by_id)
-            if signal.news_id not in hidden_ids
-            and is_publishable_news_signal(
-                ticker=signal.ticker,
-                direction=signal.direction,
-                score=signal.score,
-                confidence=signal.confidence,
-            )
-        ),
-        news_by_id,
+    signals = deduplicate_signals(
+        signal
+        for signal in normalize_signal_freshness(stored_signals, news_by_id)
+        if signal.news_id not in hidden_ids
+        and is_publishable_news_signal(
+            ticker=signal.ticker,
+            direction=signal.direction,
+            score=signal.score,
+            confidence=signal.confidence,
+        )
     )
     data, has_more = signal_history_payload(signals, news_by_id, limit=limit)
     payload = {
@@ -2431,7 +2442,7 @@ def active_signals_from_content(
         limit=1000,
     )
     result: dict[str, SignalRecord] = {}
-    for signal in deduplicate_eval_events(deduplicate_signals(active), news_by_id):
+    for signal in deduplicate_signals(active):
         if (
             signal.model_version == CURRENT_NEWS_MODEL_VERSION
             and signal.news_id not in hidden_ids
@@ -2443,8 +2454,10 @@ def active_signals_from_content(
             )
         ):
             current = result.get(signal.ticker)
-            if current is None or (
-                current.direction == "neutral" and signal.direction in {"up", "down"}
+            if current is None or (signal.as_of, signal.created_at, signal.id) > (
+                current.as_of,
+                current.created_at,
+                current.id,
             ):
                 result[signal.ticker] = signal
     return result
@@ -2503,33 +2516,8 @@ async def list_assessments(
         ),
     )
     stored_news, stored_signals = content
-    hidden_ids = hidden_news_ids(stored_news)
     news_by_id = {item.id: item for item in stored_news}
-    active_signals = filter_signals(
-        normalize_signal_freshness(stored_signals, news_by_id),
-        ticker=None,
-        directions=None,
-        status="active",
-        min_confidence=None,
-        limit=1000,
-    )
-    active_by_ticker: dict[str, SignalRecord] = {}
-    for signal in deduplicate_eval_events(deduplicate_signals(active_signals), news_by_id):
-        if (
-            signal.model_version == CURRENT_NEWS_MODEL_VERSION
-            and signal.news_id not in hidden_ids
-            and is_publishable_news_signal(
-                ticker=signal.ticker,
-                direction=signal.direction,
-                score=signal.score,
-                confidence=signal.confidence,
-            )
-        ):
-            current = active_by_ticker.get(signal.ticker)
-            if current is None or (
-                current.direction == "neutral" and signal.direction in {"up", "down"}
-            ):
-                active_by_ticker[signal.ticker] = signal
+    active_by_ticker = active_signals_from_content(stored_news, stored_signals)
     visible_news = public_news(stored_news)
     data = []
     errors = []

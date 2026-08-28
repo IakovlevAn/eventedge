@@ -1165,6 +1165,129 @@ def test_signal_list_has_contract_shape_and_etag() -> None:
     assert cached.content == b""
 
 
+def test_current_signal_uses_newest_event_before_direction_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = MemoryNewsRepository()
+    now = datetime.now(UTC).replace(microsecond=0)
+
+    def news(news_id: str, published_at: datetime, title: str) -> NewsRecord:
+        return NewsRecord(
+            id=news_id,
+            source_id="interfax",
+            external_id=news_id,
+            published_at=published_at,
+            received_at=published_at,
+            title=title,
+            url=f"https://example.com/{news_id}",
+            content=title,
+            language="ru",
+            source_metadata={"analysis_candidate": True, "signal_candidate": True},
+            created_at=published_at,
+        )
+
+    def signal(
+        signal_id: str,
+        item: NewsRecord,
+        direction: str,
+        score: float,
+    ) -> SignalRecord:
+        return SignalRecord(
+            id=signal_id,
+            news_id=item.id,
+            ticker="SBER",
+            as_of=item.published_at,
+            data_cutoff_at=item.received_at,
+            status="active",
+            direction=direction,
+            action="consider_buy" if direction == "up" else "no_action",
+            horizon_value=3,
+            horizon_unit="calendar_days",
+            score=score,
+            strength=abs(score) / 100,
+            confidence=0.75,
+            summary=f"Текущий {direction} news-сигнал.",
+            factor_contributions=(),
+            evidence_refs=(item.id,),
+            expires_at=now + timedelta(days=3),
+            invalidation_conditions=(),
+            model_version="signal-engine-0.6.1",
+            config_version=3,
+            created_at=item.received_at,
+        )
+
+    older_news = news(
+        "news_current_older",
+        now - timedelta(hours=2),
+        "Сбербанк увеличил чистую прибыль",
+    )
+    newer_news = news(
+        "news_current_newer",
+        now - timedelta(hours=1),
+        "Сбербанк увеличил чистую прибыль без изменения прогноза",
+    )
+    older_up = signal("sig_current_older_up", older_news, "up", 42.0)
+    newer_neutral = signal("sig_current_newer_neutral", newer_news, "neutral", 5.0)
+    repository._news = {item.id: item for item in (older_news, newer_news)}
+    repository._signals = {item.id: item for item in (older_up, newer_neutral)}
+    monkeypatch.setattr(app.state, "news_repository", repository)
+
+    class FakeMarketDataClient:
+        async def snapshot(self, ticker: str) -> dict[str, object]:
+            return {
+                "ticker": ticker,
+                "name": "Сбербанк",
+                "last_price": "100.0",
+                "currency": "RUB",
+                "observed_at": to_rfc3339(now),
+                "daily_change_pct": 0.2,
+                "volume_shares": 1_000_000,
+                "value_rub": 100_000_000.0,
+                "lot_size": 1,
+                "liquidity_status": "sufficient",
+                "daily_volatility_pct": 1.0,
+                "annualized_volatility_pct": 15.87,
+                "candles": [],
+                "source": {"name": "MOEX ISS", "url": "https://iss.moex.com/iss/"},
+            }
+
+    original_market_data_client = app.state.market_data_client
+    app.state.market_data_client = FakeMarketDataClient()
+    try:
+        current = client.get("/v1/signals", params={"ticker": "SBER", "limit": 10})
+        stale_direction = client.get(
+            "/v1/signals",
+            params={"ticker": "SBER", "direction": "up", "limit": 10},
+        )
+        neutral_direction = client.get(
+            "/v1/signals",
+            params={"ticker": "SBER", "direction": "neutral", "limit": 10},
+        )
+        history = client.get(
+            "/v1/signals/history", params={"ticker": "SBER", "limit": 10}
+        )
+        assessment = client.get("/v1/assessments", params={"tickers": "SBER"})
+    finally:
+        app.state.market_data_client = original_market_data_client
+
+    assert current.status_code == 200
+    assert [item["id"] for item in current.json()["data"]] == [newer_neutral.id]
+    assert stale_direction.status_code == 200
+    assert stale_direction.json()["data"] == []
+    assert neutral_direction.status_code == 200
+    assert [item["id"] for item in neutral_direction.json()["data"]] == [
+        newer_neutral.id
+    ]
+    assert history.status_code == 200
+    assert [item["signal"]["id"] for item in history.json()["data"]] == [
+        newer_neutral.id,
+        older_up.id,
+    ]
+    assert assessment.status_code == 200
+    assert assessment.json()["data"][0]["news_signal"]["id"] == newer_neutral.id
+    assert assessment.json()["data"][0]["direction"] == "neutral"
+
+
 def test_signal_history_compares_consecutive_stored_news_events(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

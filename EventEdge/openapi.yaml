@@ -272,13 +272,13 @@ paths:
   /v1/signals:
     get:
       tags: [Signals]
-      summary: List stored news-event signals
+      summary: List canonical current signals or stored audit signals
       operationId: listSignals
       parameters:
         - $ref: '#/components/parameters/TickerQuery'
         - name: direction
           in: query
-          description: Filter by one or more directions.
+          description: Filter the canonical current signal; never revives an older direction.
           schema:
             type: array
             items:
@@ -287,7 +287,7 @@ paths:
           explode: false
         - name: status
           in: query
-          description: Defaults to active; pass another status for audit views.
+          description: Active returns at most the newest signal per ticker; pass another status for audit views.
           schema:
             $ref: '#/components/schemas/SignalStatus'
         - name: min_confidence
@@ -314,7 +314,7 @@ paths:
         - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
-          description: A page ordered by `as_of DESC, id DESC`.
+          description: Active signals are newest-per-ticker and ordered by `as_of DESC, id DESC`.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestId'
