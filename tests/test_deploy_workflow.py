@@ -27,6 +27,7 @@ def test_production_smoke_accounts_for_partial_moex_and_checks_new_routes() -> N
     assert "Smoke test source registry and market events" in workflow
     assert '"${EVENTEDGE_API_URL}/v1/sources"' in workflow
     assert 'freshness_basis == "latest_stored_publication"' in workflow
+    assert '.meta.evaluation_scope == "company_directional_signals_only"' in workflow
     assert 'has("freshness_status")' in workflow
     assert '"${EVENTEDGE_API_URL}/v1/news?limit=1"' in workflow
     assert ".meta.company_coverage.supported == 20" in workflow
