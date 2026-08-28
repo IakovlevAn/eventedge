@@ -33,6 +33,7 @@ def main() -> None:
 
     expected_paths = {
         "/v1/signals",
+        "/v1/signals/history",
         "/v1/signals/{signal_id}",
         "/v1/assessments",
         "/v1/evals",

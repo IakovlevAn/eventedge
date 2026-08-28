@@ -5,6 +5,7 @@ import csv
 import hmac
 import io
 import logging
+import math
 import os
 import re
 import time
@@ -706,6 +707,97 @@ def signal_api_payload(
         "evidence_resolved": resolved,
     }
     return payload
+
+
+def signal_change_from_previous(
+    previous: SignalRecord,
+    current: SignalRecord,
+) -> dict[str, object]:
+    """Compare two stored decisions without inferring causes or future outcomes."""
+
+    def factors_by_code(signal: SignalRecord) -> dict[str, dict[str, object]]:
+        return {
+            str(factor["code"]): factor
+            for factor in signal.factor_contributions
+            if isinstance(factor, dict) and factor.get("code")
+        }
+
+    previous_factors = factors_by_code(previous)
+    current_factors = factors_by_code(current)
+    factor_changes: list[dict[str, object]] = []
+    for code in sorted(previous_factors.keys() | current_factors.keys()):
+        before = previous_factors.get(code, {})
+        after = current_factors.get(code, {})
+        before_value = before.get("contribution")
+        after_value = after.get("contribution")
+        comparable = (
+            isinstance(before_value, (int, float))
+            and not isinstance(before_value, bool)
+            and math.isfinite(before_value)
+            and isinstance(after_value, (int, float))
+            and not isinstance(after_value, bool)
+            and math.isfinite(after_value)
+        )
+        factor_changes.append(
+            {
+                "code": code,
+                "label": str(after.get("label") or before.get("label") or code),
+                "previous_contribution": before_value if comparable else None,
+                "current_contribution": after_value if comparable else None,
+                "delta": round(float(after_value) - float(before_value), 6)
+                if comparable
+                else None,
+            }
+        )
+
+    factor_changes.sort(
+        key=lambda item: (
+            -abs(float(item["delta"])) if item["delta"] is not None else math.inf,
+            str(item["code"]),
+        )
+    )
+    primary_factor_change = next(
+        (
+            item
+            for item in factor_changes
+            if item["delta"] is not None and abs(float(item["delta"])) > 1e-12
+        ),
+        None,
+    )
+    return {
+        "previous_signal_id": previous.id,
+        "from_direction": previous.direction,
+        "to_direction": current.direction,
+        "direction_changed": previous.direction != current.direction,
+        "score_delta": round(current.score - previous.score, 6),
+        "confidence_delta": round(current.confidence - previous.confidence, 6),
+        "primary_factor_change": primary_factor_change,
+        "factor_changes": factor_changes,
+    }
+
+
+def signal_history_payload(
+    signals: list[SignalRecord],
+    news_by_id: Mapping[str, NewsRecord],
+    *,
+    limit: int,
+) -> tuple[list[dict[str, object]], bool]:
+    """Return newest-first events whose deltas use the preceding stored event."""
+    chronological = sorted(signals, key=lambda item: (item.as_of, item.created_at, item.id))
+    events = []
+    previous: SignalRecord | None = None
+    for signal in chronological:
+        events.append(
+            {
+                "signal": signal_api_payload(signal, news_by_id),
+                "change_from_previous": signal_change_from_previous(previous, signal)
+                if previous is not None
+                else None,
+            }
+        )
+        previous = signal
+    events.reverse()
+    return events[:limit], len(events) > limit
 
 
 def build_news_response_payload(
@@ -2175,6 +2267,91 @@ async def list_signals(
         },
         headers={"ETag": etag},
     )
+
+
+@app.get("/v1/signals/history", tags=["Signals"])
+async def list_signal_history(
+    request: Request,
+    ticker: Annotated[str, Query(pattern=r"^[A-Z0-9]{1,12}$")],
+    limit: Annotated[int, Query(ge=1, le=50)] = 12,
+    if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
+) -> Response:
+    """Compare consecutive, stored news-event signals for one ticker."""
+    repository: NewsRepository = request.app.state.news_repository
+    try:
+        async with asyncio.timeout(SIGNAL_READ_TIMEOUT_SECONDS):
+            stored_signals = await repository.list_signals(
+                ticker=ticker,
+                directions=None,
+                status=None,
+                min_confidence=None,
+                limit=1000,
+                model_version=CURRENT_NEWS_MODEL_VERSION,
+            )
+            requested_news_ids = frozenset(signal.news_id for signal in stored_signals)
+            news = await repository.get_news_by_ids(requested_news_ids)
+    except TimeoutError:
+        logger.warning("Signal history read exceeded %.1fs", SIGNAL_READ_TIMEOUT_SECONDS)
+        return problem_response(
+            request,
+            status=503,
+            code="DEPENDENCY_UNAVAILABLE",
+            title="Signal history is temporarily unavailable",
+            detail="The structured data store did not complete the history read in time.",
+        )
+    except Exception:
+        logger.exception("Signal history read failed")
+        return problem_response(
+            request,
+            status=503,
+            code="DEPENDENCY_UNAVAILABLE",
+            title="Signal history is temporarily unavailable",
+            detail="The structured data store did not return complete signal history.",
+        )
+
+    if {item.id for item in news} != requested_news_ids:
+        logger.error("Signal history read returned incomplete news references")
+        return problem_response(
+            request,
+            status=503,
+            code="DEPENDENCY_UNAVAILABLE",
+            title="Signal history is temporarily unavailable",
+            detail="The structured data store did not return complete signal history.",
+        )
+
+    request.app.state.repository_last_success_at = time.monotonic()
+    news_by_id = {item.id: item for item in news}
+    hidden_ids = hidden_news_ids(news)
+    signals = deduplicate_eval_events(
+        deduplicate_signals(
+            signal
+            for signal in normalize_signal_freshness(stored_signals, news_by_id)
+            if signal.news_id not in hidden_ids
+            and is_publishable_news_signal(
+                ticker=signal.ticker,
+                direction=signal.direction,
+                score=signal.score,
+                confidence=signal.confidence,
+            )
+        ),
+        news_by_id,
+    )
+    data, has_more = signal_history_payload(signals, news_by_id, limit=limit)
+    payload = {
+        "data": data,
+        "meta": {
+            "ticker": ticker,
+            "limit": limit,
+            "has_more": has_more,
+            "order": "as_of_desc",
+            "basis": "chronological_news_signals",
+            "model_version": CURRENT_NEWS_MODEL_VERSION,
+        },
+    }
+    etag = f'"{canonical_payload_hash(payload)[:24]}"'
+    if if_none_match == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return JSONResponse(content=payload, headers={"ETag": etag})
 
 
 @app.get("/v1/signals/{signal_id}", tags=["Signals"])
