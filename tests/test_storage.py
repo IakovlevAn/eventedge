@@ -6,7 +6,14 @@ from types import SimpleNamespace
 import pytest
 import ydb
 
-from eventedge.analysis import EventType, InstrumentMention, SemanticFeatures, TemporalStatus
+from eventedge.analysis import (
+    EventType,
+    InstrumentMention,
+    NewsAnalysisInput,
+    RuleBasedNewsExtractor,
+    SemanticFeatures,
+    TemporalStatus,
+)
 from eventedge.storage import (
     DELETE_EXPIRED_ASSESSMENT_SNAPSHOTS_QUERY,
     INSERT_ASSESSMENT_SNAPSHOT_QUERY,
@@ -165,6 +172,48 @@ def test_generate_signals_false_is_a_hard_storage_boundary() -> None:
     processed = process_document(document, features, now=timestamp, generate_signals=False)
 
     assert processed.signals == ()
+
+
+@pytest.mark.parametrize(
+    ("title", "content", "expected_tickers"),
+    [
+        (
+            "В ВТБ оценили негативный эффект для Wildberries и Ozon от атак БПЛА",
+            "Выручка Ozon снизилась на 20%.",
+            {"OZON"},
+        ),
+        (
+            "ВТБ окажет поддержку продавцам Ozon, пострадавшим в результате атак",
+            "Банк увеличил объём программы поддержки на 20%.",
+            {"VTBR"},
+        ),
+    ],
+)
+def test_contextual_title_companies_do_not_create_signals(
+    title: str,
+    content: str,
+    expected_tickers: set[str],
+) -> None:
+    timestamp = datetime(2026, 8, 31, 12, tzinfo=UTC)
+    document = NewsDocument(
+        source_id="rbc",
+        external_id=title,
+        published_at=timestamp,
+        received_at=timestamp,
+        title=title,
+        url="https://example.com/role-aware-attribution",
+        content=content,
+        language="ru",
+        source_metadata={"analysis_candidate": True, "signal_candidate": True},
+        payload_hash="role-aware-attribution-payload",
+    )
+    features = RuleBasedNewsExtractor().extract(
+        NewsAnalysisInput(source_id="rbc", title=title, content=content)
+    )
+
+    processed = process_document(document, features, now=timestamp, generate_signals=True)
+
+    assert {signal.ticker for signal in processed.signals} == expected_tickers
 
 
 def test_analyzed_news_records_bounded_signal_rejection_reason() -> None:

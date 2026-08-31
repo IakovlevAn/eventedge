@@ -1474,7 +1474,7 @@ def test_signal_list_reads_repository_instead_of_stale_empty_snapshot(
         "decision_at": payload[0]["created_at"],
         "data_cutoff_at": timestamp.isoformat().replace("+00:00", "Z"),
         "model_version": "signal-engine-0.6.1",
-        "config_version": 3,
+        "config_version": 4,
         "evidence_status": "complete",
         "evidence_expected": 1,
         "evidence_resolved": 1,

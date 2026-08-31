@@ -75,7 +75,7 @@ def test_yandexgpt_extracts_semantics_but_keeps_ticker_deterministic() -> None:
     features = asyncio.run(analyzer.extract(document))
 
     assert [item.ticker for item in features.instruments] == ["SBER"]
-    assert features.extractor_version == "yandexgpt-lite-0.5.0"
+    assert features.extractor_version == "yandexgpt-lite-0.6.0"
     assert features.evidence_quotes == ("Чистая прибыль выросла на 15%",)
     assert features.polarity == 0.86
     request = session.calls[0]
@@ -318,4 +318,4 @@ def test_grounding_tolerates_source_whitespace_normalization() -> None:
         )
     )
 
-    assert features.extractor_version == "yandexgpt-lite-0.5.0"
+    assert features.extractor_version == "yandexgpt-lite-0.6.0"

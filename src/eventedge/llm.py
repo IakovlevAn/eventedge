@@ -95,7 +95,7 @@ class MetadataIamTokenProvider:
 class YandexGptNewsAnalyzer:
     """Target-neutral semantic extractor with a deterministic rule fallback."""
 
-    version = "yandexgpt-lite-0.5.0"
+    version = "yandexgpt-lite-0.6.0"
 
     def __init__(
         self,
