@@ -310,10 +310,18 @@ def test_reprocess_excludes_analysis_only_sources_and_multi_company_roundups() -
         content="Сводка решений советов директоров за неделю.",
         payload_hash="multi-company-roundup",
     )
+    review = replace(
+        candidate_document(),
+        external_id="analytical-report-review",
+        title="ЛУКОЙЛ: прибыль все еще есть. Обзор отчета за полугодие по МСФО",
+        content="Автор разбирает ранее опубликованные показатели компании.",
+        payload_hash="analytical-report-review",
+    )
 
     async def scenario() -> dict[str, object]:
         await repository.ingest("analysis-original", analysis, generate_signals=False)
         await repository.ingest("roundup-original", roundup, generate_signals=False)
+        await repository.ingest("review-original", review, generate_signals=False)
         return await reprocess_signal_candidates_batch(repository, limit=10, dry_run=True)
 
     result = asyncio.run(scenario())
@@ -324,14 +332,35 @@ def test_reprocess_excludes_analysis_only_sources_and_multi_company_roundups() -
     assert result["meta"]["estimated_llm_calls"] == 0
 
 
-def test_live_views_hide_legacy_signal_from_newly_excluded_evidence() -> None:
+@pytest.mark.parametrize(
+    ("source_id", "title", "content"),
+    [
+        (
+            "telegram_finamalert",
+            "Сбербанк рекомендовал дивиденды",
+            "Совет директоров рекомендовал выплатить дивиденды.",
+        ),
+        (
+            "google_news",
+            "ЛУКОЙЛ: прибыль все еще есть. Обзор отчета за полугодие по МСФО",
+            "Чистая прибыль компании выросла на 10%.",
+        ),
+    ],
+)
+def test_live_views_hide_legacy_signal_from_newly_excluded_evidence(
+    source_id: str,
+    title: str,
+    content: str,
+) -> None:
     repository = MemoryNewsRepository()
     analysis = replace(
         candidate_document(),
-        source_id="telegram_finamalert",
-        external_id="legacy-analysis-signal",
+        source_id=source_id,
+        external_id=f"legacy-analysis-signal-{source_id}",
+        title=title,
+        content=content,
         source_metadata={"categories": ["Компании"], "event_candidate": True},
-        payload_hash="legacy-analysis-signal",
+        payload_hash=f"legacy-analysis-signal-{source_id}",
     )
 
     async def scenario() -> tuple[list[object], list[object]]:

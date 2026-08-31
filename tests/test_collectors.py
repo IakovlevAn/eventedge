@@ -16,6 +16,7 @@ from eventedge.collectors import (
     collect_rss_feed,
     collect_telegram_channel,
     google_news_search_url,
+    is_analytical_review,
     is_cbr_market_news,
     is_company_news_candidate,
     is_google_market_background_candidate,
@@ -183,7 +184,7 @@ def test_sector_news_without_ticker_is_analyzed_and_stored() -> None:
         "event_candidate": True,
         "signal_candidate": False,
         "analysis_candidate": True,
-        "classification_version": "candidate-gate-0.7.0",
+        "classification_version": "candidate-gate-0.7.1",
     }
     assert signals == []
     assert stored["source_metadata"]["signal_outcome"] == {
@@ -541,6 +542,37 @@ def test_multi_company_roundup_is_context_but_joint_event_stays_signal_candidate
     assert is_signal_analysis_candidate(joint_event) is True
 
 
+def test_analytical_report_review_is_context_but_report_publication_stays_candidate() -> None:
+    review = RssItem(
+        external_id="lkoh-report-review",
+        published_at=datetime(2026, 8, 31, tzinfo=UTC),
+        title=(
+            "ЛУКОЙЛ: без иностранных активов прибыль все еще есть. "
+            "Обзор отчета за 1-е полугодие 2026 по МСФО"
+        ),
+        url="https://example.com/lkoh-report-review",
+        content="Автор разбирает ранее опубликованные показатели компании.",
+        categories=("Компании",),
+    )
+    publication = RssItem(
+        external_id="lkoh-report-publication",
+        published_at=datetime(2026, 8, 31, tzinfo=UTC),
+        title="ЛУКОЙЛ опубликовал финансовые результаты по МСФО за полугодие",
+        url="https://example.com/lkoh-report-publication",
+        content="Чистая прибыль компании выросла на 10%.",
+        categories=("Компании",),
+    )
+
+    assert is_analytical_review(review) is True
+    assert is_market_event_candidate(review) is True
+    assert is_market_signal_candidate(review) is False
+    assert is_signal_analysis_candidate(review) is False
+    assert signal_analysis_exclusion_reason("google_news", review) == "analytical_review"
+    assert is_analytical_review(publication) is False
+    assert is_market_signal_candidate(publication) is True
+    assert is_signal_analysis_candidate(publication) is True
+
+
 def test_analysis_only_source_is_stored_as_context_without_calling_analyzer() -> None:
     analyzer = AsyncMock(side_effect=AssertionError("analysis-only source reached analyzer"))
     repository = MemoryNewsRepository(analyzer=analyzer)
@@ -581,7 +613,7 @@ def test_analysis_only_source_is_stored_as_context_without_calling_analyzer() ->
         "status": "rejected_before_analysis",
         "reason": "analysis_only_source",
         "signal_count": 0,
-        "policy_version": "candidate-gate-0.7.0",
+        "policy_version": "candidate-gate-0.7.1",
     }
     assert signal_analysis_exclusion_reason("telegram_selfinvestor", item) is None
 
@@ -693,7 +725,7 @@ def test_product_noise_records_bounded_reason_without_calling_analyzer() -> None
         "status": "rejected_before_analysis",
         "reason": "product_or_marketing_noise",
         "signal_count": 0,
-        "policy_version": "candidate-gate-0.7.0",
+        "policy_version": "candidate-gate-0.7.1",
     }
 
 
