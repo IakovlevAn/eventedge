@@ -5,7 +5,9 @@ EventEdge — API-first платформа краткосрочных сигна
 Текущий live-контур сочетает новостной сигнал с детерминированными рыночными
 факторами. `GET /v1/assessments` возвращает оценки всего списка наблюдения, а
 `GET /v1/evals` — фактическую реакцию цены, сводную статистику и аналитические разрезы.
-`GET /v1/evals/export` отдаёт outcomes и event-time временные ряды в CSV или JSON.
+`GET /v1/evals/export` отдаёт outcomes и event-time временные ряды в CSV или JSON:
+обычные API-вызовы пагинируются, а `download=true` возвращает полную gzip-выгрузку.
+Каждая комбинация `model_version + config_version` хранится и выбирается отдельно.
 
 - [Понятное описание продукта](EventEdge/README.md)
 - [Технический дизайн](EventEdge/TECHNICAL_DESIGN.md)

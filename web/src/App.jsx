@@ -1619,7 +1619,7 @@ function EvalsScreen() {
   const [payload, setPayload] = useState(null);
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState("");
-  const [selectedModelVersion, setSelectedModelVersion] = useState("");
+  const [selectedEpochKey, setSelectedEpochKey] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1628,7 +1628,11 @@ function EvalsScreen() {
       if (refreshing || document.visibilityState === "hidden") return;
       refreshing = true;
       try {
-        const query = selectedModelVersion ? `?model_version=${encodeURIComponent(selectedModelVersion)}` : "";
+        const [modelVersion, configVersion] = selectedEpochKey.split("::");
+        const params = new URLSearchParams();
+        if (modelVersion) params.set("model_version", modelVersion);
+        if (configVersion) params.set("config_version", configVersion);
+        const query = params.size ? `?${params.toString()}` : "";
         const response = await fetch(apiUrl(`/v1/evals${query}`), { signal: controller.signal });
         if (!response.ok) throw new Error("Evals API временно недоступен.");
         setPayload(await response.json());
@@ -1655,7 +1659,7 @@ function EvalsScreen() {
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [selectedModelVersion]);
+  }, [selectedEpochKey]);
 
   if (status !== "ready") return <DataState error={status === "error" ? error : ""} onRetry={() => window.location.reload()} />;
 
@@ -1679,10 +1683,12 @@ function EvalsScreen() {
   // Reflect the user's choice immediately. The API response can take a few
   // seconds, and preferring the previous snapshot made a valid row click look
   // as though it had done nothing.
-  const activeModelVersion = selectedModelVersion || payload.meta.selected_model_version || CURRENT_SIGNAL_MODEL_VERSION;
+  const activeEpochKey = selectedEpochKey || `${payload.meta.selected_model_version || CURRENT_SIGNAL_MODEL_VERSION}::${payload.meta.selected_config_version || 1}`;
   const orderedModelEpochs = [...modelEpochs].sort((left, right) => {
-    if (left.model_version === activeModelVersion) return -1;
-    if (right.model_version === activeModelVersion) return 1;
+    const leftKey = `${left.model_version}::${left.config_version}`;
+    const rightKey = `${right.model_version}::${right.config_version}`;
+    if (leftKey === activeEpochKey) return -1;
+    if (rightKey === activeEpochKey) return 1;
     return new Date(right.evaluated_at || 0) - new Date(left.evaluated_at || 0);
   });
 
@@ -1692,10 +1698,10 @@ function EvalsScreen() {
         <div><span className="eyebrow"><Activity size={13} /> Проверка реальностью</span><h1>Evals: сигналы в цифрах</h1><p>Только направленные сигналы «вверх» и «вниз» сопоставляются с реальной ценой MOEX. Нейтральные события сохраняются в истории, но не искажают hit rate.</p></div>
         <div className="eval-hero-actions">
           <div className={`eval-live${error ? " is-stale" : ""}`}><i /><span><strong>{error ? "Показываем последний snapshot" : "Snapshot каждые 10 минут"}</strong><small>{payload.meta.generated_at ? `${formatRelative(payload.meta.generated_at)} · ` : "Расчёт новой эпохи ожидается · "}основной горизонт 4 часа</small></span></div>
-          <FilterSelect className="eval-model-filter" label="Эпоха модели" value={activeModelVersion || ""} onChange={setSelectedModelVersion} options={orderedModelEpochs.map((epoch) => ({ value: epoch.model_version, label: `${epoch.model_version} · cfg ${epoch.config_version} · n=${epoch.signals}` }))} />
+          <FilterSelect className="eval-model-filter" label="Эпоха модели" value={activeEpochKey} onChange={setSelectedEpochKey} options={orderedModelEpochs.map((epoch) => ({ value: `${epoch.model_version}::${epoch.config_version}`, label: `${epoch.model_version} · cfg ${epoch.config_version} · n=${epoch.signals}` }))} />
           <div className="eval-exports">
-            <a href={apiUrl("/v1/evals/export?format=csv&dataset=outcomes&model_version=all")} download><Download size={13} /> Все эпохи · outcomes</a>
-            <a href={apiUrl("/v1/evals/export?format=csv&dataset=timeseries&model_version=all")} download><Download size={13} /> Все эпохи · raw</a>
+            <a href={apiUrl("/v1/evals/export?format=csv&dataset=outcomes&model_version=all&download=true")} download><Download size={13} /> Все эпохи · outcomes</a>
+            <a href={apiUrl("/v1/evals/export?format=csv&dataset=timeseries&model_version=all&download=true")} download><Download size={13} /> Все эпохи · raw</a>
           </div>
         </div>
       </section>
@@ -1772,7 +1778,7 @@ function EvalsScreen() {
       <section className="eval-export-note">
         <FileText size={17} />
         <div><strong>Данные по эпохам не затираются</strong><span>UI считает качество на 1–4 часах. В БД и выгрузке хранятся model/config version и сырые 10‑минутные свечи до +3 дней для временных рядов.</span></div>
-        <a href={apiUrl("/v1/evals/export?format=json&dataset=outcomes&model_version=all")} target="_blank" rel="noreferrer">Все эпохи JSON <ArrowUpRight size={12} /></a>
+        <a href={apiUrl("/v1/evals/export?format=json&dataset=outcomes&model_version=all&download=true")} target="_blank" rel="noreferrer">Все эпохи JSON <ArrowUpRight size={12} /></a>
       </section>
 
       <section className="outcomes-card">
@@ -2018,8 +2024,8 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
 
 const apiEndpoints = [
   { id: "assessments", method: "GET", path: "/v1/assessments", title: "News + market layers", description: "Раздельные news_signal, market_context и симметричный market_scenario; legacy combined-поля сохранены только для совместимости.", parameter: { name: "tickers", type: "string", description: "Опциональный список тикеров MOEX через запятую" } },
-  { id: "evals", method: "GET", path: "/v1/evals", title: "Анализ качества сигналов", description: "Короткие 1ч/4ч метрики, Pearson и выбор сохранённой эпохи модели.", parameter: { name: "model_version", type: "string", description: "Версия news-модели; без параметра выбирается текущая эпоха" } },
-  { id: "evals_export", method: "GET", path: "/v1/evals/export?format=csv&dataset=timeseries&model_version=all", title: "Выгрузка Evals", description: "CSV/JSON: все эпохи моделей и сырой event-time ряд свечей до +3 дней.", parameter: { name: "dataset", type: "string", description: "outcomes или timeseries; model_version — версия или all" } },
+  { id: "evals", method: "GET", path: "/v1/evals", title: "Анализ качества сигналов", description: "Короткие 1ч/4ч метрики, Pearson и выбор точной model/config эпохи.", parameter: { name: "model_version, config_version", type: "string, integer", description: "Версия модели и её точная конфигурация; без параметров выбирается текущая эпоха" } },
+  { id: "evals_export", method: "GET", path: "/v1/evals/export?format=csv&dataset=timeseries&model_version=all&download=true", title: "Выгрузка Evals", description: "Пагинированный API или полная gzip-выгрузка всех model/config эпох и сырых свечей.", parameter: { name: "dataset", type: "string", description: "outcomes или timeseries; model_version/config_version фильтруют эпоху, download=true отдаёт всё" } },
   { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Сигналы Signal Engine", description: "Активный view возвращает не более одного канонического сигнала на компанию: строго самое новое решение, включая neutral. Полная хронология доступна отдельно.", parameter: { name: "limit", type: "integer", description: "Количество записей, максимум 100" } },
   { id: "news", method: "GET", path: "/v1/news?limit=20", title: "Лента новостей", description: "Исходные публикации, event-проекция и связанные сигналы.", parameter: { name: "limit", type: "integer", description: "Количество публикаций, максимум 500" } },
   { id: "events", method: "GET", path: "/v1/events?limit=20", title: "Рыночные события", description: "Публикации как события уровня рынок, отрасль или компания.", parameter: { name: "scope", type: "string", description: "market, sector или company" } },

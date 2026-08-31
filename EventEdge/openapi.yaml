@@ -68,6 +68,12 @@ paths:
           schema:
             type: string
             pattern: '^[a-z0-9._-]{3,80}$'
+        - name: config_version
+          in: query
+          description: Exact scoring configuration within the selected model epoch.
+          schema:
+            type: integer
+            minimum: 1
       responses:
         '200':
           description: Outcomes, aggregate metrics, breakdowns and relationships.
@@ -105,6 +111,33 @@ paths:
             type: string
             default: all
             pattern: '^(all|[a-z0-9._-]{3,80})$'
+        - name: config_version
+          in: query
+          description: Optional exact configuration version.
+          schema:
+            type: integer
+            minimum: 1
+        - name: limit
+          in: query
+          description: Page size for API reads. Ignored for a full download.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 2000
+            default: 1000
+        - name: cursor
+          in: query
+          description: Zero-based row offset returned as next_cursor.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: download
+          in: query
+          description: Return the complete gzip-compressed dataset instead of one page.
+          schema:
+            type: boolean
+            default: false
       responses:
         '200':
           description: Downloadable analytical dataset.

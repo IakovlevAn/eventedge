@@ -946,7 +946,7 @@ def event_time_export_rows(
     candles_by_ticker: dict[str, list[dict[str, object]]],
     news_by_id: dict[str, NewsRecord],
     *,
-    max_rows: int = 5000,
+    max_rows: int | None = None,
 ) -> tuple[list[dict[str, object]], bool]:
     rows = []
     for signal in signals:
@@ -1012,6 +1012,6 @@ def event_time_export_rows(
                     "signed_return_pct": _signed_return(signal.direction, raw_return),
                 }
             )
-            if len(rows) >= max_rows:
+            if max_rows is not None and len(rows) >= max_rows:
                 return rows, True
     return rows, False

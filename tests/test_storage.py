@@ -20,12 +20,16 @@ from eventedge.storage import (
     SCHEMA_STATEMENTS,
     SCHEMA_TABLE_NAMES,
     SELECT_ASSESSMENT_SNAPSHOT_QUERY,
+    SELECT_EVALUATION_EPOCHS_QUERY,
+    SELECT_EVALUATION_SIGNALS_QUERY,
     EvaluationEpochRecord,
     MemoryNewsRepository,
     NewsDocument,
     NewsRecord,
     YdbNewsRepository,
+    _backfill_evaluation_observations_from_epochs,
     deduplicate_signals,
+    evaluation_observation_upsert_batches,
     filter_signals,
     migrate_ydb_schema,
     normalize_signal_freshness,
@@ -35,6 +39,80 @@ from eventedge.storage import (
     signal_rejection_reason,
     stable_id,
 )
+
+
+def test_evaluation_signal_query_is_not_bounded_by_public_api_limit() -> None:
+    assert "FROM `signals`" in SELECT_EVALUATION_SIGNALS_QUERY
+    assert "LIMIT" not in SELECT_EVALUATION_SIGNALS_QUERY
+
+
+def test_evaluation_observations_are_batched_into_idempotent_upserts() -> None:
+    observations = [
+        {
+            "model_version": "signal-engine-0.6.1",
+            "config_version": 3,
+            "signal_id": f"sig_{index}",
+            "observation_at": f"2026-08-31T12:{index:02d}:00Z",
+            "close": 100.0 + index,
+        }
+        for index in range(3)
+    ]
+    batches = evaluation_observation_upsert_batches(
+        observations,
+        evaluated_at=datetime(2026, 8, 31, 13, tzinfo=UTC),
+        batch_size=2,
+    )
+
+    assert len(batches) == 2
+    assert all("UPSERT INTO `evaluation_observations`" in query for query, _ in batches)
+    assert len(batches[0][1]) == 12
+    assert len(batches[1][1]) == 6
+
+
+def test_schema_migration_backfills_legacy_epoch_observations() -> None:
+    captured: list[tuple[str, dict[str, object] | None]] = []
+
+    class FakePool:
+        async def execute_with_retries(
+            self,
+            query: str,
+            parameters: dict[str, object] | None = None,
+        ) -> list[SimpleNamespace]:
+            captured.append((query, parameters))
+            if query == SELECT_EVALUATION_EPOCHS_QUERY:
+                return [
+                    SimpleNamespace(
+                        rows=[
+                            SimpleNamespace(
+                                epoch_id="eval_legacy",
+                                model_version="signal-engine-0.6.1",
+                                config_version=2,
+                                evaluated_at=datetime(2026, 8, 31, 12, tzinfo=UTC),
+                                outcomes=[],
+                                observations=[
+                                    {
+                                        "signal_id": "sig_legacy",
+                                        "observation_at": "2026-08-31T11:00:00Z",
+                                        "close": 100.0,
+                                    }
+                                ],
+                                observations_truncated=False,
+                            )
+                        ]
+                    )
+                ]
+            return []
+
+    asyncio.run(
+        _backfill_evaluation_observations_from_epochs(FakePool())  # type: ignore[arg-type]
+    )
+
+    assert len(captured) == 2
+    query, parameters = captured[1]
+    assert "UPSERT INTO `evaluation_observations`" in query
+    assert parameters is not None
+    assert parameters["$model_0"] == "signal-engine-0.6.1"
+    assert parameters["$signal_0"] == "sig_legacy"
 
 
 def test_ydb_signal_query_applies_filters_and_bounded_limit() -> None:
@@ -335,6 +413,36 @@ def test_evaluation_epochs_are_kept_independently_by_model() -> None:
         assert {epoch.model_version for epoch in summaries} == {
             "news-baseline-0.2.0",
             "news-baseline-0.3.0",
+        }
+
+    asyncio.run(scenario())
+
+
+def test_evaluation_observations_are_append_only_and_deduplicated_by_identity() -> None:
+    async def scenario() -> None:
+        repository = MemoryNewsRepository()
+        evaluated_at = datetime(2026, 8, 31, 12, tzinfo=UTC)
+        original = {
+            "model_version": "signal-engine-0.6.1",
+            "config_version": 3,
+            "signal_id": "sig_history",
+            "observation_at": "2026-08-31T11:00:00Z",
+            "close": 100.0,
+        }
+        updated = {**original, "close": 101.0}
+
+        await repository.upsert_evaluation_observations(
+            [original],
+            evaluated_at=evaluated_at,
+        )
+        await repository.upsert_evaluation_observations(
+            [updated],
+            evaluated_at=evaluated_at,
+        )
+
+        assert await repository.list_evaluation_observations() == [updated]
+        assert await repository.count_evaluation_observations() == {
+            ("signal-engine-0.6.1", 3): 1
         }
 
     asyncio.run(scenario())
@@ -917,7 +1025,11 @@ def test_ydb_schema_migration_retries_rate_limit_and_closes_runtime(
         )
     )
 
-    assert executed == [SCHEMA_STATEMENTS[0], *SCHEMA_STATEMENTS]
+    assert executed == [
+        SCHEMA_STATEMENTS[0],
+        *SCHEMA_STATEMENTS,
+        SELECT_EVALUATION_EPOCHS_QUERY,
+    ]
     assert delays == [1.0]
     assert events == [
         "driver.init",
