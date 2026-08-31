@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from eventedge.configs.scoring import load_scoring_config
 
 CURRENT_NEWS_MODEL_VERSION = "signal-engine-0.6.1"
-CURRENT_SIGNAL_CONFIG_VERSION = 3
+CURRENT_SIGNAL_CONFIG_VERSION = 4
 DOWN_SCORE_THRESHOLD = -30.0
 MINIMUM_DOWN_CONFIDENCE = 0.80
 
@@ -346,12 +346,29 @@ MONEY_PATTERN = re.compile(
 SENTENCE_PATTERN = re.compile(r"(?<=[.!?])\s+")
 CYRILLIC_COMPANY_ALIAS_PATTERN = re.compile(r"^[а-яё]{5,}$")
 RUSSIAN_CASE_SUFFIXES = ("а", "у", "ом", "е", "ой", "ы", "и")
+DIRECT_TITLE_RELEVANCE = 0.96
+CONTEXTUAL_TITLE_RELEVANCE = 0.84
+BODY_RELEVANCE = 0.78
+ATTRIBUTION_VERB_PATTERN = (
+    r"(?:оценил|назвал|спрогнозировал|допустил|объяснил|рассказал)\w*"
+)
+AFFILIATION_ROLE_PATTERN = (
+    r"(?:продавц|клиент|поставщик|партн[её]р|сотрудник|акционер)\w*"
+)
+NON_ISSUER_ENTITY_PATTERNS: dict[str, tuple[str, ...]] = {
+    # Ozon Pharmaceuticals is a separate, unlisted drug maker. A bare OZON
+    # alias inside that longer legal name must not target the marketplace.
+    "OZON": (
+        r"(?<!\w)озон(?:а|у|ом|е)?\s+фармацевтик\w*(?!\w)",
+        r"(?<!\w)ozon\s+pharm\w*(?!\w)",
+    ),
+}
 
 
 class RuleBasedNewsExtractor:
     """Cheap deterministic baseline used before connecting the LLM extractor."""
 
-    version = "rules-0.1.0"
+    version = "rules-0.2.0"
 
     def __init__(self, aliases: dict[str, tuple[str, ...]] | None = None) -> None:
         self._aliases = aliases or DEFAULT_MOEX_ALIASES
@@ -390,26 +407,89 @@ class RuleBasedNewsExtractor:
         )
 
     def _instruments(self, title: str, body: str) -> list[InstrumentMention]:
+        title_matches = {
+            ticker: alias
+            for ticker, aliases in self._aliases.items()
+            if (alias := self._matching_alias(title, ticker, aliases)) is not None
+        }
+        title_tickers = frozenset(title_matches)
         matches: list[InstrumentMention] = []
         for ticker, aliases in self._aliases.items():
-            for alias in aliases:
-                normalized_alias = alias.casefold()
-                search_title = self._without_child_company(title, ticker, normalized_alias)
-                search_body = self._without_child_company(body, ticker, normalized_alias)
-                if not self._contains(search_title, normalized_alias) and not self._contains(
-                    search_body, normalized_alias
-                ):
-                    continue
-                relevance = 0.96 if self._contains(search_title, normalized_alias) else 0.78
+            title_alias = title_matches.get(ticker)
+            if title_alias is not None:
+                relevance = (
+                    CONTEXTUAL_TITLE_RELEVANCE
+                    if self._is_contextual_title_mention(
+                        title,
+                        ticker=ticker,
+                        alias=title_alias,
+                        title_tickers=title_tickers,
+                    )
+                    else DIRECT_TITLE_RELEVANCE
+                )
                 matches.append(
                     InstrumentMention(
                         ticker=ticker,
                         relevance=relevance,
-                        matched_alias=alias,
+                        matched_alias=title_alias,
                     )
                 )
-                break
+                continue
+            body_alias = self._matching_alias(body, ticker, aliases)
+            if body_alias is not None:
+                matches.append(
+                    InstrumentMention(
+                        ticker=ticker,
+                        relevance=BODY_RELEVANCE,
+                        matched_alias=body_alias,
+                    )
+                )
         return matches
+
+    def _matching_alias(
+        self,
+        text: str,
+        ticker: str,
+        aliases: tuple[str, ...],
+    ) -> str | None:
+        for alias in aliases:
+            normalized_alias = alias.casefold()
+            search_text = self._without_conflicting_entity(
+                text,
+                ticker=ticker,
+                alias=normalized_alias,
+            )
+            if self._contains(search_text, normalized_alias):
+                return alias
+        return None
+
+    @classmethod
+    def _without_conflicting_entity(cls, text: str, *, ticker: str, alias: str) -> str:
+        result = cls._without_child_company(text, ticker, alias)
+        for pattern in NON_ISSUER_ENTITY_PATTERNS.get(ticker, ()):
+            result = re.sub(pattern, " ", result)
+        return result
+
+    @classmethod
+    def _is_contextual_title_mention(
+        cls,
+        title: str,
+        *,
+        ticker: str,
+        alias: str,
+        title_tickers: frozenset[str],
+    ) -> bool:
+        """Keep quoted experts and ecosystem affiliations out of direct targets."""
+        if not title_tickers - {ticker}:
+            return False
+        token = cls._alias_token_pattern(alias.casefold())
+        mention = rf"(?<!\w){token}(?!\w)"
+        attribution = rf"(?:^|[^\w])(?:в\s+)?{mention}\s+{ATTRIBUTION_VERB_PATTERN}"
+        affiliation = (
+            rf"(?:^|[^\w]){AFFILIATION_ROLE_PATTERN}\s+"
+            rf"(?:(?:маркетплейс|сервис|компани)\w*\s+)?[«\"]?{mention}[»\"]?"
+        )
+        return bool(re.search(attribution, title) or re.search(affiliation, title))
 
     @staticmethod
     def _without_child_company(text: str, ticker: str, alias: str) -> str:
@@ -424,12 +504,17 @@ class RuleBasedNewsExtractor:
 
     @staticmethod
     def _contains(text: str, alias: str) -> bool:
+        token = RuleBasedNewsExtractor._alias_token_pattern(alias)
+        return bool(re.search(rf"(?<!\w){token}(?!\w)", text))
+
+    @staticmethod
+    def _alias_token_pattern(alias: str) -> str:
         suffixes = (
             rf"(?:{'|'.join(RUSSIAN_CASE_SUFFIXES)})?"
             if CYRILLIC_COMPANY_ALIAS_PATTERN.fullmatch(alias)
             else ""
         )
-        return bool(re.search(rf"(?<!\w){re.escape(alias)}{suffixes}(?!\w)", text))
+        return rf"{re.escape(alias)}{suffixes}"
 
     @staticmethod
     def _event_type(text: str) -> tuple[EventType, float]:

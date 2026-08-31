@@ -41,8 +41,8 @@ def test_positive_company_results_create_algorithmic_up_signal() -> None:
     assert signals[0].score == 50.5
     assert signals[0].confidence == pytest.approx(0.9063)
     assert signals[0].model_version == "signal-engine-0.6.1"
-    assert signals[0].config_version == 3
-    assert signals[0].extractor_version == "rules-0.1.0"
+    assert signals[0].config_version == 4
+    assert signals[0].extractor_version == "rules-0.2.0"
 
 
 def test_negative_restrictions_create_down_signal() -> None:
@@ -84,7 +84,7 @@ def test_down_signal_requires_conservative_score_and_confidence() -> None:
         config=BaselineScoringConfig(negative_threshold=-60),
     )[0]
 
-    assert BaselineScoringConfig().config_version == 3
+    assert BaselineScoringConfig().config_version == 4
     assert BaselineScoringConfig().negative_threshold == -30
     assert BaselineScoringConfig().minimum_down_confidence == 0.80
     assert low_confidence.direction is SignalDirection.NEUTRAL
@@ -180,6 +180,77 @@ def test_gazprom_and_gazprom_neft_can_both_match() -> None:
     )
 
     assert {item.ticker for item in features.instruments} == {"GAZP", "SIBN"}
+
+
+def test_ozon_pharmaceutical_company_is_not_ozon_marketplace() -> None:
+    features = RuleBasedNewsExtractor().extract(
+        NewsAnalysisInput(
+            source_id="telegram_selfinvestor",
+            title=(
+                "Дивиденды рекомендовали НОВАТЭК, Норникель, "
+                "Озон Фармацевтика и Черкизово"
+            ),
+            content="Советы директоров рекомендовали выплаты акционерам.",
+        )
+    )
+
+    assert {item.ticker for item in features.instruments} == {"NVTK", "GMKN"}
+
+
+def test_quoted_company_is_context_when_it_evaluates_another_issuer() -> None:
+    features = RuleBasedNewsExtractor().extract(
+        NewsAnalysisInput(
+            source_id="rbc",
+            title="В ВТБ оценили негативный эффект для Wildberries и Ozon от атак БПЛА",
+            content="Аналитики считают, что выручка Ozon может снизиться на 20%.",
+        )
+    )
+    relevance = {item.ticker: item.relevance for item in features.instruments}
+
+    assert relevance["OZON"] >= 0.9
+    assert relevance["VTBR"] < 0.9
+
+
+def test_company_remains_direct_when_it_evaluates_its_own_results() -> None:
+    features = RuleBasedNewsExtractor().extract(
+        NewsAnalysisInput(
+            source_id="interfax",
+            title="В ВТБ оценили влияние ставки на прибыль банка",
+            content="ВТБ ожидает, что чистая прибыль увеличится на 10%.",
+        )
+    )
+
+    assert [(item.ticker, item.relevance) for item in features.instruments] == [
+        ("VTBR", 0.96)
+    ]
+
+
+def test_platform_is_context_when_another_issuer_acts_for_its_sellers() -> None:
+    features = RuleBasedNewsExtractor().extract(
+        NewsAnalysisInput(
+            source_id="google_news",
+            title="ВТБ окажет поддержку продавцам Ozon, пострадавшим в результате атак",
+            content="Банк увеличил объём программы поддержки на 20%.",
+        )
+    )
+    relevance = {item.ticker: item.relevance for item in features.instruments}
+
+    assert relevance["VTBR"] >= 0.9
+    assert relevance["OZON"] < 0.9
+
+
+def test_direct_ozon_event_remains_a_direct_company_mention() -> None:
+    features = RuleBasedNewsExtractor().extract(
+        NewsAnalysisInput(
+            source_id="interfax",
+            title="Ozon увеличил выручку и улучшил прогноз EBITDA",
+            content="Компания повысила прогноз после публикации отчётности.",
+        )
+    )
+
+    assert [(item.ticker, item.relevance) for item in features.instruments] == [
+        ("OZON", 0.96)
+    ]
 
 
 def test_feature_contract_cannot_accept_llm_direction_or_action() -> None:
