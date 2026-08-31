@@ -44,7 +44,7 @@ FAST_SOURCE_DEADLINE_SECONDS = 15.0
 DISCOVERY_SOURCE_DEADLINE_SECONDS = 12.0
 DISCOVERY_REGISTRY_DEADLINE_SECONDS = 3.0
 DISCOVERY_BUCKET_COUNT = 5
-CANDIDATE_POLICY_VERSION = "candidate-gate-0.7.0"
+CANDIDATE_POLICY_VERSION = "candidate-gate-0.7.1"
 CONTEXT_ONLY_SOURCE_IDS = frozenset(
     {
         "telegram_bitkogan",
@@ -898,6 +898,16 @@ MULTI_COMPANY_ROUNDUP_TITLE_MARKERS = (
     "подборка",
     "сводка",
 )
+ANALYTICAL_REVIEW_TITLE_MARKERS = (
+    "обзор отчета",
+    "обзор отчёта",
+    "обзор отчетности",
+    "обзор отчётности",
+    "разбор отчета",
+    "разбор отчёта",
+    "разбор отчетности",
+    "разбор отчётности",
+)
 MULTI_COMPANY_COUNT_PATTERN = re.compile(
     r"\bсразу\s+(?:\d+|две|три|четыре|пять|шесть|семь|восемь|девять|десять)"
     r"\s+компани",
@@ -929,12 +939,20 @@ def is_multi_company_roundup(item: RssItem) -> bool:
     return len(direct_tickers) >= 2
 
 
+def is_analytical_review(item: RssItem) -> bool:
+    """Separate interpretation of an old report from the report publication."""
+    normalized_title = item.title.casefold()
+    return any(marker in normalized_title for marker in ANALYTICAL_REVIEW_TITLE_MARKERS)
+
+
 def signal_analysis_exclusion_reason(source_id: str, item: RssItem) -> str | None:
     """Return a stable reason when an item is context, not causal evidence."""
     if source_id in CONTEXT_ONLY_SOURCE_IDS:
         return "analysis_only_source"
     if is_multi_company_roundup(item):
         return "multi_company_roundup"
+    if is_analytical_review(item):
+        return "analytical_review"
     return None
 
 
@@ -949,6 +967,8 @@ def is_market_signal_candidate(item: RssItem) -> bool:
     if is_market_noise(item):
         return False
     if is_multi_company_roundup(item):
+        return False
+    if is_analytical_review(item):
         return False
     features = RuleBasedNewsExtractor().extract(
         NewsAnalysisInput(
@@ -1047,6 +1067,8 @@ def is_semantic_analysis_candidate(item: RssItem) -> bool:
 def is_signal_analysis_candidate(item: RssItem) -> bool:
     """Route only targetable company or material context events to the LLM."""
     if is_multi_company_roundup(item):
+        return False
+    if is_analytical_review(item):
         return False
     if not is_semantic_analysis_candidate(item):
         return False

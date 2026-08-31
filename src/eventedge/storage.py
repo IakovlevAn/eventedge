@@ -32,8 +32,9 @@ CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 LOGGER = logging.getLogger(__name__)
 SIGNAL_REJECTION_REASONS = frozenset(
     {
-        "below_score_threshold",
         "analysis_only_source",
+        "analytical_review",
+        "below_score_threshold",
         "event_other",
         "low_materiality",
         "multi_company_roundup",
