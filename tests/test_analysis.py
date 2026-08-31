@@ -41,7 +41,7 @@ def test_positive_company_results_create_algorithmic_up_signal() -> None:
     assert signals[0].score == 50.5
     assert signals[0].confidence == pytest.approx(0.9063)
     assert signals[0].model_version == "signal-engine-0.6.1"
-    assert signals[0].config_version == 4
+    assert signals[0].config_version == 5
     assert signals[0].extractor_version == "rules-0.2.0"
 
 
@@ -84,7 +84,7 @@ def test_down_signal_requires_conservative_score_and_confidence() -> None:
         config=BaselineScoringConfig(negative_threshold=-60),
     )[0]
 
-    assert BaselineScoringConfig().config_version == 4
+    assert BaselineScoringConfig().config_version == 5
     assert BaselineScoringConfig().negative_threshold == -30
     assert BaselineScoringConfig().minimum_down_confidence == 0.80
     assert low_confidence.direction is SignalDirection.NEUTRAL

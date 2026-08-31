@@ -44,6 +44,17 @@ FAST_SOURCE_DEADLINE_SECONDS = 15.0
 DISCOVERY_SOURCE_DEADLINE_SECONDS = 12.0
 DISCOVERY_REGISTRY_DEADLINE_SECONDS = 3.0
 DISCOVERY_BUCKET_COUNT = 5
+CANDIDATE_POLICY_VERSION = "candidate-gate-0.7.0"
+CONTEXT_ONLY_SOURCE_IDS = frozenset(
+    {
+        "telegram_bitkogan",
+        "telegram_finamalert",
+        "telegram_mozgovikresearch",
+        "telegram_spydell_finance",
+        "telegram_tb_invest_official",
+        "telegram_truevalue",
+    }
+)
 PRIORITY_FEED_FETCH_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="eventedge-priority-feed",
@@ -315,18 +326,24 @@ async def collect_news_items(
 
     for item in items:
         product_marketing_noise = is_obvious_company_product_or_marketing_noise(item)
+        analysis_exclusion_reason = signal_analysis_exclusion_reason(source_id, item)
         event_candidate = item_filter(item) if item_filter is not None else True
         if event_candidate:
             matched += 1
         else:
             filtered += 1
-        direct_signal_candidate = event_candidate and not product_marketing_noise and (
-            signal_filter(item) if signal_filter is not None else True
+        direct_signal_candidate = (
+            event_candidate
+            and not product_marketing_noise
+            and analysis_exclusion_reason is None
+            and (signal_filter(item) if signal_filter is not None else True)
         )
         if direct_signal_candidate:
             signal_candidates += 1
-        analysis_candidate = not product_marketing_noise and (
-            direct_signal_candidate or is_signal_analysis_candidate(item)
+        analysis_candidate = (
+            not product_marketing_noise
+            and analysis_exclusion_reason is None
+            and (direct_signal_candidate or is_signal_analysis_candidate(item))
         )
         if analysis_candidate:
             analysis_candidates += 1
@@ -361,6 +378,8 @@ async def collect_news_items(
         classification_status = (
             "noise_filtered"
             if product_marketing_noise
+            else "context_only"
+            if analysis_exclusion_reason is not None
             else "signal_candidate"
             if direct_signal_candidate
             else "semantic_candidate"
@@ -372,6 +391,8 @@ async def collect_news_items(
         classification_reason = (
             "obvious_company_product_or_marketing_noise"
             if product_marketing_noise
+            else analysis_exclusion_reason
+            if analysis_exclusion_reason is not None
             else "eligible_for_direct_signal_analysis"
             if direct_signal_candidate
             else "eligible_for_semantic_signal_analysis"
@@ -387,7 +408,7 @@ async def collect_news_items(
             ),
             "classification_status": classification_status,
             "classification_reason": classification_reason,
-            "classification_version": "candidate-gate-0.6.0",
+            "classification_version": CANDIDATE_POLICY_VERSION,
             "event_candidate": event_candidate,
             "analysis_candidate": analysis_candidate,
             **(
@@ -396,10 +417,19 @@ async def collect_news_items(
                         "status": "rejected_before_analysis",
                         "reason": "product_or_marketing_noise",
                         "signal_count": 0,
-                        "policy_version": "candidate-gate-0.6.0",
+                        "policy_version": CANDIDATE_POLICY_VERSION,
                     }
                 }
                 if product_marketing_noise
+                else {
+                    "signal_outcome": {
+                        "status": "rejected_before_analysis",
+                        "reason": analysis_exclusion_reason,
+                        "signal_count": 0,
+                        "policy_version": CANDIDATE_POLICY_VERSION,
+                    }
+                }
+                if analysis_exclusion_reason is not None
                 else {}
             ),
         }
@@ -863,6 +893,50 @@ MARKET_EVENT_MARKERS = (
     "рейтинг",
 )
 
+MULTI_COMPANY_ROUNDUP_TITLE_MARKERS = (
+    "дайджест",
+    "подборка",
+    "сводка",
+)
+MULTI_COMPANY_COUNT_PATTERN = re.compile(
+    r"\bсразу\s+(?:\d+|две|три|четыре|пять|шесть|семь|восемь|девять|десять)"
+    r"\s+компани",
+    re.IGNORECASE,
+)
+
+
+def is_multi_company_roundup(item: RssItem) -> bool:
+    """Identify aggregate headlines, without blocking a joint issuer event."""
+    normalized_title = item.title.casefold()
+    if not (
+        any(marker in normalized_title for marker in MULTI_COMPANY_ROUNDUP_TITLE_MARKERS)
+        or MULTI_COMPANY_COUNT_PATTERN.search(item.title)
+    ):
+        return False
+    features = RuleBasedNewsExtractor().extract(
+        NewsAnalysisInput(
+            source_id="market_news",
+            title=item.title,
+            content=item.content,
+            language="ru",
+        )
+    )
+    direct_tickers = {
+        instrument.ticker
+        for instrument in features.instruments
+        if instrument.relevance >= 0.9 and instrument.ticker != "MOEX"
+    }
+    return len(direct_tickers) >= 2
+
+
+def signal_analysis_exclusion_reason(source_id: str, item: RssItem) -> str | None:
+    """Return a stable reason when an item is context, not causal evidence."""
+    if source_id in CONTEXT_ONLY_SOURCE_IDS:
+        return "analysis_only_source"
+    if is_multi_company_roundup(item):
+        return "multi_company_roundup"
+    return None
+
 
 def is_market_signal_candidate(item: RssItem) -> bool:
     """High-recall gate for direct company events before semantic analysis.
@@ -873,6 +947,8 @@ def is_market_signal_candidate(item: RssItem) -> bool:
     if not is_moex_equity_title(item.title):
         return False
     if is_market_noise(item):
+        return False
+    if is_multi_company_roundup(item):
         return False
     features = RuleBasedNewsExtractor().extract(
         NewsAnalysisInput(
@@ -970,6 +1046,8 @@ def is_semantic_analysis_candidate(item: RssItem) -> bool:
 
 def is_signal_analysis_candidate(item: RssItem) -> bool:
     """Route only targetable company or material context events to the LLM."""
+    if is_multi_company_roundup(item):
+        return False
     if not is_semantic_analysis_candidate(item):
         return False
     if is_market_signal_candidate(item):

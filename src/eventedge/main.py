@@ -35,6 +35,7 @@ from eventedge.analysis import (
     RuleBasedNewsExtractor,
 )
 from eventedge.collectors import (
+    CANDIDATE_POLICY_VERSION,
     RssItem,
     collect_cbr_press,
     collect_discovery_news,
@@ -45,6 +46,7 @@ from eventedge.collectors import (
     is_market_signal_candidate,
     is_moex_equity_title,
     is_signal_analysis_candidate,
+    signal_analysis_exclusion_reason,
     signal_analysis_priority,
 )
 from eventedge.configs.collection import load_collection_config
@@ -400,6 +402,26 @@ def hidden_news_ids(items: list[NewsRecord]) -> set[str]:
         if item.source_id in PUBLIC_HIDDEN_SOURCE_IDS
         or (item.source_id == "moex_news" and not is_moex_equity_title(item.title))
     }
+
+
+def signal_policy_excluded_news_ids(items: list[NewsRecord]) -> set[str]:
+    """Hide currently invalid evidence from live signals without rewriting history."""
+    excluded: set[str] = set()
+    for item in items:
+        categories = item.source_metadata.get("categories", [])
+        candidate = RssItem(
+            external_id=item.external_id,
+            published_at=item.published_at,
+            title=item.title,
+            url=item.url,
+            content=item.content,
+            categories=tuple(str(value) for value in categories)
+            if isinstance(categories, list | tuple)
+            else (),
+        )
+        if signal_analysis_exclusion_reason(item.source_id, candidate) is not None:
+            excluded.add(item.id)
+    return excluded
 
 
 async def refresh_content_snapshot(
@@ -813,10 +835,13 @@ def build_news_response_payload(
         stored_news = [item for item in stored_news if item.source_id == source_id]
     visible_news = public_news(stored_news)
     news_by_id = {item.id: item for item in stored_news}
+    policy_excluded_ids = signal_policy_excluded_news_ids(stored_news)
     signals = normalize_signal_freshness(stored_signals, news_by_id)
     signals_by_news: dict[str, list[dict[str, object]]] = {}
     for signal in latest_model_signal_per_news(deduplicate_signals(signals)):
         if signal.model_version != CURRENT_NEWS_MODEL_VERSION:
+            continue
+        if signal.news_id in policy_excluded_ids:
             continue
         if not is_publishable_news_signal(
             ticker=signal.ticker,
@@ -1059,6 +1084,7 @@ def build_market_event_records(
 ) -> list[dict[str, object]]:
     """Build event groups from one immutable content snapshot."""
     news = public_news(stored_news)
+    policy_excluded_ids = signal_policy_excluded_news_ids(news)
     signals = latest_model_signal_per_news(
         deduplicate_signals(
             normalize_signal_freshness(stored_signals, {item.id: item for item in news})
@@ -1067,6 +1093,8 @@ def build_market_event_records(
     signals_by_news: dict[str, list[dict[str, object]]] = {}
     for signal in signals:
         if signal.model_version != CURRENT_NEWS_MODEL_VERSION:
+            continue
+        if signal.news_id in policy_excluded_ids:
             continue
         if not is_publishable_news_signal(
             ticker=signal.ticker,
@@ -1829,6 +1857,8 @@ async def reprocess_signal_candidates_batch(
             if isinstance(categories, list | tuple)
             else (),
         )
+        if signal_analysis_exclusion_reason(item.source_id, candidate) is not None:
+            continue
         if is_signal_analysis_candidate(candidate):
             detected_tickers = tuple(
                 instrument.ticker
@@ -1983,7 +2013,7 @@ async def reprocess_signal_candidates_batch(
                         else "eligible_for_semantic_signal_analysis"
                     )
                 ),
-                "classification_version": "candidate-gate-0.6.0",
+                "classification_version": CANDIDATE_POLICY_VERSION,
                 "analysis_priority": priority,
                 "reprocess_version": CURRENT_NEWS_MODEL_VERSION,
                 "tickers": [
@@ -2431,7 +2461,7 @@ def active_signals_from_content(
     signals: list[SignalRecord],
 ) -> dict[str, SignalRecord]:
     """Project current instrument signals from the shared content snapshot."""
-    hidden_ids = hidden_news_ids(news)
+    excluded_ids = hidden_news_ids(news) | signal_policy_excluded_news_ids(news)
     news_by_id = {item.id: item for item in news}
     active = filter_signals(
         normalize_signal_freshness(signals, news_by_id),
@@ -2445,7 +2475,7 @@ def active_signals_from_content(
     for signal in deduplicate_signals(active):
         if (
             signal.model_version == CURRENT_NEWS_MODEL_VERSION
-            and signal.news_id not in hidden_ids
+            and signal.news_id not in excluded_ids
             and is_publishable_news_signal(
                 ticker=signal.ticker,
                 direction=signal.direction,

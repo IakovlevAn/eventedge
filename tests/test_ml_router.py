@@ -11,7 +11,11 @@ import pytest
 from pydantic import ValidationError
 
 from eventedge.llm import RuleBasedNewsAnalyzer
-from eventedge.main import reprocess_signal_candidates_batch
+from eventedge.main import (
+    active_signals_from_content,
+    build_news_response_payload,
+    reprocess_signal_candidates_batch,
+)
 from eventedge.ml_router import (
     MlRouterArtifact,
     MlRouterMode,
@@ -283,6 +287,73 @@ def test_reprocess_prioritizes_material_event_without_changing_batch_limit() -> 
     assert analyzer.extract.await_args.args[0].title == "Лукойл рекомендовал дивиденды"
     assert "reprocess_version" not in standard_metadata
     assert "signal_outcome" not in standard_metadata
+
+
+def test_reprocess_excludes_analysis_only_sources_and_multi_company_roundups() -> None:
+    analyzer = AsyncMock(side_effect=AssertionError("excluded candidate reached analyzer"))
+    repository = MemoryNewsRepository(analyzer=analyzer)
+    analysis = replace(
+        candidate_document(),
+        source_id="telegram_mozgovikresearch",
+        external_id="analysis-only-report",
+        title="ФосАгро 1П26: почему EBITDA упала в 2 раза?",
+        content="Частный аналитический разбор отчетности.",
+        payload_hash="analysis-only-report",
+    )
+    roundup = replace(
+        candidate_document(),
+        external_id="multi-company-roundup",
+        title=(
+            "На этой неделе дивиденды рекомендовали сразу пять компаний — "
+            "НОВАТЭК, Норникель и Лукойл"
+        ),
+        content="Сводка решений советов директоров за неделю.",
+        payload_hash="multi-company-roundup",
+    )
+
+    async def scenario() -> dict[str, object]:
+        await repository.ingest("analysis-original", analysis, generate_signals=False)
+        await repository.ingest("roundup-original", roundup, generate_signals=False)
+        return await reprocess_signal_candidates_batch(repository, limit=10, dry_run=True)
+
+    result = asyncio.run(scenario())
+
+    analyzer.assert_not_awaited()
+    assert result["data"] == []
+    assert result["meta"]["selected"] == 0
+    assert result["meta"]["estimated_llm_calls"] == 0
+
+
+def test_live_views_hide_legacy_signal_from_newly_excluded_evidence() -> None:
+    repository = MemoryNewsRepository()
+    analysis = replace(
+        candidate_document(),
+        source_id="telegram_finamalert",
+        external_id="legacy-analysis-signal",
+        source_metadata={"categories": ["Компании"], "event_candidate": True},
+        payload_hash="legacy-analysis-signal",
+    )
+
+    async def scenario() -> tuple[list[object], list[object]]:
+        await repository.ingest("legacy-analysis", analysis, generate_signals=True)
+        return (
+            await repository.list_news(source_id=None, limit=10),
+            await repository.list_signals(
+                ticker=None,
+                directions=None,
+                status=None,
+                min_confidence=None,
+                limit=10,
+            ),
+        )
+
+    news, signals = asyncio.run(scenario())
+
+    assert len(signals) == 1
+    assert active_signals_from_content(news, signals) == {}
+    payload = build_news_response_payload(news, signals, source_id=None, scope=None, limit=10)
+    assert len(payload["data"]) == 1
+    assert payload["data"][0]["related_signals"] == []
 
 
 def test_shadow_records_decision_but_still_calls_downstream_analyzer() -> None:
