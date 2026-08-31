@@ -153,6 +153,35 @@ paths:
   /v1/evals/export:
     get:
       operationId: exportEvals
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+        - name: dataset
+          in: query
+          schema:
+            type: string
+        - name: model_version
+          in: query
+          schema:
+            type: string
+        - name: config_version
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: cursor
+          in: query
+          schema:
+            type: integer
+        - name: download
+          in: query
+          schema:
+            type: boolean
       responses:
         '200':
           description: CSV or JSON dataset for external analysis.
@@ -163,6 +192,15 @@ paths:
   /v1/evals:
     get:
       operationId: listEvals
+      parameters:
+        - name: model_version
+          in: query
+          schema:
+            type: string
+        - name: config_version
+          in: query
+          schema:
+            type: integer
       responses:
         '200':
           description: Signal outcomes, aggregate metrics and analytical slices.

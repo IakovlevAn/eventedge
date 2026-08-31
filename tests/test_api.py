@@ -2252,6 +2252,105 @@ def test_evals_endpoint_exposes_analysis_and_downloads() -> None:
     assert fake_market.calls == 0
 
 
+def test_evals_export_paginates_filters_config_and_compresses_full_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = MemoryNewsRepository()
+    evaluated_at = datetime(2026, 8, 31, 12, tzinfo=UTC)
+
+    def outcome(signal_id: str, config_version: int) -> dict[str, object]:
+        return {
+            "signal_id": signal_id,
+            "ticker": "SBER",
+            "direction": "up",
+            "model_version": "signal-engine-0.6.1",
+            "config_version": config_version,
+        }
+
+    for config_version, signal_ids in ((1, ("sig_cfg1_a", "sig_cfg1_b")), (2, ("sig_cfg2",))):
+        asyncio.run(
+            repository.upsert_evaluation_epoch(
+                EvaluationEpochRecord(
+                    epoch_id=f"eval_cfg_{config_version}",
+                    model_version="signal-engine-0.6.1",
+                    config_version=config_version,
+                    evaluated_at=evaluated_at,
+                    outcomes=tuple(outcome(signal_id, config_version) for signal_id in signal_ids),
+                    observations=(),
+                )
+            )
+        )
+        asyncio.run(
+            repository.upsert_evaluation_observations(
+                [
+                    {
+                        "signal_id": signal_id,
+                        "ticker": "SBER",
+                        "signal_as_of": "2026-08-31T10:00:00Z",
+                        "observation_at": f"2026-08-31T1{index}:00:00Z",
+                        "model_version": "signal-engine-0.6.1",
+                        "config_version": config_version,
+                    }
+                    for index, signal_id in enumerate(signal_ids)
+                ],
+                evaluated_at=evaluated_at,
+            )
+        )
+
+    monkeypatch.setattr(app.state, "news_repository", repository)
+    first = client.get(
+        "/v1/evals/export",
+        params={
+            "format": "json",
+            "dataset": "timeseries",
+            "model_version": "signal-engine-0.6.1",
+            "config_version": 1,
+            "limit": 1,
+        },
+    )
+    second = client.get(
+        "/v1/evals/export",
+        params={
+            "format": "json",
+            "dataset": "timeseries",
+            "model_version": "signal-engine-0.6.1",
+            "config_version": 1,
+            "limit": 1,
+            "cursor": 1,
+        },
+    )
+    full = client.get(
+        "/v1/evals/export",
+        params={
+            "format": "json",
+            "dataset": "timeseries",
+            "model_version": "all",
+            "download": "true",
+        },
+    )
+
+    assert first.status_code == 200
+    assert first.json()["meta"] == {
+        "dataset": "timeseries",
+        "rows": 1,
+        "total_rows": 2,
+        "truncated": False,
+        "generated_at": first.json()["meta"]["generated_at"],
+        "model_version": "signal-engine-0.6.1",
+        "config_version": 1,
+        "has_more": True,
+        "next_cursor": 1,
+        "limit": 1,
+    }
+    assert second.json()["meta"]["has_more"] is False
+    assert second.json()["meta"]["next_cursor"] is None
+    assert full.status_code == 200
+    assert full.headers["content-encoding"] == "gzip"
+    assert full.json()["meta"]["rows"] == 3
+    assert full.json()["meta"]["total_rows"] == 3
+    assert {row["config_version"] for row in full.json()["data"]} == {1, 2}
+
+
 def test_complete_eval_outcome_is_reused_without_moex_request() -> None:
     async def scenario() -> None:
         repository = MemoryNewsRepository()
@@ -2323,7 +2422,247 @@ def test_complete_eval_outcome_is_reused_without_moex_request() -> None:
         assert outcomes == [cached_outcome]
         assert candles == {}
         current = next(epoch for epoch in epochs if epoch.model_version == signal.model_version)
-        assert current.observations == (cached_observation,)
+        assert current.observations == ()
+        archived = await repository.list_evaluation_observations()
+        assert [
+            {
+                "signal_id": row["signal_id"],
+                "observation_at": row["observation_at"],
+            }
+            for row in archived
+        ] == [
+            {
+                "signal_id": cached_observation["signal_id"],
+                "observation_at": cached_observation["observation_at"],
+            }
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_eval_refresh_never_drops_previous_outcomes_for_the_same_config() -> None:
+    async def scenario() -> None:
+        repository = MemoryNewsRepository()
+        timestamp = datetime(2026, 8, 30, 10, tzinfo=UTC)
+        old_news = NewsRecord(
+            id="news_eval_old",
+            source_id="interfax",
+            external_id="eval-old",
+            published_at=timestamp,
+            received_at=timestamp,
+            title="Сбербанк опубликовал отчётность",
+            url="https://example.com/eval-old",
+            content="Сбербанк опубликовал отчётность.",
+            language="ru",
+            source_metadata={"classification_status": "hidden_after_publication"},
+            created_at=timestamp,
+        )
+        new_news = replace(
+            old_news,
+            id="news_eval_new",
+            external_id="eval-new",
+            title="Газпром обновил прогноз",
+            url="https://example.com/eval-new",
+            published_at=timestamp + timedelta(hours=1),
+            received_at=timestamp + timedelta(hours=1),
+            created_at=timestamp + timedelta(hours=1),
+        )
+
+        def signal(signal_id: str, news: NewsRecord, ticker: str) -> SignalRecord:
+            return SignalRecord(
+                id=signal_id,
+                news_id=news.id,
+                ticker=ticker,
+                as_of=news.received_at,
+                data_cutoff_at=news.received_at,
+                status="expired",
+                direction="up",
+                action="consider_buy",
+                horizon_value=3,
+                horizon_unit="calendar_days",
+                score=40.0,
+                strength=0.4,
+                confidence=0.8,
+                summary="Исторический сигнал.",
+                factor_contributions=(),
+                evidence_refs=(news.id,),
+                expires_at=news.received_at + timedelta(days=3),
+                invalidation_conditions=(),
+                model_version="signal-engine-0.6.1",
+                config_version=3,
+                created_at=news.received_at,
+            )
+
+        old_signal = signal("sig_eval_old", old_news, "SBER")
+        new_signal = signal("sig_eval_new", new_news, "GAZP")
+        repository._news = {old_news.id: old_news, new_news.id: new_news}
+        repository._signals = {old_signal.id: old_signal, new_signal.id: new_signal}
+        old_outcome = {
+            "signal_id": old_signal.id,
+            "ticker": old_signal.ticker,
+            "direction": old_signal.direction,
+            "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
+            "eligibility": {"eligible": True, "reason": None},
+            "status": "evaluated",
+            "returns": {"1h": 0.1, "4h": 0.2, "1d": 0.3, "3d": 0.4},
+            "horizon_observations": {"3d": {"timely": True}},
+        }
+        await repository.upsert_evaluation_epoch(
+            EvaluationEpochRecord(
+                epoch_id="eval_previous_config_3",
+                model_version="signal-engine-0.6.1",
+                config_version=3,
+                evaluated_at=timestamp,
+                outcomes=(old_outcome,),
+                observations=(),
+            )
+        )
+
+        class EmptyMarket:
+            async def candles(self, *args: object, **kwargs: object) -> dict[str, object]:
+                return {"candles": []}
+
+        await main_module._load_evaluation_material(
+            repository,
+            EmptyMarket(),  # type: ignore[arg-type]
+        )
+
+        current = main_module.latest_model_evaluation_epoch(
+            main_module.latest_evaluation_epochs(
+                await repository.list_evaluation_epochs()
+            ),
+            "signal-engine-0.6.1",
+            3,
+        )
+        assert current is not None
+        assert {outcome["signal_id"] for outcome in current.outcomes} == {
+            old_signal.id,
+            new_signal.id,
+        }
+
+    asyncio.run(scenario())
+
+
+def test_complete_outcome_rebuilds_raw_rows_when_legacy_epoch_was_truncated() -> None:
+    async def scenario() -> None:
+        repository = MemoryNewsRepository()
+        timestamp = datetime.now(UTC).replace(microsecond=0) - timedelta(days=4)
+        news = NewsRecord(
+            id="news_truncated_raw",
+            source_id="interfax",
+            external_id="truncated-raw",
+            published_at=timestamp,
+            received_at=timestamp,
+            title="Сбербанк опубликовал отчётность",
+            url="https://example.com/truncated-raw",
+            content="Чистая прибыль выросла.",
+            language="ru",
+            source_metadata={},
+            created_at=timestamp,
+        )
+        signal = SignalRecord(
+            id="sig_truncated_raw",
+            news_id=news.id,
+            ticker="SBER",
+            as_of=timestamp,
+            data_cutoff_at=timestamp,
+            status="expired",
+            direction="up",
+            action="consider_buy",
+            horizon_value=3,
+            horizon_unit="calendar_days",
+            score=40.0,
+            strength=0.4,
+            confidence=0.8,
+            summary="Исторический сигнал.",
+            factor_contributions=(),
+            evidence_refs=(news.id,),
+            expires_at=timestamp + timedelta(days=3),
+            invalidation_conditions=(),
+            model_version="signal-engine-0.6.1",
+            config_version=3,
+            created_at=timestamp,
+        )
+        repository._news[news.id] = news
+        repository._signals[signal.id] = signal
+        await repository.upsert_evaluation_epoch(
+            EvaluationEpochRecord(
+                epoch_id="eval_truncated_raw",
+                model_version=signal.model_version,
+                config_version=signal.config_version,
+                evaluated_at=timestamp + timedelta(days=3),
+                outcomes=(
+                    {
+                        "signal_id": signal.id,
+                        "ticker": signal.ticker,
+                        "direction": signal.direction,
+                        "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
+                        "eligibility": {"eligible": True, "reason": None},
+                        "status": "evaluated",
+                        "returns": {"1h": 0.1, "4h": 0.2, "1d": 0.3, "3d": 0.4},
+                        "horizon_observations": {"3d": {"timely": True}},
+                    },
+                ),
+                observations=(
+                    {
+                        "signal_id": signal.id,
+                        "signal_as_of": to_rfc3339(signal.as_of),
+                        "observation_at": to_rfc3339(timestamp + timedelta(minutes=10)),
+                    },
+                ),
+                observations_truncated=True,
+            )
+        )
+
+        class HistoricalMarket:
+            calls = 0
+
+            async def candles(
+                self,
+                ticker: str,
+                *,
+                interval: int,
+                lookback_days: int,
+            ) -> dict[str, object]:
+                self.calls += 1
+                assert ticker == "SBER"
+                assert interval == 10
+                assert lookback_days >= 14
+                return {
+                    "candles": [
+                        {
+                            "begin": to_rfc3339(timestamp + offset),
+                            "open": price,
+                            "close": price,
+                        }
+                        for offset, price in (
+                            (timedelta(minutes=10), 100.0),
+                            (timedelta(hours=1), 101.0),
+                            (timedelta(days=1), 102.0),
+                            (timedelta(days=3), 103.0),
+                        )
+                    ]
+                }
+
+        market = HistoricalMarket()
+        await main_module._load_evaluation_material(
+            repository,
+            market,  # type: ignore[arg-type]
+        )
+
+        assert market.calls == 1
+        archived = await repository.list_evaluation_observations()
+        assert len(archived) == 4
+        assert {row["signal_id"] for row in archived} == {signal.id}
+        rebuilt_epoch = main_module.latest_model_evaluation_epoch(
+            main_module.latest_evaluation_epochs(
+                await repository.list_evaluation_epochs()
+            ),
+            signal.model_version,
+            signal.config_version,
+        )
+        assert rebuilt_epoch is not None
+        assert rebuilt_epoch.observations_truncated is False
 
     asyncio.run(scenario())
 
@@ -2412,6 +2751,10 @@ def test_evals_selects_highest_config_before_newest_evaluation_time(
     monkeypatch.setattr(app.state, "news_repository", repository)
 
     response = client.get("/v1/evals")
+    lower_response = client.get(
+        "/v1/evals",
+        params={"model_version": "signal-engine-0.6.1", "config_version": 1},
+    )
 
     assert response.status_code == 200
     assert response.json()["meta"]["selected_config_version"] == 2
@@ -2419,6 +2762,11 @@ def test_evals_selects_highest_config_before_newest_evaluation_time(
     assert [row["signal_id"] for row in response.json()["data"]["outcomes"]] == [
         "sig_config_2"
     ]
+    assert lower_response.status_code == 200
+    assert lower_response.json()["meta"]["selected_config_version"] == 1
+    assert [
+        row["signal_id"] for row in lower_response.json()["data"]["outcomes"]
+    ] == ["sig_config_1"]
 
 
 def test_retrospective_signal_is_excluded_without_moex_request() -> None:

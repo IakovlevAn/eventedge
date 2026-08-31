@@ -314,6 +314,8 @@ class NewsRepository(Protocol):
 
     async def get_signal(self, signal_id: str) -> SignalRecord | None: ...
 
+    async def list_evaluation_signals(self) -> list[SignalRecord]: ...
+
     async def list_telegram_sources(self) -> list[TelegramSourceRecord]: ...
 
     async def upsert_telegram_source(
@@ -331,6 +333,17 @@ class NewsRepository(Protocol):
         *,
         include_observations: bool = True,
     ) -> list[EvaluationEpochRecord]: ...
+
+    async def upsert_evaluation_observations(
+        self,
+        observations: list[dict[str, object]],
+        *,
+        evaluated_at: datetime,
+    ) -> None: ...
+
+    async def list_evaluation_observations(self) -> list[dict[str, object]]: ...
+
+    async def count_evaluation_observations(self) -> dict[tuple[str, int], int]: ...
 
     async def get_or_create_assessment_snapshot(
         self,
@@ -671,6 +684,9 @@ class MemoryNewsRepository:
         self._signals: dict[str, SignalRecord] = {}
         self._telegram_sources: dict[str, TelegramSourceRecord] = {}
         self._evaluation_epochs: dict[str, EvaluationEpochRecord] = {}
+        self._evaluation_observations: dict[
+            tuple[str, int, str, str], dict[str, object]
+        ] = {}
         self._assessment_snapshots: dict[str, tuple[datetime, dict[str, object]]] = {}
         self._cache_assessment_snapshots = cache_assessment_snapshots
         self._lock = asyncio.Lock()
@@ -796,6 +812,13 @@ class MemoryNewsRepository:
     async def get_signal(self, signal_id: str) -> SignalRecord | None:
         return self._signals.get(signal_id)
 
+    async def list_evaluation_signals(self) -> list[SignalRecord]:
+        return sorted(
+            self._signals.values(),
+            key=lambda signal: (signal.as_of, signal.id),
+            reverse=True,
+        )
+
     async def list_telegram_sources(self) -> list[TelegramSourceRecord]:
         return sorted(
             self._telegram_sources.values(),
@@ -840,6 +863,30 @@ class MemoryNewsRepository:
             )
             for epoch in epochs
         ]
+
+    async def upsert_evaluation_observations(
+        self,
+        observations: list[dict[str, object]],
+        *,
+        evaluated_at: datetime,
+    ) -> None:
+        del evaluated_at
+        for observation in observations:
+            key = evaluation_observation_key(observation)
+            self._evaluation_observations[key] = dict(observation)
+
+    async def list_evaluation_observations(self) -> list[dict[str, object]]:
+        return [
+            dict(observation)
+            for _, observation in sorted(self._evaluation_observations.items())
+        ]
+
+    async def count_evaluation_observations(self) -> dict[tuple[str, int], int]:
+        counts: dict[tuple[str, int], int] = {}
+        for model_version, config_version, _, _ in self._evaluation_observations:
+            key = (model_version, config_version)
+            counts[key] = counts.get(key, 0) + 1
+        return counts
 
     async def get_or_create_assessment_snapshot(
         self,
@@ -1131,6 +1178,13 @@ class YdbNewsRepository:
             return None
         return signal_from_row(result_sets[0].rows[0])
 
+    async def list_evaluation_signals(self) -> list[SignalRecord]:
+        result_sets = await self._require_pool().execute_with_retries(
+            SELECT_EVALUATION_SIGNALS_QUERY
+        )
+        rows = result_sets[0].rows if result_sets else []
+        return [signal_from_row(row) for row in rows]
+
     async def list_telegram_sources(self) -> list[TelegramSourceRecord]:
         result_sets = await self._require_pool().execute_with_retries(SELECT_TELEGRAM_SOURCES_QUERY)
         rows = result_sets[0].rows if result_sets else []
@@ -1186,6 +1240,35 @@ class YdbNewsRepository:
         )
         rows = result_sets[0].rows if result_sets else []
         return [evaluation_epoch_from_row(row) for row in rows]
+
+    async def upsert_evaluation_observations(
+        self,
+        observations: list[dict[str, object]],
+        *,
+        evaluated_at: datetime,
+    ) -> None:
+        for query, parameters in evaluation_observation_upsert_batches(
+            observations,
+            evaluated_at=evaluated_at,
+        ):
+            await self._require_pool().execute_with_retries(query, parameters)
+
+    async def list_evaluation_observations(self) -> list[dict[str, object]]:
+        result_sets = await self._require_pool().execute_with_retries(
+            SELECT_EVALUATION_OBSERVATIONS_QUERY
+        )
+        rows = result_sets[0].rows if result_sets else []
+        return [json_object(row.payload) for row in rows]
+
+    async def count_evaluation_observations(self) -> dict[tuple[str, int], int]:
+        result_sets = await self._require_pool().execute_with_retries(
+            COUNT_EVALUATION_OBSERVATIONS_QUERY
+        )
+        rows = result_sets[0].rows if result_sets else []
+        return {
+            (row.model_version, int(row.config_version)): int(row.observation_count)
+            for row in rows
+        }
 
     async def get_or_create_assessment_snapshot(
         self,
@@ -1388,6 +1471,98 @@ def evaluation_epoch_parameters(epoch: EvaluationEpochRecord) -> dict[str, objec
     }
 
 
+def evaluation_observation_key(
+    observation: Mapping[str, object],
+) -> tuple[str, int, str, str]:
+    model_version = str(observation.get("model_version") or "")
+    signal_id = str(observation.get("signal_id") or "")
+    observation_at = str(observation.get("observation_at") or "")
+    try:
+        config_version = int(observation.get("config_version", 0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("evaluation observation has an invalid config_version") from exc
+    if not model_version or config_version < 1 or not signal_id or not observation_at:
+        raise ValueError("evaluation observation is missing its stable identity")
+    return model_version, config_version, signal_id, observation_at
+
+
+def evaluation_observation_upsert_batches(
+    observations: list[dict[str, object]],
+    *,
+    evaluated_at: datetime,
+    batch_size: int = 200,
+) -> list[tuple[str, dict[str, object]]]:
+    if batch_size < 1:
+        raise ValueError("evaluation observation batch_size must be positive")
+    batches: list[tuple[str, dict[str, object]]] = []
+    for start in range(0, len(observations), batch_size):
+        batch = observations[start : start + batch_size]
+        declarations = []
+        values = []
+        parameters: dict[str, object] = {}
+        for index, observation in enumerate(batch):
+            model_version, config_version, signal_id, observation_at = (
+                evaluation_observation_key(observation)
+            )
+            names = {
+                "model": f"$model_{index}",
+                "config": f"$config_{index}",
+                "signal": f"$signal_{index}",
+                "observation": f"$observation_{index}",
+                "evaluated": f"$evaluated_{index}",
+                "payload": f"$payload_{index}",
+            }
+            declarations.extend(
+                (
+                    f"DECLARE {names['model']} AS Utf8;",
+                    f"DECLARE {names['config']} AS Uint32;",
+                    f"DECLARE {names['signal']} AS Utf8;",
+                    f"DECLARE {names['observation']} AS Utf8;",
+                    f"DECLARE {names['evaluated']} AS Timestamp;",
+                    f"DECLARE {names['payload']} AS Json;",
+                )
+            )
+            values.append(
+                "("
+                + ", ".join(
+                    (
+                        names["model"],
+                        names["config"],
+                        names["signal"],
+                        names["observation"],
+                        names["evaluated"],
+                        names["payload"],
+                    )
+                )
+                + ")"
+            )
+            parameters.update(
+                {
+                    names["model"]: model_version,
+                    names["config"]: ydb.TypedValue(
+                        config_version, ydb.PrimitiveType.Uint32
+                    ),
+                    names["signal"]: signal_id,
+                    names["observation"]: observation_at,
+                    names["evaluated"]: ydb.TypedValue(
+                        evaluated_at, ydb.PrimitiveType.Timestamp
+                    ),
+                    names["payload"]: ydb.TypedValue(
+                        json.dumps(observation, ensure_ascii=False),
+                        ydb.PrimitiveType.Json,
+                    ),
+                }
+            )
+        query = "\n".join(declarations) + """
+
+UPSERT INTO `evaluation_observations` (
+    model_version, config_version, signal_id, observation_at, evaluated_at, payload
+) VALUES
+""" + ",\n".join(values) + ";\n"
+        batches.append((query, parameters))
+    return batches
+
+
 def evaluation_epoch_from_row(row: object) -> EvaluationEpochRecord:
     return EvaluationEpochRecord(
         epoch_id=row.epoch_id,
@@ -1509,6 +1684,17 @@ SCHEMA_STATEMENTS = (
     );
     """,
     """
+    CREATE TABLE IF NOT EXISTS `evaluation_observations` (
+        `model_version` Utf8 NOT NULL,
+        `config_version` Uint32 NOT NULL,
+        `signal_id` Utf8 NOT NULL,
+        `observation_at` Utf8 NOT NULL,
+        `evaluated_at` Timestamp NOT NULL,
+        `payload` Json NOT NULL,
+        PRIMARY KEY (`model_version`, `config_version`, `signal_id`, `observation_at`)
+    );
+    """,
+    """
     CREATE TABLE IF NOT EXISTS `assessment_snapshots` (
         `snapshot_key` Utf8 NOT NULL,
         `payload` Json NOT NULL,
@@ -1527,6 +1713,7 @@ SCHEMA_TABLE_NAMES = (
     "telegram_sources",
     "telegram_source_metadata",
     "evaluation_epochs",
+    "evaluation_observations",
     "assessment_snapshots",
 )
 
@@ -1579,6 +1766,11 @@ async def migrate_ydb_schema(
                 max_attempts=max_attempts,
                 sleep=sleep,
             )
+        if any(
+            table_name == "evaluation_observations"
+            for table_name, _ in missing_statements
+        ):
+            await _backfill_evaluation_observations_from_epochs(pool)
     finally:
         if pool is not None:
             try:
@@ -1611,6 +1803,42 @@ async def _execute_schema_statement_with_backoff(
                 max_attempts,
             )
             await sleep(delay)
+
+
+async def _backfill_evaluation_observations_from_epochs(
+    pool: ydb.aio.QuerySessionPool,
+) -> None:
+    result_sets = await pool.execute_with_retries(SELECT_EVALUATION_EPOCHS_QUERY)
+    rows = result_sets[0].rows if result_sets else []
+    observations: dict[tuple[str, int, str, str], dict[str, object]] = {}
+    for row in rows:
+        epoch = evaluation_epoch_from_row(row)
+        for stored in epoch.observations:
+            observation = {
+                **dict(stored),
+                "model_version": str(
+                    stored.get("model_version") or epoch.model_version
+                ),
+                "config_version": int(
+                    stored.get("config_version") or epoch.config_version
+                ),
+            }
+            try:
+                key = evaluation_observation_key(observation)
+            except ValueError:
+                continue
+            observations.setdefault(key, observation)
+    if not observations:
+        return
+    LOGGER.info(
+        "Backfilling %d legacy Evals observations into normalized storage",
+        len(observations),
+    )
+    for query, parameters in evaluation_observation_upsert_batches(
+        list(observations.values()),
+        evaluated_at=utc_now(),
+    ):
+        await pool.execute_with_retries(query, parameters)
 
 
 SELECT_REQUEST_QUERY = """
@@ -1805,6 +2033,12 @@ ORDER BY as_of DESC, signal_id DESC
 LIMIT 1000;
 """
 
+SELECT_EVALUATION_SIGNALS_QUERY = f"""
+SELECT {SIGNAL_SELECT_COLUMNS}
+FROM `signals`
+ORDER BY as_of DESC, signal_id DESC;
+"""
+
 
 def select_signals_query(
     *,
@@ -1971,6 +2205,27 @@ UPSERT INTO `evaluation_epochs` (
     $observations,
     $observations_truncated
 );
+"""
+
+SELECT_EVALUATION_OBSERVATIONS_QUERY = """
+SELECT
+    model_version,
+    config_version,
+    signal_id,
+    observation_at,
+    payload
+FROM `evaluation_observations`
+ORDER BY model_version, config_version, signal_id, observation_at;
+"""
+
+COUNT_EVALUATION_OBSERVATIONS_QUERY = """
+SELECT
+    model_version,
+    config_version,
+    COUNT(*) AS observation_count
+FROM `evaluation_observations`
+GROUP BY model_version, config_version
+ORDER BY model_version, config_version;
 """
 
 SELECT_ASSESSMENT_SNAPSHOT_QUERY = """

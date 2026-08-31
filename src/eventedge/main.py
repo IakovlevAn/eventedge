@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import gzip
 import hmac
 import io
+import json
 import logging
 import math
 import os
@@ -2688,36 +2690,36 @@ async def _load_evaluation_material(
     dict[str, NewsRecord],
     list[EvaluationEpochRecord],
 ]:
-    stored_signals, stored_epochs = await asyncio.gather(
-        repository.list_signals(
-            ticker=None,
-            directions=None,
-            status=None,
-            min_confidence=None,
-            limit=1000,
-        ),
+    stored_signals, stored_epochs, stored_observations = await asyncio.gather(
+        repository.list_evaluation_signals(),
         repository.list_evaluation_epochs(),
+        repository.list_evaluation_observations(),
     )
+    evaluation_candidates = [
+        signal
+        for signal in deduplicate_eval_signals(deduplicate_signals(stored_signals))
+        if signal.ticker in DEFAULT_MOEX_ALIASES and signal.direction in {"up", "down"}
+    ]
     stored_news = await repository.get_news_by_ids(
-        frozenset(signal.news_id for signal in stored_signals)
+        frozenset(signal.news_id for signal in evaluation_candidates)
     )
-    news_by_id = {item.id: item for item in public_news(stored_news)}
+    # Evaluation is an immutable historical audit. A signal must not disappear
+    # merely because its source item is later hidden from the public product feed.
+    news_by_id = {item.id: item for item in stored_news}
     signals = deduplicate_eval_events(
         (
             signal
-            for signal in deduplicate_eval_signals(deduplicate_signals(stored_signals))
+            for signal in evaluation_candidates
             if signal.news_id in news_by_id
-            and signal.ticker in DEFAULT_MOEX_ALIASES
-            and signal.direction in {"up", "down"}
         ),
         news_by_id,
         preserve_model_epochs=True,
-    )[:200]
-    current_method_epochs = [
+    )
+    current_method_epochs = latest_evaluation_epochs([
         epoch
         for epoch in stored_epochs
         if evaluation_epoch_methodology(epoch) == EVALUATION_METHODOLOGY_VERSION
-    ]
+    ])
     epoch_by_model: dict[tuple[str, int], EvaluationEpochRecord] = {}
     for epoch in current_method_epochs:
         epoch_by_model.setdefault((epoch.model_version, epoch.config_version), epoch)
@@ -2727,14 +2729,60 @@ async def _load_evaluation_material(
             if _is_complete_eval_outcome(outcome):
                 complete_outcomes.setdefault(str(outcome["signal_id"]), dict(outcome))
     refresh_signals = [signal for signal in signals if signal.id not in complete_outcomes]
+    observation_signal_ids = {
+        str(row.get("signal_id"))
+        for row in stored_observations
+        if row.get("signal_id")
+    }
+    for epoch in stored_epochs:
+        observation_signal_ids.update(
+            str(row.get("signal_id"))
+            for row in epoch.observations
+            if row.get("signal_id")
+        )
+    truncated_groups = {
+        (epoch.model_version, epoch.config_version)
+        for epoch in current_method_epochs
+        if epoch.observations_truncated
+    }
+    observation_refresh_signals = [
+        signal
+        for signal in signals
+        if (signal.model_version, signal.config_version) in truncated_groups
+        or signal.id not in observation_signal_ids
+    ]
+    market_refresh_by_id = {
+        signal.id: signal for signal in [*refresh_signals, *observation_refresh_signals]
+    }
     market_refresh_signals = [
         signal
-        for signal in refresh_signals
+        for signal in market_refresh_by_id.values()
         if evaluation_eligibility(signal, news_by_id.get(signal.news_id))["eligible"]
     ]
-    tickers = list(dict.fromkeys(signal.ticker for signal in market_refresh_signals))
+    ticker_signals: dict[str, list[SignalRecord]] = {}
+    for signal in market_refresh_signals:
+        ticker_signals.setdefault(signal.ticker, []).append(signal)
+    tickers = list(ticker_signals)
+    now = datetime.now(UTC)
+    lookback_by_ticker = {
+        ticker: min(
+            60,
+            max(
+                14,
+                max((now - signal.as_of).days + 4 for signal in ticker_signals[ticker]),
+            ),
+        )
+        for ticker in tickers
+    }
     candle_results = await asyncio.gather(
-        *(market_data_client.candles(ticker, interval=10, lookback_days=14) for ticker in tickers),
+        *(
+            market_data_client.candles(
+                ticker,
+                interval=10,
+                lookback_days=lookback_by_ticker[ticker],
+            )
+            for ticker in tickers
+        ),
         return_exceptions=True,
     )
     candles_by_ticker = {
@@ -2761,6 +2809,44 @@ async def _load_evaluation_material(
             }
         outcomes.append(outcome)
     generated_at = datetime.now(UTC)
+    normalized_observations = {
+        (
+            str(row.get("model_version", "")),
+            int(row.get("config_version", 0) or 0),
+            str(row.get("signal_id", "")),
+            str(row.get("observation_at", "")),
+        ): dict(row)
+        for row in stored_observations
+        if row.get("model_version")
+        and row.get("config_version")
+        and row.get("signal_id")
+        and row.get("observation_at")
+    }
+    observations_to_upsert: dict[
+        tuple[str, int, str, str], dict[str, object]
+    ] = {}
+    # One-time migration shield: copy every legacy JSON observation into the
+    # normalized append-only table before compacting epoch snapshots.
+    for epoch in stored_epochs:
+        for stored_row in epoch.observations:
+            row = {
+                **dict(stored_row),
+                "model_version": str(
+                    stored_row.get("model_version") or epoch.model_version
+                ),
+                "config_version": int(
+                    stored_row.get("config_version") or epoch.config_version
+                ),
+            }
+            key = (
+                str(row.get("model_version", "")),
+                int(row.get("config_version", 0) or 0),
+                str(row.get("signal_id", "")),
+                str(row.get("observation_at", "")),
+            )
+            if all((key[0], key[1], key[2], key[3])) and key not in normalized_observations:
+                normalized_observations[key] = row
+                observations_to_upsert[key] = row
     epoch_records = []
     for model_version, config_version in sorted(
         {(signal.model_version, signal.config_version) for signal in signals}
@@ -2771,20 +2857,36 @@ async def _load_evaluation_material(
             if signal.model_version == model_version and signal.config_version == config_version
         ]
         signal_ids = {signal.id for signal in epoch_signals}
-        epoch_outcomes = [outcome for outcome in outcomes if outcome["signal_id"] in signal_ids]
+        refreshed_outcomes = [
+            outcome for outcome in outcomes if outcome["signal_id"] in signal_ids
+        ]
         previous_epoch = epoch_by_model.get((model_version, config_version))
+        outcome_by_signal = {
+            str(outcome.get("signal_id")): dict(outcome)
+            for outcome in (previous_epoch.outcomes if previous_epoch else ())
+            if outcome.get("signal_id")
+        }
+        outcome_by_signal.update(
+            {str(outcome["signal_id"]): outcome for outcome in refreshed_outcomes}
+        )
+        epoch_outcomes = sorted(
+            outcome_by_signal.values(),
+            key=lambda outcome: (
+                str(outcome.get("as_of", "")),
+                str(outcome.get("signal_id", "")),
+            ),
+        )
         complete_signal_ids = {
             signal.id for signal in epoch_signals if signal.id in complete_outcomes
         }
-        preserved_observations = [
-            dict(row)
-            for row in previous_epoch.observations
-            if row.get("signal_id") in complete_signal_ids
-        ] if previous_epoch else []
         refreshed_epoch_signals = [
-            signal for signal in epoch_signals if signal.id not in complete_signal_ids
+            signal
+            for signal in epoch_signals
+            if signal.id not in complete_signal_ids
+            or (model_version, config_version) in truncated_groups
+            or signal.id not in observation_signal_ids
         ]
-        fresh_observations, fresh_truncated = event_time_export_rows(
+        fresh_observations, _ = event_time_export_rows(
             refreshed_epoch_signals,
             candles_by_ticker,
             news_by_id,
@@ -2798,12 +2900,30 @@ async def _load_evaluation_material(
             }
             for row in fresh_observations
         ]
-        observations, observations_truncated = _merge_eval_observations(
-            preserved_observations,
-            fresh_observations,
-            already_truncated=bool(previous_epoch and previous_epoch.observations_truncated)
-            or fresh_truncated,
+        fresh_observation_signal_ids = {
+            str(row.get("signal_id"))
+            for row in fresh_observations
+            if row.get("signal_id")
+        }
+        eligible_epoch_signal_ids = {
+            signal.id
+            for signal in epoch_signals
+            if evaluation_eligibility(signal, news_by_id.get(signal.news_id))["eligible"]
+        }
+        raw_rebuild_complete = (
+            (model_version, config_version) in truncated_groups
+            and eligible_epoch_signal_ids <= fresh_observation_signal_ids
         )
+        for row in fresh_observations:
+            key = (
+                str(row.get("model_version", model_version)),
+                int(row.get("config_version", config_version) or config_version),
+                str(row.get("signal_id", "")),
+                str(row.get("observation_at", "")),
+            )
+            if all((key[0], key[1], key[2], key[3])):
+                normalized_observations[key] = row
+                observations_to_upsert[key] = row
         epoch_records.append(
             EvaluationEpochRecord(
                 epoch_id=stable_id(
@@ -2817,14 +2937,27 @@ async def _load_evaluation_material(
                 config_version=config_version,
                 evaluated_at=generated_at,
                 outcomes=tuple(epoch_outcomes),
-                observations=tuple(observations),
-                observations_truncated=observations_truncated,
+                # Raw rows live in evaluation_observations. Keep the epoch row
+                # small so repeated refreshes cannot hit YDB's row-size limit.
+                observations=(),
+                # A legacy true flag records an irrecoverable pre-migration gap;
+                # clear it only after every eligible signal was rebuilt without a cap.
+                observations_truncated=bool(
+                    previous_epoch and previous_epoch.observations_truncated
+                    and not raw_rebuild_complete
+                ),
             )
         )
-    if epoch_records:
-        await asyncio.gather(
-            *(repository.upsert_evaluation_epoch(epoch) for epoch in epoch_records)
+    writes = [repository.upsert_evaluation_epoch(epoch) for epoch in epoch_records]
+    if observations_to_upsert:
+        writes.append(
+            repository.upsert_evaluation_observations(
+                list(observations_to_upsert.values()),
+                evaluated_at=generated_at,
+            )
         )
+    if writes:
+        await asyncio.gather(*writes)
     stored_epochs = await repository.list_evaluation_epochs()
     return outcomes, signals, candles_by_ticker, news_by_id, stored_epochs
 
@@ -2856,7 +2989,7 @@ def _merge_eval_observations(
     fresh: list[dict[str, object]],
     *,
     already_truncated: bool,
-    max_rows: int = 5000,
+    max_rows: int | None = None,
 ) -> tuple[list[dict[str, object]], bool]:
     unique = {
         (str(row.get("signal_id")), str(row.get("observation_at"))): row
@@ -2870,6 +3003,8 @@ def _merge_eval_observations(
             str(row.get("observation_at", "")),
         ),
     )
+    if max_rows is None:
+        return ordered, already_truncated
     return ordered[:max_rows], already_truncated or len(ordered) > max_rows
 
 
@@ -2940,9 +3075,17 @@ def directional_epoch_outcomes(
     ]
 
 
-def evaluation_epoch_meta(epoch: EvaluationEpochRecord) -> dict[str, object]:
+def evaluation_epoch_meta(
+    epoch: EvaluationEpochRecord,
+    observation_counts: Mapping[tuple[str, int], int] | None = None,
+) -> dict[str, object]:
     meta = epoch.as_meta_dict()
     meta["signals"] = len(directional_epoch_outcomes(epoch))
+    if observation_counts is not None:
+        meta["observations"] = observation_counts.get(
+            (epoch.model_version, epoch.config_version),
+            0,
+        )
     meta["evaluation_methodology"] = evaluation_epoch_methodology(epoch)
     return meta
 
@@ -2950,9 +3093,15 @@ def evaluation_epoch_meta(epoch: EvaluationEpochRecord) -> dict[str, object]:
 def latest_model_evaluation_epoch(
     epochs: list[EvaluationEpochRecord],
     model_version: str,
+    config_version: int | None = None,
 ) -> EvaluationEpochRecord | None:
     """Select the newest snapshot of the highest config for one model."""
-    candidates = [epoch for epoch in epochs if epoch.model_version == model_version]
+    candidates = [
+        epoch
+        for epoch in epochs
+        if epoch.model_version == model_version
+        and (config_version is None or epoch.config_version == config_version)
+    ]
     return max(
         candidates,
         key=lambda epoch: (epoch.config_version, epoch.evaluated_at, epoch.epoch_id),
@@ -2967,13 +3116,20 @@ async def list_evals(
         str | None,
         Query(pattern=r"^[a-z0-9._-]{3,80}$"),
     ] = None,
+    config_version: Annotated[int | None, Query(ge=1)] = None,
 ) -> JSONResponse:
     repository: NewsRepository = request.app.state.news_repository
-    epochs = latest_evaluation_epochs(
-        await repository.list_evaluation_epochs(include_observations=False)
+    stored_epochs, observation_counts = await asyncio.gather(
+        repository.list_evaluation_epochs(include_observations=False),
+        repository.count_evaluation_observations(),
     )
+    epochs = latest_evaluation_epochs(stored_epochs)
     selected_model_version = model_version or CURRENT_NEWS_MODEL_VERSION
-    selected_epoch = latest_model_evaluation_epoch(epochs, selected_model_version)
+    selected_epoch = latest_model_evaluation_epoch(
+        epochs,
+        selected_model_version,
+        config_version,
+    )
     selected_outcomes = directional_epoch_outcomes(selected_epoch)
     return JSONResponse(
         content={
@@ -3004,7 +3160,9 @@ async def list_evals(
                 "selected_config_version": (
                     selected_epoch.config_version if selected_epoch else None
                 ),
-                "model_epochs": [evaluation_epoch_meta(epoch) for epoch in epochs],
+                "model_epochs": [
+                    evaluation_epoch_meta(epoch, observation_counts) for epoch in epochs
+                ],
                 "warning": (
                     "Only point-in-time timing-eligible live signals enter quality metrics. "
                     "Returns use raw MOEX candles without fees, slippage or corporate-action "
@@ -3024,11 +3182,18 @@ async def export_evals(
         str,
         Query(pattern=r"^(all|[a-z0-9._-]{3,80})$"),
     ] = "all",
+    config_version: Annotated[int | None, Query(ge=1)] = None,
+    limit: Annotated[int, Query(ge=1, le=2000)] = 1000,
+    cursor: Annotated[int, Query(ge=0)] = 0,
+    download: bool = False,
 ) -> Response:
     repository: NewsRepository = request.app.state.news_repository
     epochs = latest_evaluation_epochs(await repository.list_evaluation_epochs())
     selected_epochs = [
-        epoch for epoch in epochs if model_version == "all" or epoch.model_version == model_version
+        epoch
+        for epoch in epochs
+        if (model_version == "all" or epoch.model_version == model_version)
+        and (config_version is None or epoch.config_version == config_version)
     ]
     if dataset == "timeseries":
         directional_signal_ids = {
@@ -3036,12 +3201,45 @@ async def export_evals(
             for epoch in selected_epochs
             for outcome in directional_epoch_outcomes(epoch)
         }
-        rows = [
-            row
+        selected_epoch_keys = {
+            (epoch.model_version, epoch.config_version) for epoch in selected_epochs
+        }
+        observation_by_key = {
+            (
+                str(row.get("model_version") or epoch.model_version),
+                int(row.get("config_version") or epoch.config_version),
+                str(row.get("signal_id", "")),
+                str(row.get("observation_at", "")),
+            ): {
+                **dict(row),
+                "model_version": str(row.get("model_version") or epoch.model_version),
+                "config_version": int(
+                    row.get("config_version") or epoch.config_version
+                ),
+            }
             for epoch in selected_epochs
             for row in epoch.observations
             if row.get("signal_id") in directional_signal_ids
-        ]
+        }
+        for row in await repository.list_evaluation_observations():
+            key = (
+                str(row.get("model_version", "")),
+                int(row.get("config_version", 0) or 0),
+                str(row.get("signal_id", "")),
+                str(row.get("observation_at", "")),
+            )
+            if (key[0], key[1]) in selected_epoch_keys and key[2] in directional_signal_ids:
+                observation_by_key[key] = dict(row)
+        rows = sorted(
+            observation_by_key.values(),
+            key=lambda row: (
+                str(row.get("model_version", "")),
+                int(row.get("config_version", 0) or 0),
+                str(row.get("signal_as_of", "")),
+                str(row.get("signal_id", "")),
+                str(row.get("observation_at", "")),
+            ),
+        )
         truncated = any(epoch.observations_truncated for epoch in selected_epochs)
         fieldnames = [
             "signal_id",
@@ -3125,38 +3323,59 @@ async def export_evals(
         ]
 
     generated_at = utc_now()
+    total_rows = len(rows)
+    page_rows = rows if download else rows[cursor : cursor + limit]
+    has_more = not download and cursor + len(page_rows) < total_rows
+    next_cursor = cursor + len(page_rows) if has_more else None
     filename = f"eventedge-{dataset}-{generated_at[:10]}.{format}"
     headers = {
         "Cache-Control": "no-store",
         "Content-Disposition": f'attachment; filename="{filename}"',
+        "X-EventEdge-Rows": str(len(page_rows)),
+        "X-EventEdge-Total-Rows": str(total_rows),
+        "X-EventEdge-Truncated": str(truncated).lower(),
     }
     if format == "json":
-        return JSONResponse(
-            content={
-                "data": rows,
+        content = json.dumps(
+            {
+                "data": page_rows,
                 "meta": {
                     "dataset": dataset,
-                    "rows": len(rows),
+                    "rows": len(page_rows),
+                    "total_rows": total_rows,
                     "truncated": truncated,
                     "generated_at": generated_at,
                     "model_version": model_version,
+                    "config_version": config_version,
+                    "has_more": has_more,
+                    "next_cursor": next_cursor,
+                    "limit": None if download else limit,
                 },
             },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if download or len(content) >= 2_500_000:
+            content = gzip.compress(content, compresslevel=6)
+            headers = {**headers, "Content-Encoding": "gzip", "Vary": "Accept-Encoding"}
+        return Response(
+            content=content,
+            media_type="application/json",
             headers=headers,
         )
 
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
-    writer.writerows(rows)
+    writer.writerows(page_rows)
+    content = ("\ufeff" + buffer.getvalue()).encode("utf-8")
+    if download or len(content) >= 2_500_000:
+        content = gzip.compress(content, compresslevel=6)
+        headers = {**headers, "Content-Encoding": "gzip", "Vary": "Accept-Encoding"}
     return Response(
-        content="\ufeff" + buffer.getvalue(),
+        content=content,
         media_type="text/csv; charset=utf-8",
-        headers={
-            **headers,
-            "X-EventEdge-Rows": str(len(rows)),
-            "X-EventEdge-Truncated": str(truncated).lower(),
-        },
+        headers=headers,
     )
 
 

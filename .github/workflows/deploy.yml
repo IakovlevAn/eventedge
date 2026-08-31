@@ -198,6 +198,21 @@ jobs:
             if [[ "${attempt}" == "6" ]]; then exit 1; fi
             sleep 5
           done
+          for attempt in {1..6}; do
+            if curl --compressed --fail --silent --show-error \
+              --max-time 55 \
+              "${EVENTEDGE_API_URL}/v1/evals/export?format=json&dataset=timeseries&model_version=all&download=true" \
+              --output /tmp/eventedge-evals-timeseries.json \
+              && jq -e '
+                .meta.dataset == "timeseries"
+                and .meta.has_more == false
+                and .meta.rows == .meta.total_rows
+              ' /tmp/eventedge-evals-timeseries.json >/dev/null; then
+              break
+            fi
+            if [[ "${attempt}" == "6" ]]; then exit 1; fi
+            sleep 5
+          done
           echo "Production assessment, eval and export routes are ready"
 
       - name: Smoke test source registry and market events
