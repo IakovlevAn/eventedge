@@ -33,8 +33,10 @@ LOGGER = logging.getLogger(__name__)
 SIGNAL_REJECTION_REASONS = frozenset(
     {
         "below_score_threshold",
+        "analysis_only_source",
         "event_other",
         "low_materiality",
+        "multi_company_roundup",
         "no_instrument",
         "product_or_marketing_noise",
         "unvalidated_context_signal",

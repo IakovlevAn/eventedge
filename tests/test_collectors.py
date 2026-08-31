@@ -23,12 +23,14 @@ from eventedge.collectors import (
     is_market_event_candidate,
     is_market_signal_candidate,
     is_moex_equity_title,
+    is_multi_company_roundup,
     is_obvious_company_product_or_marketing_noise,
     is_semantic_analysis_candidate,
     is_signal_analysis_candidate,
     is_watched_company_news,
     parse_rss,
     parse_telegram_channel,
+    signal_analysis_exclusion_reason,
     signal_analysis_priority,
 )
 from eventedge.storage import MemoryNewsRepository, TelegramSourceRecord
@@ -181,7 +183,7 @@ def test_sector_news_without_ticker_is_analyzed_and_stored() -> None:
         "event_candidate": True,
         "signal_candidate": False,
         "analysis_candidate": True,
-        "classification_version": "candidate-gate-0.6.0",
+        "classification_version": "candidate-gate-0.7.0",
     }
     assert signals == []
     assert stored["source_metadata"]["signal_outcome"] == {
@@ -508,6 +510,82 @@ def test_market_candidate_requires_company_event_and_rejects_opinion() -> None:
     assert is_company_news_candidate(opinion) is False
 
 
+def test_multi_company_roundup_is_context_but_joint_event_stays_signal_candidate() -> None:
+    roundup = RssItem(
+        external_id="dividend-roundup",
+        published_at=datetime(2026, 8, 31, tzinfo=UTC),
+        title=(
+            "На этой неделе дивиденды рекомендовали сразу пять компаний — "
+            "НОВАТЭК, Норникель и Озон Фармацевтика"
+        ),
+        url="https://example.com/dividend-roundup",
+        content="Сводка решений советов директоров за неделю.",
+        categories=("Компании",),
+    )
+    joint_event = RssItem(
+        external_id="joint-event",
+        published_at=datetime(2026, 8, 31, tzinfo=UTC),
+        title="Газпром и Газпром нефть подписали соглашение о совместном проекте",
+        url="https://example.com/joint-event",
+        content="Компании подтвердили заключение соглашения.",
+        categories=("Компании",),
+    )
+
+    assert is_multi_company_roundup(roundup) is True
+    assert is_market_event_candidate(roundup) is True
+    assert is_market_signal_candidate(roundup) is False
+    assert is_signal_analysis_candidate(roundup) is False
+    assert signal_analysis_exclusion_reason("interfax", roundup) == "multi_company_roundup"
+    assert is_multi_company_roundup(joint_event) is False
+    assert is_market_signal_candidate(joint_event) is True
+    assert is_signal_analysis_candidate(joint_event) is True
+
+
+def test_analysis_only_source_is_stored_as_context_without_calling_analyzer() -> None:
+    analyzer = AsyncMock(side_effect=AssertionError("analysis-only source reached analyzer"))
+    repository = MemoryNewsRepository(analyzer=analyzer)
+    item = RssItem(
+        external_id="finam-lkohl-analysis",
+        published_at=datetime(2026, 8, 31, tzinfo=UTC),
+        title="ЛУКОЙЛ отлично отчитался и остается качественной защитной историей",
+        url="https://t.me/finamalert/1",
+        content="Финам приводит аналитическое обоснование торговой идеи.",
+        categories=(),
+    )
+
+    async def scenario() -> tuple[dict[str, int], dict[str, object]]:
+        result = await collect_news_items(
+            repository,
+            source_id="telegram_finamalert",
+            source_url="https://t.me/s/finamalert",
+            language="ru",
+            collector="telegram_public",
+            items=[item],
+            item_filter=lambda candidate: True,
+            signal_filter=lambda candidate: True,
+        )
+        stored = await repository.list_news(source_id="telegram_finamalert", limit=1)
+        return result, dict(stored[0].source_metadata)
+
+    result, metadata = asyncio.run(scenario())
+
+    analyzer.assert_not_awaited()
+    assert result["matched"] == 1
+    assert result["accepted"] == 1
+    assert result["signal_candidates"] == 0
+    assert result["analysis_candidates"] == 0
+    assert metadata["event_candidate"] is True
+    assert metadata["classification_status"] == "context_only"
+    assert metadata["classification_reason"] == "analysis_only_source"
+    assert metadata["signal_outcome"] == {
+        "status": "rejected_before_analysis",
+        "reason": "analysis_only_source",
+        "signal_count": 0,
+        "policy_version": "candidate-gate-0.7.0",
+    }
+    assert signal_analysis_exclusion_reason("telegram_selfinvestor", item) is None
+
+
 def test_market_event_filter_keeps_sector_incident_without_company_signal() -> None:
     incident = RssItem(
         external_id="sector-incident",
@@ -615,7 +693,7 @@ def test_product_noise_records_bounded_reason_without_calling_analyzer() -> None
         "status": "rejected_before_analysis",
         "reason": "product_or_marketing_noise",
         "signal_count": 0,
-        "policy_version": "candidate-gate-0.6.0",
+        "policy_version": "candidate-gate-0.7.0",
     }
 
 

@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from eventedge.configs.scoring import load_scoring_config
 
 CURRENT_NEWS_MODEL_VERSION = "signal-engine-0.6.1"
-CURRENT_SIGNAL_CONFIG_VERSION = 4
+CURRENT_SIGNAL_CONFIG_VERSION = 5
 DOWN_SCORE_THRESHOLD = -30.0
 MINIMUM_DOWN_CONFIDENCE = 0.80
 
