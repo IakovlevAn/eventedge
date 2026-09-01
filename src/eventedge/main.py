@@ -3014,10 +3014,8 @@ async def _load_evaluation_material(
         for epoch in epoch_records
         if (epoch.model_version, epoch.config_version) not in epoch_by_model
     ]
-    if progress_epochs:
-        await asyncio.gather(
-            *(repository.upsert_evaluation_epoch(epoch) for epoch in progress_epochs)
-        )
+    for epoch in progress_epochs:
+        await repository.upsert_evaluation_epoch(epoch)
     # Raw is the large side of the ledger. A failed write leaves a hidden
     # progress epoch with expected per-signal counts; the next run resumes only
     # incomplete signal_ids. Complete epochs are published after bulk-upsert.
@@ -3027,9 +3025,8 @@ async def _load_evaluation_material(
             evaluated_at=generated_at,
             evaluation_methodology=EVALUATION_METHODOLOGY_VERSION,
         )
-    writes = [repository.upsert_evaluation_epoch(epoch) for epoch in epoch_records]
-    if writes:
-        await asyncio.gather(*writes)
+    for epoch in epoch_records:
+        await repository.upsert_evaluation_epoch(epoch)
     stored_epochs = await repository.list_evaluation_epochs(include_observations=False)
     return outcomes, signals, candles_by_ticker, news_by_id, stored_epochs
 
