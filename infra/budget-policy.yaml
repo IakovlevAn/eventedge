@@ -28,7 +28,7 @@ runtime_caps:
     zone_requests_limit: 3
     execution_timeout_seconds: 180
   ydb_serverless:
-    throttling_rcu_limit: 100
+    throttling_rcu_limit: 500
     storage_size_limit_mb: 1024
     provisioned_rcu: 0
   source_collection:
