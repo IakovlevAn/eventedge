@@ -32,7 +32,7 @@ Collection worker:
 
 YDB Serverless:
 
-- throughput cap — 100 RU/с без provisioned capacity;
+- throughput cap — 500 RU/с без provisioned capacity;
 - storage cap — 1 GB;
 - оплачивается фактическое потребление RU, а не установленный throughput cap.
 
