@@ -3230,7 +3230,7 @@ async def export_evals(
     download: bool = False,
 ) -> Response:
     repository: NewsRepository = request.app.state.news_repository
-    epochs = latest_evaluation_epochs(await repository.list_evaluation_epochs())
+    epochs = await repository.list_evaluation_epochs()
     selected_epochs = [
         epoch
         for epoch in epochs
@@ -3238,11 +3238,6 @@ async def export_evals(
         and (config_version is None or epoch.config_version == config_version)
     ]
     if dataset == "timeseries":
-        directional_signal_ids = {
-            str(outcome["signal_id"])
-            for epoch in selected_epochs
-            for outcome in directional_epoch_outcomes(epoch)
-        }
         selected_epoch_keys = {
             (epoch.model_version, epoch.config_version) for epoch in selected_epochs
         }
@@ -3261,7 +3256,7 @@ async def export_evals(
             }
             for epoch in selected_epochs
             for row in epoch.observations
-            if row.get("signal_id") in directional_signal_ids
+            if row.get("signal_id") and row.get("observation_at")
         }
         for row in await repository.list_evaluation_observations():
             key = (
@@ -3270,7 +3265,7 @@ async def export_evals(
                 str(row.get("signal_id", "")),
                 str(row.get("observation_at", "")),
             )
-            if (key[0], key[1]) in selected_epoch_keys and key[2] in directional_signal_ids:
+            if (key[0], key[1]) in selected_epoch_keys and key[2] and key[3]:
                 observation_by_key[key] = dict(row)
         rows = sorted(
             observation_by_key.values(),
@@ -3315,9 +3310,37 @@ async def export_evals(
             "signed_return_pct",
         ]
     else:
-        selected_outcomes = [
-            outcome for epoch in selected_epochs for outcome in directional_epoch_outcomes(epoch)
-        ]
+        outcome_by_key: dict[tuple[str, int, str], dict[str, object]] = {}
+        for epoch in sorted(
+            selected_epochs,
+            key=lambda item: (
+                evaluation_epoch_methodology(item) == EVALUATION_METHODOLOGY_VERSION,
+                item.evaluated_at,
+                item.epoch_id,
+            ),
+        ):
+            for outcome in directional_epoch_outcomes(epoch):
+                signal_id = str(outcome.get("signal_id", ""))
+                if not signal_id:
+                    continue
+                outcome_by_key[(epoch.model_version, epoch.config_version, signal_id)] = {
+                    **dict(outcome),
+                    "model_version": str(
+                        outcome.get("model_version") or epoch.model_version
+                    ),
+                    "config_version": int(
+                        outcome.get("config_version") or epoch.config_version
+                    ),
+                }
+        selected_outcomes = sorted(
+            outcome_by_key.values(),
+            key=lambda outcome: (
+                str(outcome.get("model_version", "")),
+                int(outcome.get("config_version", 0) or 0),
+                str(outcome.get("signal_as_of") or outcome.get("as_of") or ""),
+                str(outcome.get("signal_id", "")),
+            ),
+        )
         rows = outcome_export_rows(selected_outcomes)
         truncated = False
         fieldnames = [
