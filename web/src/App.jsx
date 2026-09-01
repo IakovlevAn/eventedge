@@ -32,6 +32,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { separateAssessmentLayers } from "./assessment.js";
 import { companyCoverageView } from "./companyCoverage.js";
+import { evalOutcomeView, newestEvalOutcomes } from "./evalOutcome.js";
 import { CANONICAL_NEWS_PATH, newsCoverageView } from "./newsCoverage.js";
 import { resolveSignalEvidence } from "./provenance.js";
 import { shouldAcceptSnapshot } from "./snapshot.js";
@@ -1664,12 +1665,14 @@ function EvalsScreen() {
   if (status !== "ready") return <DataState error={status === "error" ? error : ""} onRetry={() => window.location.reload()} />;
 
   const { summary, breakdowns, relationships, quality_series: qualitySeries, outcomes } = payload.data;
-  const hitRate = summary.hit_rate_pct === null ? "—" : `${summary.hit_rate_pct}%`;
-  const averageReturn = summary.average_signed_return_pct === null ? "—" : formatPct(summary.average_signed_return_pct);
-  const medianReturn = summary.median_signed_return_pct === null ? "—" : formatPct(summary.median_signed_return_pct);
+  const liveSummary = summary.cohorts?.live || summary;
+  const hitRate = liveSummary.hit_rate_pct === null ? "—" : `${liveSummary.hit_rate_pct}%`;
+  const averageReturn = liveSummary.average_signed_return_pct === null ? "—" : formatPct(liveSummary.average_signed_return_pct);
+  const medianReturn = liveSummary.median_signed_return_pct === null ? "—" : formatPct(liveSummary.median_signed_return_pct);
   const horizonLabels = { "1h": "1 час", "4h": "4 часа", "1d": "1 день", "3d": "3 дня" };
   const directionLabels = { up: "Вверх", down: "Вниз", neutral: "Нейтрально" };
   const latestQuality = qualitySeries.at(-1);
+  const visibleOutcomes = newestEvalOutcomes(outcomes, 30);
   const storedModelEpochs = payload.meta.model_epochs || [];
   const modelEpochs = storedModelEpochs.some((epoch) => epoch.model_version === CURRENT_SIGNAL_MODEL_VERSION)
     ? storedModelEpochs
@@ -1695,24 +1698,24 @@ function EvalsScreen() {
   return (
     <main className="screen section-screen evals-screen">
       <section className="page-hero evals-hero">
-        <div><span className="eyebrow"><Activity size={13} /> Проверка реальностью</span><h1>Evals: сигналы в цифрах</h1><p>Только направленные сигналы «вверх» и «вниз» сопоставляются с реальной ценой MOEX. Нейтральные события сохраняются в истории, но не искажают hit rate.</p></div>
+        <div><span className="eyebrow"><Activity size={13} /> Проверка реальностью</span><h1>Evals: сигналы в цифрах</h1><p>Каждый сохранённый сигнал — вверх, вниз или нейтрально, по компании, рынку или отрасли — получает outcome и ценовой ряд. Live и ретроспективные решения показаны раздельно.</p></div>
         <div className="eval-hero-actions">
           <div className={`eval-live${error ? " is-stale" : ""}`}><i /><span><strong>{error ? "Показываем последний snapshot" : "Snapshot каждые 10 минут"}</strong><small>{payload.meta.generated_at ? `${formatRelative(payload.meta.generated_at)} · ` : "Расчёт новой эпохи ожидается · "}основной горизонт 4 часа</small></span></div>
           <FilterSelect className="eval-model-filter" label="Эпоха модели" value={activeEpochKey} onChange={setSelectedEpochKey} options={orderedModelEpochs.map((epoch) => ({ value: `${epoch.model_version}::${epoch.config_version}`, label: `${epoch.model_version} · cfg ${epoch.config_version} · n=${epoch.signals}` }))} />
           <div className="eval-exports">
             <a href={apiUrl("/v1/evals/export?format=csv&dataset=outcomes&model_version=all&download=true")} download><Download size={13} /> Все эпохи · outcomes</a>
-            <a href={apiUrl("/v1/evals/export?format=csv&dataset=timeseries&model_version=all&download=true")} download><Download size={13} /> Все эпохи · raw</a>
+            <a href={apiUrl("/v1/evals/export?format=json&dataset=timeseries&model_version=all&limit=2000")} target="_blank" rel="noreferrer"><Download size={13} /> Raw · API-страницы</a>
           </div>
         </div>
       </section>
 
-      <section className="eval-warning"><ShieldCheck size={17} /><div><strong>Это технический eval, а не доказательство доходности</strong><span>Выборка пока мала и не является point‑in‑time калиброванным backtest. Результаты нужны, чтобы находить слабые места модели до использования капитала.</span></div></section>
+      <section className="eval-warning"><ShieldCheck size={17} /><div><strong>Это технический eval, а не доказательство доходности</strong><span>Общая статистика покрывает весь ledger. Для честной оценки live-качества используй отдельный live cohort; ретро-срез нужен для исследования старых моделей.</span></div></section>
 
       <section className="eval-kpis">
-        <article><span>Проверено сигналов</span><strong>{summary.evaluated}</strong><small>из {summary.signals_total} доступных в хранилище</small></article>
+        <article><span>Проверено сигналов</span><strong>{summary.evaluated}</strong><small>из {summary.signals_total} · live {summary.live_evaluated ?? summary.evaluated} · ретро {summary.research_evaluated ?? 0}</small></article>
         <article><span>Попадание направления</span><strong>{hitRate}</strong><small>через 4 часа, fallback на 1 час</small></article>
-        <article><span>Средняя реакция</span><strong className={Number(summary.average_signed_return_pct) >= 0 ? "market-positive" : "market-negative"}>{averageReturn}</strong><small>медиана {medianReturn} · signed return за 4 часа</small></article>
-        <article><span>Покрытие eval</span><strong>{summary.coverage_pct}%</strong><small>{summary.pending} ждут первый outcome · {summary.partial || 0} оценены частично · {summary.unavailable} вне окна</small></article>
+        <article><span>Средняя реакция</span><strong className={Number(liveSummary.average_signed_return_pct) >= 0 ? "market-positive" : "market-negative"}>{averageReturn}</strong><small>live · медиана {medianReturn} · signed return за 4 часа</small></article>
+        <article><span>Покрытие live eval</span><strong>{liveSummary.coverage_pct}%</strong><small>{liveSummary.pending} ждут · {liveSummary.missed_window || 0} без окна 1–4 ч · {liveSummary.unavailable} без истории</small></article>
       </section>
 
       <section className="eval-analysis-grid">
@@ -1782,30 +1785,29 @@ function EvalsScreen() {
       </section>
 
       <section className="outcomes-card">
-        <div className="section-heading"><span><BarChart3 size={15} /> Реакция после каждого сигнала</span><small>цена от первой торгуемой свечи</small></div>
+        <div className="section-heading"><span><BarChart3 size={15} /> Реакция после каждого сигнала</span><small>{visibleOutcomes.length} самых свежих · цена от первой торгуемой свечи</small></div>
         <div className="eval-table-wrap">
           <table className="eval-table outcomes-table">
             <colgroup><col className="outcome-col-signal" /><col className="outcome-col-news" /><col span="4" className="outcome-col-return" /><col className="outcome-col-verdict" /></colgroup>
-            <thead><tr><th>Сигнал</th><th>Новость</th><th>1 час</th><th>4 часа</th><th>1 день</th><th>3 дня</th><th>Вердикт</th></tr></thead>
+            <thead><tr><th>Сигнал</th><th>Новость</th><th>1 час</th><th>4 часа</th><th>1 день</th><th>3 дня</th><th>Статус / вердикт</th></tr></thead>
             <tbody>
-              {outcomes.slice(0, 30).map((outcome) => {
-                const observedHorizon = ["4h", "1h"].find((period) => outcome.returns?.[period] !== null && outcome.returns?.[period] !== undefined);
-                const observedLabel = observedHorizon ? horizonLabels[observedHorizon] : null;
-                const verdict = outcome.status === "unavailable"
-                  ? <span className="eval-verdict is-unavailable">Нет истории</span>
-                  : outcome.verdict === null
-                    ? <span className="eval-verdict is-pending">Ждём 1 час</span>
-                    : outcome.verdict
-                      ? <span className="eval-verdict is-hit"><Check size={11} /> {outcome.status === "partial" ? `Пока попал · ${observedLabel}` : "Попал"}</span>
-                      : <span className="eval-verdict is-miss"><X size={11} /> {outcome.status === "partial" ? `Пока не попал · ${observedLabel}` : "Не попал"}</span>;
+              {visibleOutcomes.map((outcome) => {
+                const outcomeView = evalOutcomeView(outcome);
+                const verdictIcon = outcomeView.verdictStatus === "evaluated"
+                  ? outcome.verdict ? <Check size={11} /> : <X size={11} />
+                  : outcomeView.verdictStatus === "missed_window"
+                    ? <Clock3 size={11} />
+                    : outcomeView.verdictStatus === "legacy_excluded"
+                      ? <ShieldCheck size={11} />
+                      : null;
                 return <tr key={outcome.signal_id}>
-                  <td><div className="outcome-signal"><strong>{outcome.ticker}</strong><Direction direction={outcome.direction} /><small>{formatScore(outcome.score)} п.</small></div></td>
+                  <td><div className="outcome-signal-cell"><div className="outcome-signal"><strong>{outcome.ticker}</strong><Direction direction={outcome.direction} /><small>{formatScore(outcome.score)} п.</small></div><span className={`outcome-cohort is-${outcomeView.cohort}`}>{outcomeView.cohortLabel}</span></div></td>
                   <td>{outcome.news ? <a href={outcome.news.url} target="_blank" rel="noreferrer" title={outcome.news.title}><span>{outcome.news.source_id}</span><strong>{outcome.news.title}</strong></a> : <span>Источник недоступен</span>}</td>
                   {["1h", "4h", "1d", "3d"].map((period) => {
                     const value = outcome.returns?.[period];
                     return <td key={period} className={value === null || value === undefined ? "" : Number(value) >= 0 ? "market-positive" : "market-negative"}>{formatPct(value)}</td>;
                   })}
-                  <td>{verdict}</td>
+                  <td><div className="outcome-eval-state" title={outcomeView.reasonLabel || outcomeView.stateLabel}><span className={`eval-verdict is-${outcomeView.verdictTone}`}>{verdictIcon}{outcomeView.verdictLabel}</span><small>{outcomeView.stateLabel}{outcomeView.reasonLabel ? ` · ${outcomeView.reasonLabel}` : ""}</small></div></td>
                 </tr>;
               })}
             </tbody>
@@ -2025,7 +2027,7 @@ function MethodologyScreen({ onApi, allNews, newsMeta }) {
 const apiEndpoints = [
   { id: "assessments", method: "GET", path: "/v1/assessments", title: "News + market layers", description: "Раздельные news_signal, market_context и симметричный market_scenario; legacy combined-поля сохранены только для совместимости.", parameter: { name: "tickers", type: "string", description: "Опциональный список тикеров MOEX через запятую" } },
   { id: "evals", method: "GET", path: "/v1/evals", title: "Анализ качества сигналов", description: "Короткие 1ч/4ч метрики, Pearson и выбор точной model/config эпохи.", parameter: { name: "model_version, config_version", type: "string, integer", description: "Версия модели и её точная конфигурация; без параметров выбирается текущая эпоха" } },
-  { id: "evals_export", method: "GET", path: "/v1/evals/export?format=csv&dataset=timeseries&model_version=all&download=true", title: "Выгрузка Evals", description: "Пагинированный API или полная gzip-выгрузка всех model/config эпох и сырых свечей.", parameter: { name: "dataset", type: "string", description: "outcomes или timeseries; model_version/config_version фильтруют эпоху, download=true отдаёт всё" } },
+  { id: "evals_export", method: "GET", path: "/v1/evals/export?format=json&dataset=timeseries&model_version=all&limit=2000", title: "Выгрузка Evals", description: "Пагинированный API всех model/config эпох. Большой raw-корпус читается страницами, чтобы не упираться в лимит ответа API Gateway.", parameter: { name: "dataset, limit, cursor", type: "string, integer, string", description: "outcomes или timeseries; next_cursor из meta открывает следующую страницу" } },
   { id: "signals", method: "GET", path: "/v1/signals?limit=20", title: "Сигналы Signal Engine", description: "Активный view возвращает не более одного канонического сигнала на компанию: строго самое новое решение, включая neutral. Полная хронология доступна отдельно.", parameter: { name: "limit", type: "integer", description: "Количество записей, максимум 100" } },
   { id: "news", method: "GET", path: "/v1/news?limit=20", title: "Лента новостей", description: "Исходные публикации, event-проекция и связанные сигналы.", parameter: { name: "limit", type: "integer", description: "Количество публикаций, максимум 500" } },
   { id: "events", method: "GET", path: "/v1/events?limit=20", title: "Рыночные события", description: "Публикации как события уровня рынок, отрасль или компания.", parameter: { name: "scope", type: "string", description: "market, sector или company" } },
@@ -2060,7 +2062,7 @@ function ApiScreen() {
     "relationships": [{"code":"signal_strength_vs_4h_return","value":0.21}],
     "outcomes": [{"ticker":"SBER","model_version":"signal-engine-0.6.1","returns":{"1h":0.4,"4h":0.8,"1d":1.2,"3d":2.1},"verdict":true}]
   },
-  "meta": {"selected_model_version":"signal-engine-0.6.1","primary_horizon":"4h","evaluation_scope":"company_directional_signals_only"}
+  "meta": {"selected_model_version":"signal-engine-0.6.1","primary_horizon":"4h","evaluation_scope":"all_stored_signals"}
 }` : endpoint.id === "evals_export" ? `signal_id,ticker,signal_as_of,direction,score,confidence,model_version,config_version,observation_at,offset_minutes,return_pct
 sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,signal-engine-0.6.1,1,2026-08-08T08:00:00Z,60,0.42` : endpoint.id === "snapshot" ? `{
   "data": {

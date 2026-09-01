@@ -1,8 +1,8 @@
 version: 1
 currency: RUB
 period: monthly
-monthly_budget: 12000
-monthly_soft_cap: 10500
+monthly_budget: 15000
+monthly_soft_cap: 12000
 notifications:
   thresholds_percent: [25, 50, 70, 85, 95]
   recipients:
@@ -45,6 +45,6 @@ notes:
   - News collection and LLM analysis run in a separate non-provisioned worker so timer jobs cannot block the public API.
   - The pay-per-use worker uses 2 vCPU and 4 GiB per instance and scales overlapping timer lanes across up to three isolated instances; collection is raw-only, YDB has an eight-session pool, and semantic LLM work remains single-flight in maintenance.
   - Broad RSS and Telegram sources use five stable minute buckets so each source keeps a five-minute interval without a connection burst.
-  - At 10500 RUB, freeze resource increases and review the current-month forecast before the 12000 RUB hard notification threshold.
+  - At 12000 RUB, freeze resource increases and review the current-month forecast before the 15000 RUB hard notification threshold.
   - Historical reprocessing is capped at one targetable candidate per five-minute maintenance run so even a cold batch fits the trigger's 30-second request window without cancellation.
   - Automatic shutdown requires a separate explicitly approved runbook or trigger.

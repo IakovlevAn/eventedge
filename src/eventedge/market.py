@@ -34,6 +34,13 @@ EVALUATION_INDEX_BENCHMARKS: dict[str, str] = {
     "RUPOWER": "MOEXEU",
 }
 
+# Product history keeps the canonical ticker used when a signal was created.
+# Resolve renamed/redomiciled securities only at the MOEX boundary so old
+# signal IDs, API filters and model epochs remain immutable.
+MOEX_SECURITY_ALIASES: dict[str, str] = {
+    "FIXP": "FIXR",
+}
+
 
 class InstrumentNotFoundError(LookupError):
     pass
@@ -176,7 +183,10 @@ class MoexMarketDataClient:
         interval: int,
         lookback_days: int,
     ) -> dict[str, object]:
-        benchmark_ticker = EVALUATION_INDEX_BENCHMARKS.get(ticker, ticker)
+        benchmark_ticker = EVALUATION_INDEX_BENCHMARKS.get(
+            ticker,
+            MOEX_SECURITY_ALIASES.get(ticker, ticker),
+        )
         encoded_ticker = quote(benchmark_ticker, safe="")
         from_date = (datetime.now(UTC) - timedelta(days=lookback_days)).date().isoformat()
         if ticker in EVALUATION_INDEX_BENCHMARKS:
@@ -232,7 +242,8 @@ class MoexMarketDataClient:
         }
 
     def _load_snapshot(self, ticker: str) -> dict[str, object]:
-        encoded_ticker = quote(ticker, safe="")
+        market_ticker = MOEX_SECURITY_ALIASES.get(ticker, ticker)
+        encoded_ticker = quote(market_ticker, safe="")
         security_url = (
             f"{MOEX_ISS_BASE_URL}/engines/stock/markets/shares/boards/TQBR/"
             f"securities/{encoded_ticker}.json"
@@ -301,6 +312,7 @@ class MoexMarketDataClient:
         ]
         return {
             "ticker": ticker,
+            "market_ticker": market_ticker,
             "name": str(security.get("SHORTNAME") or ticker),
             "last_price": str(last_price),
             "currency": "RUB",

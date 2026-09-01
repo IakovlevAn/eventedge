@@ -37,7 +37,7 @@ TIMER_SPECS = tuple(
     TimerSpec(
         name="eventedge-maintenance",
         description=(
-            "Refresh directional Evals and reprocess current-model candidates "
+            "Refresh all-signal Evals and reprocess current-model candidates "
             "every five minutes"
         ),
         cron_expression="2/5 * ? * * *",
