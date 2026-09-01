@@ -1387,7 +1387,7 @@ class YdbNewsRepository:
                     except Exception:
                         if attempt + 1 >= EVALUATION_OBSERVATION_BULK_ATTEMPTS:
                             raise
-                        await asyncio.sleep(0.1 * (2**attempt))
+                        await asyncio.sleep(min(4.0, 0.5 * (2**attempt)))
 
         await asyncio.gather(*(upsert_batch(batch) for batch in batches))
 
@@ -1686,9 +1686,9 @@ def evaluation_observation_key(
 
 
 EVALUATION_OBSERVATION_PAGE_MAX_LIMIT = 5_000
-EVALUATION_OBSERVATION_BULK_BATCH_SIZE = 1_000
-EVALUATION_OBSERVATION_BULK_CONCURRENCY = 4
-EVALUATION_OBSERVATION_BULK_ATTEMPTS = 3
+EVALUATION_OBSERVATION_BULK_BATCH_SIZE = 250
+EVALUATION_OBSERVATION_BULK_CONCURRENCY = 1
+EVALUATION_OBSERVATION_BULK_ATTEMPTS = 6
 EVALUATION_OBSERVATION_V2_BULK_COLUMNS = (
     ydb.BulkUpsertColumns()
     .add_column("evaluation_methodology", ydb.PrimitiveType.Utf8)
