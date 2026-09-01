@@ -16,7 +16,9 @@ MOEX_ISS_BASE_URL = "https://iss.moex.com/iss"
 MOSCOW_TIMEZONE = ZoneInfo("Europe/Moscow")
 DEFAULT_TIMEOUT_SECONDS = 10.0
 MAX_DAILY_CANDLES = 66
-MAX_INTRADAY_CANDLES = 1500
+# Sixty calendar days can contain more than 4,000 ten-minute trading candles.
+# Evals needs the complete window around old evidence, not only its first pages.
+MAX_INTRADAY_CANDLES = 6_000
 
 # Context signals use product codes rather than exchange tickers. Evals measure
 # them against explicit MOEX index proxies instead of silently dropping them.
@@ -201,7 +203,7 @@ class MoexMarketDataClient:
             )
         rows: list[dict[str, Any]] = []
         page_size = 500
-        for start in range(0, 1500, page_size):
+        for start in range(0, MAX_INTRADAY_CANDLES, page_size):
             payload = self._requester(
                 candles_url,
                 {

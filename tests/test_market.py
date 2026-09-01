@@ -212,6 +212,44 @@ def test_intraday_candles_keep_full_eval_window_across_pages() -> None:
     assert result["candles"][-1]["close"] == 111.99
 
 
+def test_intraday_candles_do_not_drop_the_tail_of_a_sixty_day_eval_window() -> None:
+    starts: list[int] = []
+    first_candle = datetime(2026, 8, 1, 10)
+    all_rows = []
+    for index in range(2_100):
+        begin = first_candle + timedelta(minutes=index * 10)
+        all_rows.append(
+            [
+                begin.strftime("%Y-%m-%d %H:%M:%S"),
+                100,
+                100,
+                101,
+                99,
+                1_000_000,
+                10_000,
+            ]
+        )
+
+    def paged_request(url: str, params: dict[str, object]) -> dict[str, Any]:
+        assert url.endswith("/candles.json")
+        start = int(params["start"])
+        starts.append(start)
+        return {
+            "candles": {
+                "columns": ["begin", "open", "close", "high", "low", "value", "volume"],
+                "data": all_rows[start : start + 500],
+            }
+        }
+
+    client = MoexMarketDataClient(requester=paged_request)
+
+    result = asyncio.run(client.candles("SBER", interval=10, lookback_days=60))
+
+    assert starts == [0, 500, 1000, 1500, 2000]
+    assert len(result["candles"]) == 2_100
+    assert result["candles"][-1]["begin"] > result["candles"][1500]["begin"]
+
+
 def test_identical_concurrent_snapshots_share_one_load() -> None:
     calls = 0
     calls_lock = threading.Lock()
