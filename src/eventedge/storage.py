@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -272,6 +274,13 @@ class EvaluationEpochRecord:
         }
 
 
+@dataclass(frozen=True)
+class EvaluationObservationPage:
+    items: tuple[dict[str, object], ...]
+    total_count: int
+    next_cursor: str | None
+
+
 class NewsRepository(Protocol):
     async def start(self) -> None: ...
 
@@ -339,11 +348,30 @@ class NewsRepository(Protocol):
         observations: list[dict[str, object]],
         *,
         evaluated_at: datetime,
+        evaluation_methodology: str = "legacy",
     ) -> None: ...
 
     async def list_evaluation_observations(self) -> list[dict[str, object]]: ...
 
     async def count_evaluation_observations(self) -> dict[tuple[str, int], int]: ...
+
+    async def list_evaluation_observations_page(
+        self,
+        *,
+        evaluation_methodology: str,
+        model_version: str | None = None,
+        config_version: int | None = None,
+        limit: int = 1_000,
+        cursor: str | None = None,
+    ) -> EvaluationObservationPage: ...
+
+    async def count_evaluation_observations_by_signal(
+        self,
+        *,
+        evaluation_methodology: str,
+        model_version: str,
+        config_version: int,
+    ) -> dict[str, int]: ...
 
     async def get_or_create_assessment_snapshot(
         self,
@@ -685,7 +713,7 @@ class MemoryNewsRepository:
         self._telegram_sources: dict[str, TelegramSourceRecord] = {}
         self._evaluation_epochs: dict[str, EvaluationEpochRecord] = {}
         self._evaluation_observations: dict[
-            tuple[str, int, str, str], dict[str, object]
+            tuple[str, str, int, str, str], dict[str, object]
         ] = {}
         self._assessment_snapshots: dict[str, tuple[datetime, dict[str, object]]] = {}
         self._cache_assessment_snapshots = cache_assessment_snapshots
@@ -869,11 +897,18 @@ class MemoryNewsRepository:
         observations: list[dict[str, object]],
         *,
         evaluated_at: datetime,
+        evaluation_methodology: str = "legacy",
     ) -> None:
         del evaluated_at
+        normalized_methodology = normalize_evaluation_methodology(evaluation_methodology)
         for observation in observations:
-            key = evaluation_observation_key(observation)
-            self._evaluation_observations[key] = dict(observation)
+            payload = dict(observation)
+            payload["evaluation_methodology"] = normalized_methodology
+            key = evaluation_observation_v2_key(
+                payload,
+                evaluation_methodology=normalized_methodology,
+            )
+            self._evaluation_observations[key] = payload
 
     async def list_evaluation_observations(self) -> list[dict[str, object]]:
         return [
@@ -883,9 +918,86 @@ class MemoryNewsRepository:
 
     async def count_evaluation_observations(self) -> dict[tuple[str, int], int]:
         counts: dict[tuple[str, int], int] = {}
-        for model_version, config_version, _, _ in self._evaluation_observations:
+        for _, model_version, config_version, _, _ in self._evaluation_observations:
             key = (model_version, config_version)
             counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    async def list_evaluation_observations_page(
+        self,
+        *,
+        evaluation_methodology: str,
+        model_version: str | None = None,
+        config_version: int | None = None,
+        limit: int = 1_000,
+        cursor: str | None = None,
+    ) -> EvaluationObservationPage:
+        normalized_methodology = normalize_evaluation_methodology(evaluation_methodology)
+        normalized_limit = normalize_evaluation_observation_page_limit(limit)
+        cursor_key = (
+            decode_evaluation_observation_cursor(cursor) if cursor is not None else None
+        )
+        if cursor_key is not None and cursor_key[0] != normalized_methodology:
+            raise ValueError("evaluation observation cursor belongs to another methodology")
+        if (
+            cursor_key is not None
+            and model_version is not None
+            and cursor_key[1] != model_version
+        ):
+            raise ValueError("evaluation observation cursor belongs to another model")
+        if (
+            cursor_key is not None
+            and config_version is not None
+            and cursor_key[2] != config_version
+        ):
+            raise ValueError("evaluation observation cursor belongs to another config")
+
+        keys = sorted(
+            key
+            for key in self._evaluation_observations
+            if key[0] == normalized_methodology
+            and (model_version is None or key[1] == model_version)
+            and (config_version is None or key[2] == config_version)
+            and (cursor_key is None or key > cursor_key)
+        )
+        total_count = sum(
+            1
+            for key in self._evaluation_observations
+            if key[0] == normalized_methodology
+            and (model_version is None or key[1] == model_version)
+            and (config_version is None or key[2] == config_version)
+        )
+        selected_keys = keys[: normalized_limit + 1]
+        has_more = len(selected_keys) > normalized_limit
+        selected_keys = selected_keys[:normalized_limit]
+        return EvaluationObservationPage(
+            items=tuple(dict(self._evaluation_observations[key]) for key in selected_keys),
+            total_count=total_count,
+            next_cursor=(
+                encode_evaluation_observation_cursor(selected_keys[-1])
+                if has_more and selected_keys
+                else None
+            ),
+        )
+
+    async def count_evaluation_observations_by_signal(
+        self,
+        *,
+        evaluation_methodology: str,
+        model_version: str,
+        config_version: int,
+    ) -> dict[str, int]:
+        normalized_methodology = normalize_evaluation_methodology(evaluation_methodology)
+        counts: dict[str, int] = {}
+        for methodology, stored_model, stored_config, signal_id, _ in (
+            self._evaluation_observations
+        ):
+            if (
+                methodology == normalized_methodology
+                and stored_model == model_version
+                and stored_config == config_version
+            ):
+                counts[signal_id] = counts.get(signal_id, 0) + 1
         return counts
 
     async def get_or_create_assessment_snapshot(
@@ -1246,12 +1358,38 @@ class YdbNewsRepository:
         observations: list[dict[str, object]],
         *,
         evaluated_at: datetime,
+        evaluation_methodology: str = "legacy",
     ) -> None:
-        for query, parameters in evaluation_observation_upsert_batches(
+        rows = evaluation_observation_bulk_upsert_rows(
             observations,
             evaluated_at=evaluated_at,
-        ):
-            await self._require_pool().execute_with_retries(query, parameters)
+            evaluation_methodology=evaluation_methodology,
+        )
+        if not rows:
+            return
+
+        batches = [
+            rows[start : start + EVALUATION_OBSERVATION_BULK_BATCH_SIZE]
+            for start in range(0, len(rows), EVALUATION_OBSERVATION_BULK_BATCH_SIZE)
+        ]
+        semaphore = asyncio.Semaphore(EVALUATION_OBSERVATION_BULK_CONCURRENCY)
+
+        async def upsert_batch(batch: list[dict[str, object]]) -> None:
+            async with semaphore:
+                for attempt in range(EVALUATION_OBSERVATION_BULK_ATTEMPTS):
+                    try:
+                        await self._require_driver().table_client.bulk_upsert(
+                            evaluation_observation_v2_table_path(self._database),
+                            batch,
+                            EVALUATION_OBSERVATION_V2_BULK_COLUMNS,
+                        )
+                        return
+                    except Exception:
+                        if attempt + 1 >= EVALUATION_OBSERVATION_BULK_ATTEMPTS:
+                            raise
+                        await asyncio.sleep(0.1 * (2**attempt))
+
+        await asyncio.gather(*(upsert_batch(batch) for batch in batches))
 
     async def list_evaluation_observations(self) -> list[dict[str, object]]:
         result_sets = await self._require_pool().execute_with_retries(
@@ -1269,6 +1407,62 @@ class YdbNewsRepository:
             (row.model_version, int(row.config_version)): int(row.observation_count)
             for row in rows
         }
+
+    async def list_evaluation_observations_page(
+        self,
+        *,
+        evaluation_methodology: str,
+        model_version: str | None = None,
+        config_version: int | None = None,
+        limit: int = 1_000,
+        cursor: str | None = None,
+    ) -> EvaluationObservationPage:
+        query, parameters, normalized_limit = evaluation_observation_page_query(
+            evaluation_methodology=evaluation_methodology,
+            model_version=model_version,
+            config_version=config_version,
+            limit=limit,
+            cursor=cursor,
+        )
+        result_sets = await self._require_pool().execute_with_retries(query, parameters)
+        total_rows = result_sets[0].rows if result_sets else []
+        total_count = int(total_rows[0].total_count) if total_rows else 0
+        page_rows = result_sets[1].rows if len(result_sets) > 1 else []
+        has_more = len(page_rows) > normalized_limit
+        selected_rows = page_rows[:normalized_limit]
+        next_cursor = None
+        if has_more and selected_rows:
+            last = selected_rows[-1]
+            next_cursor = encode_evaluation_observation_cursor(
+                (
+                    last.evaluation_methodology,
+                    last.model_version,
+                    int(last.config_version),
+                    last.signal_id,
+                    last.observation_at,
+                )
+            )
+        return EvaluationObservationPage(
+            items=tuple(json_object(row.payload) for row in selected_rows),
+            total_count=total_count,
+            next_cursor=next_cursor,
+        )
+
+    async def count_evaluation_observations_by_signal(
+        self,
+        *,
+        evaluation_methodology: str,
+        model_version: str,
+        config_version: int,
+    ) -> dict[str, int]:
+        query, parameters = count_evaluation_observations_by_signal_query(
+            evaluation_methodology=evaluation_methodology,
+            model_version=model_version,
+            config_version=config_version,
+        )
+        result_sets = await self._require_pool().execute_with_retries(query, parameters)
+        rows = result_sets[0].rows if result_sets else []
+        return {row.signal_id: int(row.observation_count) for row in rows}
 
     async def get_or_create_assessment_snapshot(
         self,
@@ -1328,6 +1522,11 @@ class YdbNewsRepository:
         if self._pool is None:
             raise RuntimeError("YDB repository has not been started")
         return self._pool
+
+    def _require_driver(self) -> ydb.aio.Driver:
+        if self._driver is None:
+            raise RuntimeError("YDB repository has not been started")
+        return self._driver
 
 
 def job_from_row(row: object) -> Job:
@@ -1484,6 +1683,234 @@ def evaluation_observation_key(
     if not model_version or config_version < 1 or not signal_id or not observation_at:
         raise ValueError("evaluation observation is missing its stable identity")
     return model_version, config_version, signal_id, observation_at
+
+
+EVALUATION_OBSERVATION_PAGE_MAX_LIMIT = 5_000
+EVALUATION_OBSERVATION_BULK_BATCH_SIZE = 1_000
+EVALUATION_OBSERVATION_BULK_CONCURRENCY = 4
+EVALUATION_OBSERVATION_BULK_ATTEMPTS = 3
+EVALUATION_OBSERVATION_V2_BULK_COLUMNS = (
+    ydb.BulkUpsertColumns()
+    .add_column("evaluation_methodology", ydb.PrimitiveType.Utf8)
+    .add_column("model_version", ydb.PrimitiveType.Utf8)
+    .add_column("config_version", ydb.PrimitiveType.Uint32)
+    .add_column("signal_id", ydb.PrimitiveType.Utf8)
+    .add_column("observation_at", ydb.PrimitiveType.Utf8)
+    .add_column("evaluated_at", ydb.PrimitiveType.Timestamp)
+    .add_column("payload", ydb.PrimitiveType.Json)
+)
+
+
+def normalize_evaluation_methodology(value: str) -> str:
+    normalized = value.strip()
+    if not normalized or len(normalized) > 128:
+        raise ValueError("evaluation_methodology must contain between 1 and 128 characters")
+    return normalized
+
+
+def normalize_evaluation_observation_page_limit(limit: int) -> int:
+    if not 1 <= limit <= EVALUATION_OBSERVATION_PAGE_MAX_LIMIT:
+        raise ValueError(
+            "evaluation observation page limit must be between 1 and "
+            f"{EVALUATION_OBSERVATION_PAGE_MAX_LIMIT}"
+        )
+    return limit
+
+
+def evaluation_observation_v2_key(
+    observation: Mapping[str, object],
+    *,
+    evaluation_methodology: str,
+) -> tuple[str, str, int, str, str]:
+    return (
+        normalize_evaluation_methodology(evaluation_methodology),
+        *evaluation_observation_key(observation),
+    )
+
+
+def encode_evaluation_observation_cursor(
+    key: tuple[str, str, int, str, str],
+) -> str:
+    payload = json.dumps(list(key), ensure_ascii=False, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def decode_evaluation_observation_cursor(
+    cursor: str,
+) -> tuple[str, str, int, str, str]:
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        payload = base64.b64decode(
+            (cursor + padding).encode(),
+            altchars=b"-_",
+            validate=True,
+        )
+        decoded = json.loads(payload.decode())
+        if not isinstance(decoded, list) or len(decoded) != 5:
+            raise ValueError
+        methodology, model_version, config_version, signal_id, observation_at = decoded
+        if (
+            not isinstance(methodology, str)
+            or not isinstance(model_version, str)
+            or type(config_version) is not int
+            or not isinstance(signal_id, str)
+            or not isinstance(observation_at, str)
+            or not methodology
+            or not model_version
+            or config_version < 1
+            or not signal_id
+            or not observation_at
+        ):
+            raise ValueError
+        return methodology, model_version, config_version, signal_id, observation_at
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("invalid evaluation observation cursor") from exc
+
+
+def evaluation_observation_page_query(
+    *,
+    evaluation_methodology: str,
+    model_version: str | None,
+    config_version: int | None,
+    limit: int,
+    cursor: str | None,
+) -> tuple[str, dict[str, object], int]:
+    methodology = normalize_evaluation_methodology(evaluation_methodology)
+    normalized_limit = normalize_evaluation_observation_page_limit(limit)
+    if model_version is not None and not model_version:
+        raise ValueError("model_version must not be empty")
+    if config_version is not None and config_version < 1:
+        raise ValueError("config_version must be positive")
+
+    declarations = ["DECLARE $evaluation_methodology AS Utf8;"]
+    parameters: dict[str, object] = {"$evaluation_methodology": methodology}
+    filters = ["evaluation_methodology = $evaluation_methodology"]
+    if model_version is not None:
+        declarations.append("DECLARE $model_version AS Utf8;")
+        parameters["$model_version"] = model_version
+        filters.append("model_version = $model_version")
+    if config_version is not None:
+        declarations.append("DECLARE $config_version AS Uint32;")
+        parameters["$config_version"] = ydb.TypedValue(
+            config_version,
+            ydb.PrimitiveType.Uint32,
+        )
+        filters.append("config_version = $config_version")
+
+    page_filters = list(filters)
+    if cursor is not None:
+        cursor_key = decode_evaluation_observation_cursor(cursor)
+        if cursor_key[0] != methodology:
+            raise ValueError("evaluation observation cursor belongs to another methodology")
+        if model_version is not None and cursor_key[1] != model_version:
+            raise ValueError("evaluation observation cursor belongs to another model")
+        if config_version is not None and cursor_key[2] != config_version:
+            raise ValueError("evaluation observation cursor belongs to another config")
+        declarations.extend(
+            (
+                "DECLARE $cursor_model_version AS Utf8;",
+                "DECLARE $cursor_config_version AS Uint32;",
+                "DECLARE $cursor_signal_id AS Utf8;",
+                "DECLARE $cursor_observation_at AS Utf8;",
+            )
+        )
+        parameters.update(
+            {
+                "$cursor_model_version": cursor_key[1],
+                "$cursor_config_version": ydb.TypedValue(
+                    cursor_key[2],
+                    ydb.PrimitiveType.Uint32,
+                ),
+                "$cursor_signal_id": cursor_key[3],
+                "$cursor_observation_at": cursor_key[4],
+            }
+        )
+        page_filters.append(
+            """(
+    model_version > $cursor_model_version
+    OR (model_version = $cursor_model_version AND config_version > $cursor_config_version)
+    OR (
+        model_version = $cursor_model_version
+        AND config_version = $cursor_config_version
+        AND signal_id > $cursor_signal_id
+    )
+    OR (
+        model_version = $cursor_model_version
+        AND config_version = $cursor_config_version
+        AND signal_id = $cursor_signal_id
+        AND observation_at > $cursor_observation_at
+    )
+)"""
+        )
+
+    query = "\n".join(declarations) + f"""
+
+SELECT COUNT(*) AS total_count
+FROM `evaluation_observations_v2`
+WHERE {" AND ".join(filters)};
+
+SELECT
+    evaluation_methodology,
+    model_version,
+    config_version,
+    signal_id,
+    observation_at,
+    payload
+FROM `evaluation_observations_v2`
+WHERE {" AND ".join(page_filters)}
+ORDER BY evaluation_methodology, model_version, config_version, signal_id, observation_at
+LIMIT {normalized_limit + 1};
+"""
+    return query, parameters, normalized_limit
+
+
+def count_evaluation_observations_by_signal_query(
+    *,
+    evaluation_methodology: str,
+    model_version: str,
+    config_version: int,
+) -> tuple[str, dict[str, object]]:
+    methodology = normalize_evaluation_methodology(evaluation_methodology)
+    if not model_version:
+        raise ValueError("model_version must not be empty")
+    if config_version < 1:
+        raise ValueError("config_version must be positive")
+    return COUNT_EVALUATION_OBSERVATIONS_BY_SIGNAL_QUERY, {
+        "$evaluation_methodology": methodology,
+        "$model_version": model_version,
+        "$config_version": ydb.TypedValue(config_version, ydb.PrimitiveType.Uint32),
+    }
+
+
+def evaluation_observation_bulk_upsert_rows(
+    observations: list[dict[str, object]],
+    *,
+    evaluated_at: datetime,
+    evaluation_methodology: str,
+) -> list[dict[str, object]]:
+    methodology = normalize_evaluation_methodology(evaluation_methodology)
+    deduplicated: dict[tuple[str, str, int, str, str], dict[str, object]] = {}
+    for observation in observations:
+        payload = dict(observation)
+        payload["evaluation_methodology"] = methodology
+        key = evaluation_observation_v2_key(
+            payload,
+            evaluation_methodology=methodology,
+        )
+        deduplicated[key] = {
+            "evaluation_methodology": methodology,
+            "model_version": key[1],
+            "config_version": key[2],
+            "signal_id": key[3],
+            "observation_at": key[4],
+            "evaluated_at": ensure_utc(evaluated_at),
+            "payload": json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        }
+    return [deduplicated[key] for key in sorted(deduplicated)]
+
+
+def evaluation_observation_v2_table_path(database: str) -> str:
+    return f"{database.rstrip('/')}/evaluation_observations_v2"
 
 
 def evaluation_observation_upsert_batches(
@@ -1695,6 +2122,24 @@ SCHEMA_STATEMENTS = (
     );
     """,
     """
+    CREATE TABLE IF NOT EXISTS `evaluation_observations_v2` (
+        `evaluation_methodology` Utf8 NOT NULL,
+        `model_version` Utf8 NOT NULL,
+        `config_version` Uint32 NOT NULL,
+        `signal_id` Utf8 NOT NULL,
+        `observation_at` Utf8 NOT NULL,
+        `evaluated_at` Timestamp NOT NULL,
+        `payload` Json NOT NULL,
+        PRIMARY KEY (
+            `evaluation_methodology`,
+            `model_version`,
+            `config_version`,
+            `signal_id`,
+            `observation_at`
+        )
+    );
+    """,
+    """
     CREATE TABLE IF NOT EXISTS `assessment_snapshots` (
         `snapshot_key` Utf8 NOT NULL,
         `payload` Json NOT NULL,
@@ -1714,6 +2159,7 @@ SCHEMA_TABLE_NAMES = (
     "telegram_source_metadata",
     "evaluation_epochs",
     "evaluation_observations",
+    "evaluation_observations_v2",
     "assessment_snapshots",
 )
 
@@ -2226,6 +2672,22 @@ SELECT
 FROM `evaluation_observations`
 GROUP BY model_version, config_version
 ORDER BY model_version, config_version;
+"""
+
+COUNT_EVALUATION_OBSERVATIONS_BY_SIGNAL_QUERY = """
+DECLARE $evaluation_methodology AS Utf8;
+DECLARE $model_version AS Utf8;
+DECLARE $config_version AS Uint32;
+
+SELECT
+    signal_id,
+    COUNT(*) AS observation_count
+FROM `evaluation_observations_v2`
+WHERE evaluation_methodology = $evaluation_methodology
+    AND model_version = $model_version
+    AND config_version = $config_version
+GROUP BY signal_id
+ORDER BY signal_id;
 """
 
 SELECT_ASSESSMENT_SNAPSHOT_QUERY = """

@@ -152,6 +152,25 @@ def test_context_signal_candles_use_moex_index_benchmark() -> None:
     assert result["benchmark_ticker"] == "MOEXOG"
 
 
+def test_legacy_fix_price_ticker_uses_current_moex_security() -> None:
+    requested_urls: list[str] = []
+
+    def alias_request(url: str, params: dict[str, object]) -> dict[str, Any]:
+        requested_urls.append(url)
+        return fake_moex_request(url, params)
+
+    client = MoexMarketDataClient(requester=alias_request)
+
+    candles = asyncio.run(client.candles("FIXP", interval=10, lookback_days=14))
+    snapshot = asyncio.run(client.snapshot("FIXP"))
+
+    assert all("/securities/FIXR" in url for url in requested_urls)
+    assert candles["ticker"] == "FIXP"
+    assert candles["benchmark_ticker"] == "FIXR"
+    assert snapshot["ticker"] == "FIXP"
+    assert snapshot["market_ticker"] == "FIXR"
+
+
 def test_intraday_candles_keep_full_eval_window_across_pages() -> None:
     starts: list[int] = []
     first_candle = datetime(2026, 7, 27, 10)

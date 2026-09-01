@@ -201,12 +201,15 @@ jobs:
           for attempt in {1..6}; do
             if curl --compressed --fail --silent --show-error \
               --max-time 55 \
-              "${EVENTEDGE_API_URL}/v1/evals/export?format=json&dataset=timeseries&model_version=all&download=true" \
+              "${EVENTEDGE_API_URL}/v1/evals/export?format=json&dataset=timeseries&model_version=all&limit=1" \
               --output /tmp/eventedge-evals-timeseries.json \
               && jq -e '
                 .meta.dataset == "timeseries"
-                and .meta.has_more == false
-                and .meta.rows == .meta.total_rows
+                and .meta.total_rows > 0
+                and .meta.rows <= 1
+                and .meta.total_rows >= .meta.rows
+                and ((.meta.has_more == false and .meta.next_cursor == null)
+                  or (.meta.has_more == true and (.meta.next_cursor | type) == "string"))
               ' /tmp/eventedge-evals-timeseries.json >/dev/null; then
               break
             fi
@@ -294,7 +297,7 @@ jobs:
             wait "$sources_pid" || concurrent_status=1
             wait "$assessments_pid" || concurrent_status=1
             if [[ "$concurrent_status" == "0" ]] \
-              && jq -e '.meta.evaluation_scope == "company_directional_signals_only"' \
+              && jq -e '.meta.evaluation_scope == "all_stored_signals"' \
                 "${check_dir}/evals.json" >/dev/null \
               && jq -e '.data | length >= 6' "${check_dir}/sources.json" >/dev/null \
               && jq -e '

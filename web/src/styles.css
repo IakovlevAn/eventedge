@@ -5429,15 +5429,23 @@ button.chart-event-detail.is-active {
 .eval-verdict.is-hit { color: var(--green); border-color: rgba(95, 201, 149, 0.23); background: rgba(95, 201, 149, 0.045); }
 .eval-verdict.is-miss { color: var(--red); border-color: rgba(222, 116, 133, 0.23); background: rgba(222, 116, 133, 0.045); }
 .eval-verdict.is-pending { color: #aaa3c6; border-color: rgba(170, 163, 198, 0.22); background: rgba(170, 163, 198, 0.045); }
+.eval-verdict.is-missed { color: #d1a76f; border-color: rgba(209, 167, 111, 0.24); background: rgba(209, 167, 111, 0.05); }
+.eval-verdict.is-retrospective { color: #9c91bd; border-color: rgba(156, 145, 189, 0.24); background: rgba(156, 145, 189, 0.05); }
 .eval-verdict.is-unavailable { color: #6f7681; border-color: rgba(111, 118, 129, 0.22); background: rgba(111, 118, 129, 0.04); }
 
+.outcome-signal-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
 .outcome-signal { display: flex; min-width: 122px; align-items: center; gap: 7px; }
 .outcome-signal small { margin: 0 !important; }
-.outcomes-table { min-width: 1020px; table-layout: fixed; }
+.outcome-cohort { display: inline-flex; padding: 3px 5px; color: #7b8490; font-size: 6px; font-weight: 680; letter-spacing: 0.055em; text-transform: uppercase; border: 1px solid #303640; border-radius: 4px; }
+.outcome-cohort.is-live { color: #77b997; border-color: rgba(95, 201, 149, 0.22); background: rgba(95, 201, 149, 0.035); }
+.outcome-cohort.is-retrospective { color: #9c91bd; border-color: rgba(156, 145, 189, 0.22); background: rgba(156, 145, 189, 0.04); }
+.outcome-eval-state { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
+.outcome-eval-state > small { display: -webkit-box; max-width: 178px; margin: 0; overflow: hidden; color: #666e7a; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.outcomes-table { min-width: 1090px; table-layout: fixed; }
 .outcomes-table .outcome-col-signal { width: 150px; }
 .outcomes-table .outcome-col-news { width: 42%; }
 .outcomes-table .outcome-col-return { width: 72px; }
-.outcomes-table .outcome-col-verdict { width: 118px; }
+.outcomes-table .outcome-col-verdict { width: 190px; }
 .outcomes-table td { min-width: 0; overflow: hidden; }
 .outcomes-table td:nth-child(2) { width: auto; min-width: 0; max-width: 0; }
 .outcomes-table td:nth-child(2) a { display: flex; min-width: 0; flex-direction: column; gap: 4px; color: inherit; text-decoration: none; }

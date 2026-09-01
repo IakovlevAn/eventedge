@@ -1,4 +1,5 @@
 import asyncio
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -6,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import ydb
 
+import eventedge.storage as storage_module
 from eventedge.analysis import (
     EventType,
     InstrumentMention,
@@ -28,7 +30,11 @@ from eventedge.storage import (
     NewsRecord,
     YdbNewsRepository,
     _backfill_evaluation_observations_from_epochs,
+    count_evaluation_observations_by_signal_query,
     deduplicate_signals,
+    encode_evaluation_observation_cursor,
+    evaluation_observation_bulk_upsert_rows,
+    evaluation_observation_page_query,
     evaluation_observation_upsert_batches,
     filter_signals,
     migrate_ydb_schema,
@@ -67,6 +73,73 @@ def test_evaluation_observations_are_batched_into_idempotent_upserts() -> None:
     assert all("UPSERT INTO `evaluation_observations`" in query for query, _ in batches)
     assert len(batches[0][1]) == 12
     assert len(batches[1][1]) == 6
+
+
+def test_evaluation_observation_v2_bulk_rows_are_methodology_scoped_and_deduplicated() -> None:
+    evaluated_at = datetime(2026, 9, 1, 10, tzinfo=UTC)
+    original = {
+        "model_version": "signal-engine-0.6.1",
+        "config_version": 3,
+        "signal_id": "sig_history",
+        "observation_at": "2026-08-31T11:00:00Z",
+        "close": 100.0,
+    }
+    rows = evaluation_observation_bulk_upsert_rows(
+        [original, {**original, "close": 101.0}],
+        evaluated_at=evaluated_at,
+        evaluation_methodology="point-in-time-0.3.0",
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["evaluation_methodology"] == "point-in-time-0.3.0"
+    assert rows[0]["evaluated_at"] == evaluated_at
+    assert json.loads(str(rows[0]["payload"])) == {
+        **original,
+        "close": 101.0,
+        "evaluation_methodology": "point-in-time-0.3.0",
+    }
+
+
+def test_evaluation_observation_page_query_filters_and_uses_keyset_cursor() -> None:
+    cursor = encode_evaluation_observation_cursor(
+        (
+            "point-in-time-0.3.0",
+            "signal-engine-0.6.1",
+            3,
+            "sig_001",
+            "2026-08-31T11:00:00Z",
+        )
+    )
+    query, parameters, limit = evaluation_observation_page_query(
+        evaluation_methodology="point-in-time-0.3.0",
+        model_version="signal-engine-0.6.1",
+        config_version=3,
+        limit=250,
+        cursor=cursor,
+    )
+
+    assert "FROM `evaluation_observations_v2`" in query
+    assert "SELECT COUNT(*) AS total_count" in query
+    assert "signal_id > $cursor_signal_id" in query
+    assert "observation_at > $cursor_observation_at" in query
+    assert "LIMIT 251" in query
+    assert parameters["$evaluation_methodology"] == "point-in-time-0.3.0"
+    assert parameters["$model_version"] == "signal-engine-0.6.1"
+    assert parameters["$cursor_signal_id"] == "sig_001"
+    assert limit == 250
+
+
+def test_evaluation_observation_signal_count_query_is_methodology_scoped() -> None:
+    query, parameters = count_evaluation_observations_by_signal_query(
+        evaluation_methodology="point-in-time-0.3.0",
+        model_version="signal-engine-0.6.1",
+        config_version=3,
+    )
+
+    assert "FROM `evaluation_observations_v2`" in query
+    assert "evaluation_methodology = $evaluation_methodology" in query
+    assert "GROUP BY signal_id" in query
+    assert parameters["$evaluation_methodology"] == "point-in-time-0.3.0"
 
 
 def test_schema_migration_backfills_legacy_epoch_observations() -> None:
@@ -440,12 +513,218 @@ def test_evaluation_observations_are_append_only_and_deduplicated_by_identity() 
             evaluated_at=evaluated_at,
         )
 
-        assert await repository.list_evaluation_observations() == [updated]
+        assert await repository.list_evaluation_observations() == [
+            {**updated, "evaluation_methodology": "legacy"}
+        ]
         assert await repository.count_evaluation_observations() == {
             ("signal-engine-0.6.1", 3): 1
         }
 
     asyncio.run(scenario())
+
+
+def test_memory_evaluation_observation_pages_preserve_methodology_and_total() -> None:
+    async def scenario() -> None:
+        repository = MemoryNewsRepository()
+        evaluated_at = datetime(2026, 9, 1, 12, tzinfo=UTC)
+        observations = [
+            {
+                "model_version": "signal-engine-0.6.1",
+                "config_version": 3,
+                "signal_id": "sig_a" if index < 2 else "sig_b",
+                "observation_at": f"2026-09-01T10:{index:02d}:00Z",
+                "close": 100.0 + index,
+            }
+            for index in range(3)
+        ]
+        await repository.upsert_evaluation_observations(
+            observations,
+            evaluated_at=evaluated_at,
+            evaluation_methodology="point-in-time-0.3.0",
+        )
+        await repository.upsert_evaluation_observations(
+            [observations[0]],
+            evaluated_at=evaluated_at,
+            evaluation_methodology="point-in-time-0.2.0",
+        )
+
+        first = await repository.list_evaluation_observations_page(
+            evaluation_methodology="point-in-time-0.3.0",
+            model_version="signal-engine-0.6.1",
+            config_version=3,
+            limit=2,
+        )
+        assert first.total_count == 3
+        assert len(first.items) == 2
+        assert first.next_cursor is not None
+        assert {item["evaluation_methodology"] for item in first.items} == {
+            "point-in-time-0.3.0"
+        }
+
+        second = await repository.list_evaluation_observations_page(
+            evaluation_methodology="point-in-time-0.3.0",
+            model_version="signal-engine-0.6.1",
+            config_version=3,
+            limit=2,
+            cursor=first.next_cursor,
+        )
+        assert second.total_count == 3
+        assert len(second.items) == 1
+        assert second.next_cursor is None
+        assert await repository.count_evaluation_observations_by_signal(
+            evaluation_methodology="point-in-time-0.3.0",
+            model_version="signal-engine-0.6.1",
+            config_version=3,
+        ) == {"sig_a": 2, "sig_b": 1}
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("model_version", "config_version", "message"),
+    (
+        ("signal-engine-0.7.0", 3, "another model"),
+        ("signal-engine-0.6.1", 4, "another config"),
+    ),
+)
+def test_memory_evaluation_observation_page_rejects_cursor_from_other_filter(
+    model_version: str,
+    config_version: int,
+    message: str,
+) -> None:
+    cursor = encode_evaluation_observation_cursor(
+        (
+            "point-in-time-0.3.0",
+            "signal-engine-0.6.1",
+            3,
+            "sig_001",
+            "2026-09-01T10:00:00Z",
+        )
+    )
+    repository = MemoryNewsRepository()
+
+    with pytest.raises(ValueError, match=message):
+        asyncio.run(
+            repository.list_evaluation_observations_page(
+                evaluation_methodology="point-in-time-0.3.0",
+                model_version=model_version,
+                config_version=config_version,
+                cursor=cursor,
+            )
+        )
+
+
+def test_ydb_evaluation_observation_bulk_upsert_is_bounded_and_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeTableClient:
+        def __init__(self) -> None:
+            self.active = 0
+            self.maximum_active = 0
+            self.calls: list[tuple[str, list[dict[str, object]], object]] = []
+
+        async def bulk_upsert(
+            self,
+            table_path: str,
+            rows: list[dict[str, object]],
+            columns: object,
+        ) -> None:
+            self.active += 1
+            self.maximum_active = max(self.maximum_active, self.active)
+            await asyncio.sleep(0)
+            self.calls.append((table_path, rows, columns))
+            self.active -= 1
+
+    table_client = FakeTableClient()
+    repository = YdbNewsRepository(
+        endpoint="grpcs://localhost:2135",
+        database="/local",
+        credentials=ydb.AnonymousCredentials(),
+    )
+    repository._driver = SimpleNamespace(table_client=table_client)  # type: ignore[assignment]
+    monkeypatch.setattr(storage_module, "EVALUATION_OBSERVATION_BULK_BATCH_SIZE", 2)
+    monkeypatch.setattr(storage_module, "EVALUATION_OBSERVATION_BULK_CONCURRENCY", 2)
+    monkeypatch.setattr(storage_module, "EVALUATION_OBSERVATION_BULK_ATTEMPTS", 1)
+    observations = [
+        {
+            "model_version": "signal-engine-0.6.1",
+            "config_version": 3,
+            "signal_id": f"sig_{index}",
+            "observation_at": f"2026-09-01T10:{index:02d}:00Z",
+            "close": 100.0 + index,
+        }
+        for index in range(5)
+    ]
+    observations.append({**observations[0], "close": 999.0})
+
+    asyncio.run(
+        repository.upsert_evaluation_observations(
+            observations,
+            evaluated_at=datetime(2026, 9, 1, 12, tzinfo=UTC),
+            evaluation_methodology="point-in-time-0.3.0",
+        )
+    )
+
+    assert len(table_client.calls) == 3
+    assert table_client.maximum_active <= 2
+    assert {call[0] for call in table_client.calls} == {
+        "/local/evaluation_observations_v2"
+    }
+    written = [row for _, rows, _ in table_client.calls for row in rows]
+    assert len(written) == 5
+    assert all(row["evaluation_methodology"] == "point-in-time-0.3.0" for row in written)
+    duplicate = next(row for row in written if row["signal_id"] == "sig_0")
+    assert json.loads(str(duplicate["payload"]))["close"] == 999.0
+
+
+def test_ydb_evaluation_observation_page_reads_only_one_server_page() -> None:
+    captured: list[tuple[str, dict[str, object]]] = []
+
+    class FakePool:
+        async def execute_with_retries(
+            self,
+            query: str,
+            parameters: dict[str, object],
+        ) -> list[SimpleNamespace]:
+            captured.append((query, parameters))
+            page_rows = [
+                SimpleNamespace(
+                    evaluation_methodology="point-in-time-0.3.0",
+                    model_version="signal-engine-0.6.1",
+                    config_version=3,
+                    signal_id=f"sig_{index}",
+                    observation_at=f"2026-09-01T10:{index:02d}:00Z",
+                    payload=json.dumps({"signal_id": f"sig_{index}"}),
+                )
+                for index in range(3)
+            ]
+            return [
+                SimpleNamespace(rows=[SimpleNamespace(total_count=191_000)]),
+                SimpleNamespace(rows=page_rows),
+            ]
+
+    repository = YdbNewsRepository(
+        endpoint="grpcs://localhost:2135",
+        database="/local",
+        credentials=ydb.AnonymousCredentials(),
+    )
+    repository._pool = FakePool()  # type: ignore[assignment]
+
+    page = asyncio.run(
+        repository.list_evaluation_observations_page(
+            evaluation_methodology="point-in-time-0.3.0",
+            model_version="signal-engine-0.6.1",
+            config_version=3,
+            limit=2,
+        )
+    )
+
+    assert page.total_count == 191_000
+    assert [item["signal_id"] for item in page.items] == ["sig_0", "sig_1"]
+    assert page.next_cursor is not None
+    assert len(captured) == 1
+    assert "LIMIT 3" in captured[0][0]
+    assert "FROM `evaluation_observations_v2`" in captured[0][0]
 
 
 def test_memory_assessment_snapshot_is_first_writer_wins_and_expires() -> None:

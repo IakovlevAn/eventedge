@@ -39,7 +39,7 @@ def build_payload(
         # bounded below the revision's 180-second execution timeout.
         "BACKFILL_BATCH_LIMIT": "1",
         "BACKFILL_CONCURRENCY": "1",
-        "EVENTEDGE_MONTHLY_BUDGET_RUB": "12000",
+        "EVENTEDGE_MONTHLY_BUDGET_RUB": "15000",
     }
     if admin_key := environment.get("EVENTEDGE_ADMIN_KEY"):
         runtime_environment["EVENTEDGE_ADMIN_KEY"] = admin_key

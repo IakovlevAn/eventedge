@@ -76,7 +76,9 @@ paths:
             minimum: 1
       responses:
         '200':
-          description: Outcomes, aggregate metrics, breakdowns and relationships.
+          description: >-
+            Outcomes for every stored signal, aggregate all-signal metrics and
+            separate live/retrospective point-in-time cohorts.
           content:
             application/json:
               schema:
@@ -99,7 +101,9 @@ paths:
             default: csv
         - name: dataset
           in: query
-          description: Outcomes are one row per signal; timeseries is one row per candle.
+          description: >-
+            Outcomes are one row per signal_id; timeseries is one row per candle.
+            Eligibility is retained as an audit cohort and does not remove rows.
           schema:
             type: string
             enum: [outcomes, timeseries]
@@ -119,7 +123,7 @@ paths:
             minimum: 1
         - name: limit
           in: query
-          description: Page size for API reads. Ignored for a full download.
+          description: Page size for API reads.
           schema:
             type: integer
             minimum: 1
@@ -127,14 +131,19 @@ paths:
             default: 1000
         - name: cursor
           in: query
-          description: Zero-based row offset returned as next_cursor.
+          description: >-
+            next_cursor from the previous page. Outcomes retain a numeric offset;
+            timeseries uses an opaque stable keyset cursor.
           schema:
-            type: integer
-            minimum: 0
-            default: 0
+            type: string
+            minLength: 1
+            maxLength: 1024
         - name: download
           in: query
-          description: Return the complete gzip-compressed dataset instead of one page.
+          description: >-
+            Return complete outcomes when they fit. Large timeseries exports must
+            use pagination because API Gateway cannot return the full raw corpus
+            in one response.
           schema:
             type: boolean
             default: false
@@ -153,6 +162,12 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+        '413':
+          description: Timeseries is too large for one response; use next_cursor pagination.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
       x-yc-apigateway-integration:
         $ref: '#/components/x-yc-apigateway-integrations/api'
 

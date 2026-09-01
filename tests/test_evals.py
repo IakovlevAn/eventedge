@@ -225,6 +225,7 @@ def test_eval_analytics_and_exports_preserve_signal_outcomes() -> None:
     assert outcome["entry"]["delay_seconds"] == 600
     assert outcome["horizon_observations"]["4h"]["timely"] is False
     assert outcome["verdict"] is True
+    assert summary["metric_scope"] == "live"
     assert summary["hit_rate_pct"] == 100.0
     assert summary["median_signed_return_pct"] == 1.0
     assert breakdowns["by_horizon"][0]["hit_rate_pct"] == 100.0
@@ -232,12 +233,18 @@ def test_eval_analytics_and_exports_preserve_signal_outcomes() -> None:
     assert quality_series[-1]["cumulative_hit_rate_pct"] == 100.0
     assert outcome_rows[0]["return_3d_pct"] == 6.0
     assert outcome_rows[0]["return_4h_pct"] is None
+    assert outcome_rows[0]["eligibility_cohort"] == "live"
+    assert outcome_rows[0]["evaluation_anchor"] == "live_decision"
+    assert outcome_rows[0]["verdict_status"] == "evaluated"
+    assert outcome_rows[0]["outcome_terminal"] is True
     assert timeseries_rows[-1]["offset_minutes"] == 3 * 24 * 60
     assert timeseries_rows[-1]["signed_return_pct"] == 6.0
+    assert timeseries_rows[-1]["eligibility_cohort"] == "live"
+    assert timeseries_rows[-1]["evaluation_anchor"] == "live_decision"
     assert truncated is False
 
 
-def test_retrospective_signal_is_excluded_from_quality_metrics() -> None:
+def test_retrospective_signal_is_retained_as_research_cohort() -> None:
     signal = replace(
         signal_record(),
         created_at=signal_record().as_of + timedelta(days=1),
@@ -246,17 +253,98 @@ def test_retrospective_signal_is_excluded_from_quality_metrics() -> None:
         reporting_news(),
         created_at=signal.created_at,
     )
-    outcome = evaluate_signal(signal, [], news)
+    entry = news.received_at + timedelta(minutes=10)
+    outcome = evaluate_signal(
+        signal,
+        candles := [
+            {"begin": entry.isoformat(), "open": 100, "close": 100},
+            {
+                "begin": (entry + timedelta(hours=4)).isoformat(),
+                "open": 102,
+                "close": 102,
+            },
+            {
+                "begin": (entry + timedelta(days=3)).isoformat(),
+                "open": 103,
+                "close": 103,
+            },
+        ],
+        news,
+    )
+    timeseries, truncated = event_time_export_rows(
+        [signal],
+        {signal.ticker: candles},
+        {news.id: news},
+    )
     summary = eval_summary([outcome])
 
-    assert outcome["status"] == "excluded"
+    assert outcome["status"] == "evaluated"
     assert outcome["eligibility"]["reason"] == "retrospective_signal"
-    assert outcome["verdict"] is None
+    assert outcome["eligibility"]["cohort"] == "retrospective"
+    assert outcome["eligibility"]["evaluation_anchor"] == "evidence_cutoff_replay"
+    assert outcome["eligibility"]["decision_at"] == news.received_at.isoformat().replace(
+        "+00:00", "Z"
+    )
+    assert outcome["eligibility"]["live_decision_at"] == signal.created_at.isoformat().replace(
+        "+00:00", "Z"
+    )
+    assert outcome["entry"]["at"] == entry.isoformat().replace("+00:00", "Z")
+    assert outcome["verdict"] is True
+    assert outcome["verdict_status"] == "evaluated"
     assert summary["signals_total"] == 1
     assert summary["eligible"] == 0
     assert summary["excluded"] == 1
+    assert summary["live_eligible"] == 0
+    assert summary["research_only"] == 1
+    assert summary["evaluated"] == 1
     assert summary["exclusion_reasons"] == {"retrospective_signal": 1}
+    assert summary["metric_scope"] == "live"
     assert summary["coverage_pct"] == 0.0
+    assert summary["hit_rate_pct"] is None
+    assert summary["cohorts"]["all"]["coverage_pct"] == 100.0
+    assert summary["cohorts"]["retrospective"]["hit_rate_pct"] == 100.0
+    assert truncated is False
+    assert timeseries
+    assert {row["signal_id"] for row in timeseries} == {signal.id}
+    assert {row["eligibility_cohort"] for row in timeseries} == {"retrospective"}
+    assert {row["evaluation_eligible"] for row in timeseries} == {False}
+    assert {row["exclusion_reason"] for row in timeseries} == {"retrospective_signal"}
+
+
+def test_eval_summary_top_level_quality_aliases_use_live_cohort() -> None:
+    live = {
+        "signal_id": "sig_live",
+        "status": "evaluated",
+        "direction": "up",
+        "returns": {"4h": 1.0},
+        "verdict": True,
+        "eligibility": {"eligible": True, "reason": None, "cohort": "live"},
+    }
+    retrospective = {
+        "signal_id": "sig_research",
+        "status": "evaluated",
+        "direction": "up",
+        "returns": {"4h": -3.0},
+        "verdict": False,
+        "eligibility": {
+            "eligible": False,
+            "reason": "retrospective_signal",
+            "cohort": "retrospective",
+        },
+    }
+
+    summary = eval_summary([live, retrospective])
+
+    assert summary["signals_total"] == 2
+    assert summary["evaluated"] == 2
+    assert summary["metric_scope"] == "live"
+    assert summary["hit_rate_pct"] == 100.0
+    assert summary["average_signed_return_pct"] == 1.0
+    assert summary["median_signed_return_pct"] == 1.0
+    assert summary["coverage_pct"] == 100.0
+    assert summary["cohorts"]["all"]["hit_rate_pct"] == 50.0
+    assert summary["cohorts"]["all"]["average_signed_return_pct"] == -1.0
+    assert summary["cohorts"]["retrospective"]["hit_rate_pct"] == 0.0
 
 
 def test_eval_never_uses_evidence_received_after_signal_creation() -> None:
@@ -266,10 +354,25 @@ def test_eval_never_uses_evidence_received_after_signal_creation() -> None:
         received_at=signal.created_at + timedelta(seconds=1),
     )
 
-    outcome = evaluate_signal(signal, [], future_evidence)
+    entry = signal.created_at + timedelta(minutes=10)
+    outcome = evaluate_signal(
+        signal,
+        [
+            {"begin": entry.isoformat(), "open": 100, "close": 100},
+            {
+                "begin": (entry + timedelta(hours=4)).isoformat(),
+                "open": 101,
+                "close": 101,
+            },
+        ],
+        future_evidence,
+    )
 
-    assert outcome["status"] == "excluded"
+    assert outcome["status"] == "partial"
     assert outcome["eligibility"]["reason"] == "evidence_received_after_signal"
+    assert outcome["eligibility"]["cohort"] == "retrospective"
+    assert outcome["verdict"] is True
+    assert outcome["verdict_status"] == "evaluated"
 
 
 def test_horizon_return_requires_a_timely_market_observation() -> None:
@@ -305,6 +408,43 @@ def test_horizon_return_requires_a_timely_market_observation() -> None:
     assert outcome["horizon_observations"]["1h"]["timely"] is False
 
 
+def test_eval_verdict_status_distinguishes_pending_from_missed_window() -> None:
+    recent_at = datetime.now(UTC).replace(microsecond=0)
+    recent_news = replace(
+        reporting_news(),
+        published_at=recent_at,
+        received_at=recent_at,
+        created_at=recent_at,
+    )
+    recent_signal = replace(
+        signal_record(),
+        as_of=recent_at,
+        data_cutoff_at=recent_at,
+        created_at=recent_at,
+    )
+    recent_entry = recent_at + timedelta(minutes=10)
+    pending = evaluate_signal(
+        recent_signal,
+        [{"begin": recent_entry.isoformat(), "open": 100, "close": 100}],
+        recent_news,
+    )
+
+    old_signal = signal_record()
+    old_entry = old_signal.created_at + timedelta(minutes=10)
+    missed = evaluate_signal(
+        old_signal,
+        [{"begin": old_entry.isoformat(), "open": 100, "close": 100}],
+        reporting_news(),
+    )
+
+    assert pending["status"] == "partial"
+    assert pending["verdict_status"] == "pending"
+    assert pending["outcome_terminal"] is False
+    assert missed["status"] == "partial"
+    assert missed["verdict_status"] == "missed_window"
+    assert missed["outcome_terminal"] is True
+
+
 def test_eval_entry_is_after_the_signal_was_actually_created() -> None:
     signal = replace(
         signal_record(),
@@ -324,6 +464,10 @@ def test_eval_entry_is_after_the_signal_was_actually_created() -> None:
     assert outcome["eligibility"]["decision_at"] == signal.created_at.isoformat().replace(
         "+00:00", "Z"
     )
+    assert outcome["eligibility"]["live_decision_at"] == signal.created_at.isoformat().replace(
+        "+00:00", "Z"
+    )
+    assert outcome["eligibility"]["evaluation_anchor"] == "live_decision"
     assert outcome["entry"] == {
         "at": (signal.as_of + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
         "price": 110.0,
@@ -331,7 +475,58 @@ def test_eval_entry_is_after_the_signal_was_actually_created() -> None:
     }
 
 
-def test_eval_breakdowns_have_only_directional_signal_groups() -> None:
+def test_eval_uses_first_tradable_candle_after_a_long_holiday() -> None:
+    decision_at = datetime(2026, 1, 1, 7, tzinfo=UTC)
+    news = replace(
+        reporting_news(),
+        published_at=decision_at,
+        received_at=decision_at,
+        created_at=decision_at,
+    )
+    signal = replace(
+        signal_record(),
+        as_of=decision_at,
+        data_cutoff_at=decision_at,
+        created_at=decision_at,
+    )
+    entry = decision_at + timedelta(days=4, minutes=10)
+    candles = [
+        {"begin": entry.isoformat(), "open": 100, "close": 100},
+        {
+            "begin": (entry + timedelta(hours=1)).isoformat(),
+            "open": 101,
+            "close": 101,
+        },
+        {
+            "begin": (entry + timedelta(hours=4)).isoformat(),
+            "open": 102,
+            "close": 102,
+        },
+        {
+            "begin": (entry + timedelta(days=3)).isoformat(),
+            "open": 103,
+            "close": 103,
+        },
+    ]
+
+    outcome = evaluate_signal(signal, candles, news)
+    raw, truncated = event_time_export_rows(
+        [signal],
+        {signal.ticker: candles},
+        {news.id: news},
+    )
+
+    assert outcome["entry"]["at"] == entry.isoformat().replace("+00:00", "Z")
+    assert outcome["entry"]["delay_seconds"] == 4 * 24 * 60 * 60 + 10 * 60
+    assert outcome["returns"]["1h"] == 1.0
+    assert outcome["returns"]["4h"] == 2.0
+    assert outcome["returns"]["3d"] == 3.0
+    assert truncated is False
+    assert len(raw) == len(candles)
+    assert raw[0]["entry_at"] == entry.isoformat().replace("+00:00", "Z")
+
+
+def test_eval_breakdowns_cover_every_signal_direction() -> None:
     outcomes = [
         {"direction": "up", "ticker": "SBER", "returns": {"4h": 1.0}},
         {"direction": "down", "ticker": "LKOH", "returns": {"4h": -1.0}},
@@ -339,7 +534,11 @@ def test_eval_breakdowns_have_only_directional_signal_groups() -> None:
 
     breakdowns = eval_breakdowns(outcomes)
 
-    assert [item["direction"] for item in breakdowns["by_direction"]] == ["up", "down"]
+    assert [item["direction"] for item in breakdowns["by_direction"]] == [
+        "up",
+        "down",
+        "neutral",
+    ]
 
 
 def test_eval_summary_separates_partial_results_from_pending_signals() -> None:
@@ -349,24 +548,28 @@ def test_eval_summary_separates_partial_results_from_pending_signals() -> None:
             "direction": "up",
             "returns": {"1h": 0.4, "1d": 1.2, "3d": 2.1},
             "verdict": True,
+            "eligibility": {"eligible": True, "reason": None, "cohort": "live"},
         },
         {
             "status": "partial",
             "direction": "down",
             "returns": {"1h": -0.3, "1d": None, "3d": None},
             "verdict": True,
+            "eligibility": {"eligible": True, "reason": None, "cohort": "live"},
         },
         {
             "status": "partial",
             "direction": "up",
             "returns": {"1h": None, "1d": None, "3d": None},
             "verdict": None,
+            "eligibility": {"eligible": True, "reason": None, "cohort": "live"},
         },
         {
             "status": "unavailable",
             "direction": "up",
             "returns": {"1h": None, "1d": None, "3d": None},
             "verdict": None,
+            "eligibility": {"eligible": True, "reason": None, "cohort": "live"},
         },
     ]
 

@@ -11,7 +11,7 @@ from eventedge.storage import NewsRecord, SignalRecord, to_rfc3339
 
 ASSESSMENT_MODEL_VERSION = "hybrid-market-0.2.1"
 ASSESSMENT_CONFIG_VERSION = 3
-EVALUATION_METHODOLOGY_VERSION = "market-outcome-0.2.0"
+EVALUATION_METHODOLOGY_VERSION = "market-outcome-0.3.0"
 MAX_LIVE_PROCESSING_LAG = timedelta(minutes=15)
 MAX_HORIZON_OBSERVATION_LAG = timedelta(minutes=20)
 POSITIVE_THRESHOLD = 18.0
@@ -346,8 +346,8 @@ def evaluation_eligibility(
     signal: SignalRecord,
     news: NewsRecord | None,
 ) -> dict[str, object]:
-    """Reject outcomes that could not have represented a live decision."""
-    decision_at = max(signal.as_of, signal.data_cutoff_at, signal.created_at)
+    """Classify point-in-time validity and choose a non-lookahead eval anchor."""
+    live_decision_at = max(signal.as_of, signal.data_cutoff_at, signal.created_at)
     reason = None
     if signal.as_of > signal.created_at:
         reason = "signal_as_of_after_creation"
@@ -361,10 +361,23 @@ def evaluation_eligibility(
         reason = "evidence_received_after_signal"
     elif signal.created_at - max(signal.as_of, signal.data_cutoff_at) > MAX_LIVE_PROCESSING_LAG:
         reason = "retrospective_signal"
+    cohort = "live" if reason is None else "retrospective"
+    if cohort == "retrospective" and news is not None:
+        # A replay measures reaction from the first point where the evidence
+        # could have been known. Anchoring it on a much later backfill
+        # `created_at` would measure the backfill job instead of the event.
+        decision_at = max(signal.as_of, signal.data_cutoff_at, news.received_at)
+        evaluation_anchor = "evidence_cutoff_replay"
+    else:
+        decision_at = live_decision_at
+        evaluation_anchor = "live_decision"
     return {
         "eligible": reason is None,
         "reason": reason,
+        "cohort": cohort,
         "decision_at": to_rfc3339(decision_at),
+        "live_decision_at": to_rfc3339(live_decision_at),
+        "evaluation_anchor": evaluation_anchor,
         "processing_lag_seconds": max(
             0,
             round((signal.created_at - max(signal.as_of, signal.data_cutoff_at)).total_seconds()),
@@ -408,15 +421,6 @@ def evaluate_signal(
         else None,
     }
     empty_returns = {label: None for label in ("1h", "4h", "1d", "3d")}
-    if not eligibility["eligible"]:
-        return {
-            **base,
-            "status": "excluded",
-            "entry": None,
-            "returns": empty_returns,
-            "horizon_observations": {},
-            "verdict": None,
-        }
     rows = sorted(
         (
             (_parse_timestamp(str(item["begin"])), item)
@@ -433,10 +437,12 @@ def evaluate_signal(
             "returns": empty_returns,
             "horizon_observations": {},
             "verdict": None,
+            "verdict_status": "unavailable",
+            "outcome_terminal": False,
         }
 
     entry_pair = next((pair for pair in rows if pair[0] > decision_at), None)
-    if entry_pair is None or entry_pair[0] - decision_at > timedelta(days=3):
+    if entry_pair is None:
         return {
             **base,
             "status": "unavailable",
@@ -444,6 +450,8 @@ def evaluate_signal(
             "returns": empty_returns,
             "horizon_observations": {},
             "verdict": None,
+            "verdict_status": "unavailable",
+            "outcome_terminal": False,
         }
     entry_time, entry_row = entry_pair
     entry_price = _number(entry_row.get("open"))
@@ -488,6 +496,24 @@ def evaluate_signal(
         else:
             verdict = primary < 0
     status = "evaluated" if returns["3d"] is not None else "partial"
+    three_day_target = _parse_timestamp(str(horizon_observations["3d"]["target_at"]))
+    outcome_terminal = (
+        returns["3d"] is not None
+        or datetime.now(UTC) > three_day_target + MAX_HORIZON_OBSERVATION_LAG
+    )
+    if verdict is not None:
+        verdict_status = "evaluated"
+    else:
+        short_observations = [horizon_observations[key] for key in ("1h", "4h")]
+        one_hour_target = _parse_timestamp(str(horizon_observations["1h"]["target_at"]))
+        missed_window = (
+            any(
+                observation.get("observed_at") is not None and not observation.get("timely")
+                for observation in short_observations
+            )
+            or datetime.now(UTC) > one_hour_target + MAX_HORIZON_OBSERVATION_LAG
+        )
+        verdict_status = "missed_window" if missed_window else "pending"
     return {
         **base,
         "status": status,
@@ -501,6 +527,8 @@ def evaluate_signal(
         "latest_price": round(latest_price, 4) if latest_price is not None else None,
         "latest_return_pct": latest_return,
         "verdict": verdict,
+        "verdict_status": verdict_status,
+        "outcome_terminal": outcome_terminal,
     }
 
 
@@ -694,40 +722,86 @@ def _metric_slice(
 
 
 def eval_summary(outcomes: list[dict[str, object]]) -> dict[str, object]:
-    eligible = [item for item in outcomes if item.get("status") != "excluded"]
-    decided = [item for item in eligible if item.get("verdict") is not None]
-    metrics = _metric_slice(eligible)
+    def cohort(item: dict[str, object]) -> str:
+        eligibility = item.get("eligibility")
+        if not isinstance(eligibility, dict):
+            return "retrospective"
+        stored = eligibility.get("cohort")
+        if stored in {"live", "retrospective"}:
+            return str(stored)
+        return "live" if eligibility.get("eligible") is True else "retrospective"
+
+    def verdict_status(item: dict[str, object]) -> str:
+        stored = item.get("verdict_status")
+        if stored in {"evaluated", "pending", "missed_window", "unavailable"}:
+            return str(stored)
+        if item.get("verdict") is not None:
+            return "evaluated"
+        if item.get("status") in {"unavailable", "excluded"}:
+            return "unavailable"
+        return "pending"
+
+    def cohort_summary(items: list[dict[str, object]]) -> dict[str, object]:
+        decided = [item for item in items if item.get("verdict") is not None]
+        metrics = _metric_slice(items)
+        statuses = [verdict_status(item) for item in items]
+        return {
+            "signals_total": len(items),
+            "evaluated": len(decided),
+            "complete": sum(item.get("status") == "evaluated" for item in items),
+            "partial": sum(
+                item.get("status") == "partial" and item.get("verdict") is not None
+                for item in items
+            ),
+            "pending": statuses.count("pending"),
+            "missed_window": statuses.count("missed_window"),
+            "unavailable": statuses.count("unavailable"),
+            "hit_rate_pct": metrics["hit_rate_pct"],
+            "average_signed_return_pct": metrics["average_signed_return_pct"],
+            "median_signed_return_pct": metrics["median_signed_return_pct"],
+            "coverage_pct": round(len(decided) / len(items) * 100, 1) if items else 0.0,
+        }
+
+    live = [item for item in outcomes if cohort(item) == "live"]
+    retrospective = [item for item in outcomes if cohort(item) == "retrospective"]
+    all_summary = cohort_summary(outcomes)
+    live_summary = cohort_summary(live)
+    retrospective_summary = cohort_summary(retrospective)
     exclusion_reasons: dict[str, int] = {}
-    for item in outcomes:
-        if item.get("status") != "excluded":
-            continue
+    for item in retrospective:
         eligibility = item.get("eligibility")
         reason = eligibility.get("reason") if isinstance(eligibility, dict) else None
         key = str(reason or "unknown")
         exclusion_reasons[key] = exclusion_reasons.get(key, 0) + 1
     return {
-        "signals_total": len(outcomes),
-        "eligible": len(eligible),
-        "excluded": len(outcomes) - len(eligible),
+        **all_summary,
+        # Stable product aliases intentionally describe the point-in-time live
+        # cohort. Research/all-signal metrics remain explicit below.
+        "metric_scope": "live",
+        "hit_rate_pct": live_summary["hit_rate_pct"],
+        "average_signed_return_pct": live_summary["average_signed_return_pct"],
+        "median_signed_return_pct": live_summary["median_signed_return_pct"],
+        "coverage_pct": live_summary["coverage_pct"],
+        # Compatibility aliases. `excluded` no longer means an outcome is skipped;
+        # it is the historical count of signals outside the point-in-time cohort.
+        "eligible": len(live),
+        "excluded": len(retrospective),
+        "live_eligible": len(live),
+        "research_only": len(retrospective),
         "exclusion_reasons": exclusion_reasons,
-        "evaluated": len(decided),
-        "complete": sum(item.get("status") == "evaluated" for item in outcomes),
-        "partial": sum(
-            item.get("status") == "partial" and item.get("verdict") is not None for item in outcomes
-        ),
-        "pending": sum(
-            item.get("status") == "partial" and item.get("verdict") is None for item in outcomes
-        ),
-        "unavailable": sum(item.get("status") == "unavailable" for item in outcomes),
-        "hit_rate_pct": metrics["hit_rate_pct"],
-        "average_signed_return_pct": metrics["average_signed_return_pct"],
-        "median_signed_return_pct": metrics["median_signed_return_pct"],
-        "coverage_pct": round(len(decided) / len(eligible) * 100, 1) if eligible else 0.0,
+        "live_evaluated": live_summary["evaluated"],
+        "research_evaluated": retrospective_summary["evaluated"],
+        "live_coverage_pct": live_summary["coverage_pct"],
+        "research_coverage_pct": retrospective_summary["coverage_pct"],
+        "cohorts": {
+            "all": all_summary,
+            "live": live_summary,
+            "retrospective": retrospective_summary,
+        },
     }
 
 
 def eval_breakdowns(outcomes: list[dict[str, object]]) -> dict[str, object]:
-    outcomes = [item for item in outcomes if item.get("status") != "excluded"]
     by_horizon = [
         {"horizon": horizon, **_metric_slice(outcomes, horizon=horizon)}
         for horizon in EVAL_HORIZONS
@@ -737,7 +811,7 @@ def eval_breakdowns(outcomes: list[dict[str, object]]) -> dict[str, object]:
             "direction": direction,
             **_metric_slice([item for item in outcomes if item.get("direction") == direction]),
         }
-        for direction in ("up", "down")
+        for direction in ("up", "down", "neutral")
     ]
     tickers = sorted({str(item["ticker"]) for item in outcomes})
     by_ticker = sorted(
@@ -877,9 +951,7 @@ def outcome_export_rows(outcomes: list[dict[str, object]]) -> list[dict[str, obj
             if isinstance(item.get("evaluation_benchmark"), dict)
             else {}
         )
-        eligibility = (
-            item.get("eligibility") if isinstance(item.get("eligibility"), dict) else {}
-        )
+        eligibility = item.get("eligibility") if isinstance(item.get("eligibility"), dict) else {}
         observations = (
             item.get("horizon_observations")
             if isinstance(item.get("horizon_observations"), dict)
@@ -893,10 +965,13 @@ def outcome_export_rows(outcomes: list[dict[str, object]]) -> list[dict[str, obj
                 "signal_data_cutoff_at": item.get("data_cutoff_at"),
                 "signal_created_at": item.get("signal_created_at"),
                 "decision_at": eligibility.get("decision_at"),
+                "live_decision_at": eligibility.get("live_decision_at"),
+                "evaluation_anchor": eligibility.get("evaluation_anchor"),
                 "processing_lag_seconds": eligibility.get("processing_lag_seconds"),
                 "evaluation_methodology": item.get("evaluation_methodology"),
                 "evaluation_eligible": eligibility.get("eligible"),
                 "exclusion_reason": eligibility.get("reason"),
+                "eligibility_cohort": eligibility.get("cohort"),
                 "direction": item["direction"],
                 "score": item["score"],
                 "confidence": item["confidence"],
@@ -936,6 +1011,9 @@ def outcome_export_rows(outcomes: list[dict[str, object]]) -> list[dict[str, obj
                 "latest_price": item.get("latest_price"),
                 "latest_return_pct": item.get("latest_return_pct"),
                 "verdict": item.get("verdict"),
+                "verdict_status": item.get("verdict_status"),
+                "outcome_terminal": item.get("outcome_terminal"),
+                "raw_observation_count": item.get("raw_observation_count"),
             }
         )
     return rows
@@ -952,8 +1030,6 @@ def event_time_export_rows(
     for signal in signals:
         news = news_by_id.get(signal.news_id)
         eligibility = evaluation_eligibility(signal, news)
-        if not eligibility["eligible"]:
-            continue
         decision_at = _parse_timestamp(str(eligibility["decision_at"]))
         candles = sorted(
             (
@@ -964,7 +1040,7 @@ def event_time_export_rows(
             key=lambda pair: pair[0],
         )
         entry = next((pair for pair in candles if pair[0] > decision_at), None)
-        if entry is None or entry[0] - decision_at > timedelta(days=3):
+        if entry is None:
             continue
         entry_at, entry_row = entry
         entry_price = _number(entry_row.get("open"))
@@ -988,8 +1064,13 @@ def event_time_export_rows(
                     "signal_data_cutoff_at": to_rfc3339(signal.data_cutoff_at),
                     "signal_created_at": to_rfc3339(signal.created_at),
                     "decision_at": eligibility["decision_at"],
+                    "live_decision_at": eligibility["live_decision_at"],
+                    "evaluation_anchor": eligibility["evaluation_anchor"],
                     "processing_lag_seconds": eligibility["processing_lag_seconds"],
                     "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
+                    "evaluation_eligible": eligibility["eligible"],
+                    "exclusion_reason": eligibility["reason"],
+                    "eligibility_cohort": eligibility["cohort"],
                     "direction": signal.direction,
                     "score": signal.score,
                     "confidence": signal.confidence,

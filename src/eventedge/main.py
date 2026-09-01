@@ -59,13 +59,11 @@ from eventedge.evals import (
     MAX_LIVE_PROCESSING_LAG,
     build_assessment,
     deduplicate_eval_events,
-    deduplicate_eval_signals,
     eval_breakdowns,
     eval_quality_series,
     eval_relationships,
     eval_summary,
     evaluate_signal,
-    evaluation_eligibility,
     event_time_export_rows,
     outcome_export_rows,
 )
@@ -124,6 +122,7 @@ NEWS_CLIENT_REFRESH_INTERVAL_SECONDS = 30
 NEWS_DELIVERY_TARGET_SECONDS = 120
 EVALUATION_CACHE_TTL_SECONDS = 60
 EVALUATION_EPOCH_INDEX_TTL_SECONDS = 60
+EVALUATION_TIMESERIES_MAX_DOWNLOAD_ROWS = 2_000
 ASSESSMENT_SNAPSHOT_BUCKET_SECONDS = 30
 ASSESSMENT_SNAPSHOT_RETENTION_SECONDS = 600
 BACKFILL_BATCH_LIMIT = min(40, max(1, int(os.environ.get("BACKFILL_BATCH_LIMIT", "4"))))
@@ -2701,56 +2700,64 @@ async def _load_evaluation_material(
     dict[str, NewsRecord],
     list[EvaluationEpochRecord],
 ]:
-    stored_signals, stored_epochs, stored_observations = await asyncio.gather(
+    stored_signals, stored_epochs = await asyncio.gather(
         repository.list_evaluation_signals(),
-        repository.list_evaluation_epochs(),
-        repository.list_evaluation_observations(),
+        repository.list_evaluation_epochs(include_observations=False),
     )
-    evaluation_candidates = [
-        signal
-        for signal in deduplicate_eval_signals(deduplicate_signals(stored_signals))
-        if signal.ticker in DEFAULT_MOEX_ALIASES and signal.direction in {"up", "down"}
-    ]
-    stored_news = await repository.get_news_by_ids(
-        frozenset(signal.news_id for signal in evaluation_candidates)
+    # Every persisted SignalRecord is an auditable model
+    # decision. Do not collapse corroborating publications or repeated model
+    # decisions here: event-level deduplication belongs to analytical views,
+    # while the immutable Evals ledger is one outcome per signal_id.
+    signals = sorted(
+        stored_signals,
+        key=lambda signal: (signal.as_of, signal.id),
+        reverse=True,
     )
+    signal_groups = sorted(
+        {(signal.model_version, signal.config_version) for signal in signals}
+    )
+    observation_count_results = await asyncio.gather(
+        *(
+            repository.count_evaluation_observations_by_signal(
+                evaluation_methodology=EVALUATION_METHODOLOGY_VERSION,
+                model_version=model_version,
+                config_version=config_version,
+            )
+            for model_version, config_version in signal_groups
+        )
+    )
+    stored_observation_counts = dict(zip(signal_groups, observation_count_results, strict=True))
+    stored_news = await repository.get_news_by_ids(frozenset(signal.news_id for signal in signals))
     # Evaluation is an immutable historical audit. A signal must not disappear
     # merely because its source item is later hidden from the public product feed.
     news_by_id = {item.id: item for item in stored_news}
-    signals = deduplicate_eval_events(
-        (
-            signal
-            for signal in evaluation_candidates
-            if signal.news_id in news_by_id
-        ),
-        news_by_id,
-        preserve_model_epochs=True,
+    current_method_epochs = latest_evaluation_epochs(
+        [
+            epoch
+            for epoch in stored_epochs
+            if evaluation_epoch_methodology(epoch) == EVALUATION_METHODOLOGY_VERSION
+        ]
     )
-    current_method_epochs = latest_evaluation_epochs([
-        epoch
-        for epoch in stored_epochs
-        if evaluation_epoch_methodology(epoch) == EVALUATION_METHODOLOGY_VERSION
-    ])
     epoch_by_model: dict[tuple[str, int], EvaluationEpochRecord] = {}
     for epoch in current_method_epochs:
         epoch_by_model.setdefault((epoch.model_version, epoch.config_version), epoch)
-    complete_outcomes: dict[str, dict[str, object]] = {}
+    current_outcomes: dict[tuple[str, int, str], dict[str, object]] = {}
+    complete_outcomes: dict[tuple[str, int, str], dict[str, object]] = {}
     for epoch in current_method_epochs:
         for outcome in epoch.outcomes:
+            key = (
+                str(outcome.get("model_version") or epoch.model_version),
+                int(outcome.get("config_version") or epoch.config_version),
+                str(outcome["signal_id"]),
+            )
+            current_outcomes.setdefault(key, dict(outcome))
             if _is_complete_eval_outcome(outcome):
-                complete_outcomes.setdefault(str(outcome["signal_id"]), dict(outcome))
-    refresh_signals = [signal for signal in signals if signal.id not in complete_outcomes]
-    observation_signal_ids = {
-        str(row.get("signal_id"))
-        for row in stored_observations
-        if row.get("signal_id")
-    }
-    for epoch in stored_epochs:
-        observation_signal_ids.update(
-            str(row.get("signal_id"))
-            for row in epoch.observations
-            if row.get("signal_id")
-        )
+                complete_outcomes.setdefault(key, dict(outcome))
+    refresh_signals = [
+        signal
+        for signal in signals
+        if (signal.model_version, signal.config_version, signal.id) not in complete_outcomes
+    ]
     truncated_groups = {
         (epoch.model_version, epoch.config_version)
         for epoch in current_method_epochs
@@ -2760,16 +2767,18 @@ async def _load_evaluation_material(
         signal
         for signal in signals
         if (signal.model_version, signal.config_version) in truncated_groups
-        or signal.id not in observation_signal_ids
+        or _eval_raw_observations_need_refresh(
+            current_outcomes.get((signal.model_version, signal.config_version, signal.id)),
+            stored_observation_counts.get(
+                (signal.model_version, signal.config_version), {}
+            ).get(signal.id, 0),
+        )
     ]
     market_refresh_by_id = {
-        signal.id: signal for signal in [*refresh_signals, *observation_refresh_signals]
+        (signal.model_version, signal.config_version, signal.id): signal
+        for signal in [*refresh_signals, *observation_refresh_signals]
     }
-    market_refresh_signals = [
-        signal
-        for signal in market_refresh_by_id.values()
-        if evaluation_eligibility(signal, news_by_id.get(signal.news_id))["eligible"]
-    ]
+    market_refresh_signals = list(market_refresh_by_id.values())
     ticker_signals: dict[str, list[SignalRecord]] = {}
     for signal in market_refresh_signals:
         ticker_signals.setdefault(signal.ticker, []).append(signal)
@@ -2796,58 +2805,65 @@ async def _load_evaluation_material(
         ),
         return_exceptions=True,
     )
-    candles_by_ticker = {
-        ticker: result.get("candles", [])
+    market_results_by_ticker = {
+        ticker: result
         for ticker, result in zip(tickers, candle_results, strict=True)
         if isinstance(result, dict)
     }
+    candles_by_ticker = {
+        ticker: result.get("candles", [])
+        for ticker, result in market_results_by_ticker.items()
+    }
+    market_ticker_by_ticker = {
+        ticker: str(
+            result.get("benchmark_ticker")
+            or EVALUATION_INDEX_BENCHMARKS.get(ticker)
+            or ticker
+        )
+        for ticker, result in market_results_by_ticker.items()
+    }
     outcomes = []
     for signal in signals:
-        outcome = complete_outcomes.get(signal.id) or evaluate_signal(
+        outcome = complete_outcomes.get(
+            (signal.model_version, signal.config_version, signal.id)
+        ) or evaluate_signal(
             signal,
             candles_by_ticker.get(signal.ticker, []),
             news_by_id.get(signal.news_id),
         )
-        benchmark_ticker = EVALUATION_INDEX_BENCHMARKS.get(signal.ticker)
-        if benchmark_ticker:
+        outcome = {
+            **outcome,
+            "model_version": str(outcome.get("model_version") or signal.model_version),
+            "config_version": int(outcome.get("config_version") or signal.config_version),
+        }
+        benchmark_ticker = market_ticker_by_ticker.get(
+            signal.ticker,
+            EVALUATION_INDEX_BENCHMARKS.get(signal.ticker, signal.ticker),
+        )
+        if benchmark_ticker != signal.ticker:
             outcome = {
                 **outcome,
                 "evaluation_benchmark": {
                     "ticker": benchmark_ticker,
                     "source": "MOEX ISS",
-                    "kind": "index",
+                    "kind": (
+                        "index"
+                        if signal.ticker in EVALUATION_INDEX_BENCHMARKS
+                        else "security_alias"
+                    ),
                 },
             }
         outcomes.append(outcome)
     generated_at = datetime.now(UTC)
-    normalized_observations = {
-        (
-            str(row.get("model_version", "")),
-            int(row.get("config_version", 0) or 0),
-            str(row.get("signal_id", "")),
-            str(row.get("observation_at", "")),
-        ): dict(row)
-        for row in stored_observations
-        if row.get("model_version")
-        and row.get("config_version")
-        and row.get("signal_id")
-        and row.get("observation_at")
-    }
-    observations_to_upsert: dict[
-        tuple[str, int, str, str], dict[str, object]
-    ] = {}
+    observations_to_upsert: dict[tuple[str, int, str, str], dict[str, object]] = {}
     # One-time migration shield: copy every legacy JSON observation into the
     # normalized append-only table before compacting epoch snapshots.
-    for epoch in stored_epochs:
+    for epoch in current_method_epochs:
         for stored_row in epoch.observations:
             row = {
                 **dict(stored_row),
-                "model_version": str(
-                    stored_row.get("model_version") or epoch.model_version
-                ),
-                "config_version": int(
-                    stored_row.get("config_version") or epoch.config_version
-                ),
+                "model_version": str(stored_row.get("model_version") or epoch.model_version),
+                "config_version": int(stored_row.get("config_version") or epoch.config_version),
             }
             key = (
                 str(row.get("model_version", "")),
@@ -2855,8 +2871,7 @@ async def _load_evaluation_material(
                 str(row.get("signal_id", "")),
                 str(row.get("observation_at", "")),
             )
-            if all((key[0], key[1], key[2], key[3])) and key not in normalized_observations:
-                normalized_observations[key] = row
+            if all((key[0], key[1], key[2], key[3])):
                 observations_to_upsert[key] = row
     epoch_records = []
     for model_version, config_version in sorted(
@@ -2868,9 +2883,7 @@ async def _load_evaluation_material(
             if signal.model_version == model_version and signal.config_version == config_version
         ]
         signal_ids = {signal.id for signal in epoch_signals}
-        refreshed_outcomes = [
-            outcome for outcome in outcomes if outcome["signal_id"] in signal_ids
-        ]
+        refreshed_outcomes = [outcome for outcome in outcomes if outcome["signal_id"] in signal_ids]
         previous_epoch = epoch_by_model.get((model_version, config_version))
         outcome_by_signal = {
             str(outcome.get("signal_id")): dict(outcome)
@@ -2888,14 +2901,21 @@ async def _load_evaluation_material(
             ),
         )
         complete_signal_ids = {
-            signal.id for signal in epoch_signals if signal.id in complete_outcomes
+            signal.id
+            for signal in epoch_signals
+            if (signal.model_version, signal.config_version, signal.id) in complete_outcomes
         }
         refreshed_epoch_signals = [
             signal
             for signal in epoch_signals
             if signal.id not in complete_signal_ids
             or (model_version, config_version) in truncated_groups
-            or signal.id not in observation_signal_ids
+            or _eval_raw_observations_need_refresh(
+                current_outcomes.get((model_version, config_version, signal.id)),
+                stored_observation_counts.get((model_version, config_version), {}).get(
+                    signal.id, 0
+                ),
+            )
         ]
         fresh_observations, _ = event_time_export_rows(
             refreshed_epoch_signals,
@@ -2905,25 +2925,71 @@ async def _load_evaluation_material(
         fresh_observations = [
             {
                 **row,
-                "evaluation_benchmark": EVALUATION_INDEX_BENCHMARKS.get(
-                    str(row.get("ticker", ""))
+                "evaluation_benchmark": market_ticker_by_ticker.get(
+                    str(row.get("ticker", "")),
+                    EVALUATION_INDEX_BENCHMARKS.get(str(row.get("ticker", ""))),
                 ),
             }
             for row in fresh_observations
         ]
-        fresh_observation_signal_ids = {
-            str(row.get("signal_id"))
-            for row in fresh_observations
-            if row.get("signal_id")
+        fresh_observation_counts: dict[str, int] = {}
+        for row in fresh_observations:
+            signal_id = str(row.get("signal_id", ""))
+            if signal_id:
+                fresh_observation_counts[signal_id] = (
+                    fresh_observation_counts.get(signal_id, 0) + 1
+                )
+        persisted_counts = stored_observation_counts.get((model_version, config_version), {})
+        epoch_outcomes = [
+            {
+                **outcome,
+                "raw_observation_count": max(
+                    _eval_outcome_raw_observation_count(outcome) or 0,
+                    persisted_counts.get(signal_id, 0),
+                    fresh_observation_counts.get(signal_id, 0),
+                ),
+            }
+            for outcome in epoch_outcomes
+            if (signal_id := str(outcome.get("signal_id", "")))
+        ]
+        refreshed_outcome_by_key = {
+            (
+                str(outcome.get("model_version") or model_version),
+                int(outcome.get("config_version") or config_version),
+                str(outcome.get("signal_id")),
+            ): outcome
+            for outcome in epoch_outcomes
         }
-        eligible_epoch_signal_ids = {
-            signal.id
+        outcomes = [
+            refreshed_outcome_by_key.get(
+                (
+                    str(outcome.get("model_version", "")),
+                    int(outcome.get("config_version", 0) or 0),
+                    str(outcome.get("signal_id", "")),
+                ),
+                outcome,
+            )
+            for outcome in outcomes
+        ]
+        post_refresh_counts = {
+            signal.id: max(
+                persisted_counts.get(signal.id, 0),
+                fresh_observation_counts.get(signal.id, 0),
+            )
             for signal in epoch_signals
-            if evaluation_eligibility(signal, news_by_id.get(signal.news_id))["eligible"]
+        }
+        refreshed_outcomes_by_id = {
+            str(outcome.get("signal_id", "")): outcome for outcome in epoch_outcomes
         }
         raw_rebuild_complete = (
-            (model_version, config_version) in truncated_groups
-            and eligible_epoch_signal_ids <= fresh_observation_signal_ids
+            model_version,
+            config_version,
+        ) in truncated_groups and all(
+            not _eval_raw_observations_need_refresh(
+                refreshed_outcomes_by_id.get(signal.id),
+                post_refresh_counts.get(signal.id, 0),
+            )
+            for signal in epoch_signals
         )
         for row in fresh_observations:
             key = (
@@ -2933,16 +2999,12 @@ async def _load_evaluation_material(
                 str(row.get("observation_at", "")),
             )
             if all((key[0], key[1], key[2], key[3])):
-                normalized_observations[key] = row
                 observations_to_upsert[key] = row
         epoch_records.append(
             EvaluationEpochRecord(
                 epoch_id=stable_id(
                     "eval_",
-                    (
-                        f"{model_version}\x00{config_version}\x00"
-                        f"{EVALUATION_METHODOLOGY_VERSION}"
-                    ),
+                    (f"{model_version}\x00{config_version}\x00{EVALUATION_METHODOLOGY_VERSION}"),
                 ),
                 model_version=model_version,
                 config_version=config_version,
@@ -2952,46 +3014,87 @@ async def _load_evaluation_material(
                 # small so repeated refreshes cannot hit YDB's row-size limit.
                 observations=(),
                 # A legacy true flag records an irrecoverable pre-migration gap;
-                # clear it only after every eligible signal was rebuilt without a cap.
+                # clear it only after every signal was rebuilt without a cap.
                 observations_truncated=bool(
                     previous_epoch and previous_epoch.observations_truncated
                     and not raw_rebuild_complete
                 ),
             )
         )
-    writes = [repository.upsert_evaluation_epoch(epoch) for epoch in epoch_records]
+    # Raw is the large side of the ledger. Publish the new methodology epochs
+    # only after every idempotent bulk-upsert finishes, so public readers either
+    # see the complete previous snapshot or the complete new one.
     if observations_to_upsert:
-        writes.append(
-            repository.upsert_evaluation_observations(
-                list(observations_to_upsert.values()),
-                evaluated_at=generated_at,
-            )
+        await repository.upsert_evaluation_observations(
+            list(observations_to_upsert.values()),
+            evaluated_at=generated_at,
+            evaluation_methodology=EVALUATION_METHODOLOGY_VERSION,
         )
+    writes = [repository.upsert_evaluation_epoch(epoch) for epoch in epoch_records]
     if writes:
         await asyncio.gather(*writes)
-    stored_epochs = await repository.list_evaluation_epochs()
+    stored_epochs = await repository.list_evaluation_epochs(include_observations=False)
     return outcomes, signals, candles_by_ticker, news_by_id, stored_epochs
+
+
+def _eval_outcome_raw_observation_count(outcome: Mapping[str, object] | None) -> int | None:
+    if outcome is None:
+        return None
+    value = outcome.get("raw_observation_count")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    return int(value)
+
+
+def _eval_raw_observations_need_refresh(
+    outcome: Mapping[str, object] | None,
+    persisted_count: int,
+) -> bool:
+    expected_count = _eval_outcome_raw_observation_count(outcome)
+    if expected_count is None or persisted_count < expected_count:
+        return True
+    return bool(
+        outcome
+        and outcome.get("status") == "partial"
+        and persisted_count <= 1
+    )
 
 
 def _is_complete_eval_outcome(outcome: Mapping[str, object]) -> bool:
     returns = outcome.get("returns")
     eligibility = outcome.get("eligibility")
-    if (
-        outcome.get("evaluation_methodology") != EVALUATION_METHODOLOGY_VERSION
-        or not isinstance(eligibility, dict)
+    if outcome.get("evaluation_methodology") != EVALUATION_METHODOLOGY_VERSION or not isinstance(
+        eligibility, dict
     ):
         return False
-    if outcome.get("status") == "excluded":
-        return eligibility.get("eligible") is False and bool(eligibility.get("reason"))
+    eligibility_audited = eligibility.get("eligible") is True or (
+        eligibility.get("eligible") is False
+        and eligibility.get("cohort") == "retrospective"
+        and bool(eligibility.get("reason"))
+    )
     observations = outcome.get("horizon_observations")
     three_day = observations.get("3d") if isinstance(observations, dict) else None
+    if not eligibility_audited or not isinstance(returns, dict) or not isinstance(three_day, dict):
+        return False
+    if outcome.get("status") == "partial" and (
+        _eval_outcome_raw_observation_count(outcome) or 0
+    ) <= 1:
+        return False
+    if outcome.get("outcome_terminal") is True:
+        return outcome.get("status") in {"evaluated", "partial"} and outcome.get(
+            "verdict_status"
+        ) in {"evaluated", "missed_window"}
+    # Compatibility for pre-terminal-field fixtures written with the current
+    # methodology during a rolling deploy.
     return (
-        outcome.get("status") == "evaluated"
-        and eligibility.get("eligible") is True
-        and isinstance(returns, dict)
+        outcome.get("outcome_terminal") is None
+        and outcome.get("status") == "evaluated"
         and returns.get("3d") is not None
-        and isinstance(three_day, dict)
         and three_day.get("timely") is True
+        and (
+            outcome.get("verdict_status") == "evaluated"
+            or (outcome.get("verdict_status") is None and outcome.get("verdict") is not None)
+        )
     )
 
 
@@ -3076,14 +3179,10 @@ async def evaluation_material(
 def directional_epoch_outcomes(
     epoch: EvaluationEpochRecord | None,
 ) -> list[dict[str, object]]:
+    """Return the complete signal ledger (legacy name kept for compatibility)."""
     if epoch is None:
         return []
-    return [
-        outcome
-        for outcome in epoch.outcomes
-        if outcome.get("direction") in {"up", "down"}
-        and outcome.get("ticker") in DEFAULT_MOEX_ALIASES
-    ]
+    return [dict(outcome) for outcome in epoch.outcomes]
 
 
 def evaluation_epoch_meta(
@@ -3143,11 +3242,36 @@ async def evaluation_epoch_index(
             return cache["epochs"], cache["observation_counts"]
         for attempt in range(3):
             try:
-                stored_epochs, observation_counts = await asyncio.gather(
-                    repository.list_evaluation_epochs(include_observations=False),
-                    repository.count_evaluation_observations(),
+                stored_epochs = await repository.list_evaluation_epochs(
+                    include_observations=False
                 )
                 epochs = latest_evaluation_epochs(stored_epochs)
+                current_groups = [
+                    (epoch.model_version, epoch.config_version)
+                    for epoch in epochs
+                    if evaluation_epoch_methodology(epoch)
+                    == EVALUATION_METHODOLOGY_VERSION
+                ]
+                legacy_counts_task = repository.count_evaluation_observations()
+                per_signal_counts = await asyncio.gather(
+                    *(
+                        repository.count_evaluation_observations_by_signal(
+                            evaluation_methodology=EVALUATION_METHODOLOGY_VERSION,
+                            model_version=model_version,
+                            config_version=config_version,
+                        )
+                        for model_version, config_version in current_groups
+                    )
+                )
+                observation_counts = await legacy_counts_task
+                observation_counts.update({
+                    group: sum(counts.values())
+                    for group, counts in zip(
+                        current_groups,
+                        per_signal_counts,
+                        strict=True,
+                    )
+                })
                 break
             except Exception:
                 if cache is not None and cache["repository"] is repository:
@@ -3188,6 +3312,18 @@ async def list_evals(
         config_version,
     )
     selected_outcomes = directional_epoch_outcomes(selected_epoch)
+    selected_methodology = (
+        evaluation_epoch_methodology(selected_epoch)
+        if selected_epoch is not None
+        else EVALUATION_METHODOLOGY_VERSION
+    )
+    snapshot_status = (
+        "ready"
+        if selected_methodology == EVALUATION_METHODOLOGY_VERSION
+        else "migrating"
+        if selected_epoch is not None
+        else "pending"
+    )
     return JSONResponse(
         content={
             "data": {
@@ -3204,15 +3340,21 @@ async def list_evals(
                 "refresh_after_seconds": 600,
                 "primary_horizon": "4h",
                 "evaluation_window": "1h / 4h for product metrics; raw 1d / 3d retained",
-                "evaluation_scope": "company_directional_signals_only",
-                "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
+                "evaluation_scope": "all_stored_signals",
+                "evaluation_methodology": selected_methodology,
+                "target_evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
+                "snapshot_scope": (
+                    "all_stored_signals"
+                    if snapshot_status == "ready"
+                    else "legacy_signal_subset"
+                ),
                 "live_processing_lag_limit_seconds": int(
                     MAX_LIVE_PROCESSING_LAG.total_seconds()
                 ),
                 "horizon_observation_lag_limit_seconds": int(
                     MAX_HORIZON_OBSERVATION_LAG.total_seconds()
                 ),
-                "snapshot_status": "ready" if selected_epoch else "pending",
+                "snapshot_status": snapshot_status,
                 "selected_model_version": selected_model_version,
                 "selected_config_version": (
                     selected_epoch.config_version if selected_epoch else None
@@ -3221,7 +3363,8 @@ async def list_evals(
                     evaluation_epoch_meta(epoch, observation_counts) for epoch in epochs
                 ],
                 "warning": (
-                    "Only point-in-time timing-eligible live signals enter quality metrics. "
+                    "All stored signals enter the all-signal metrics; the live "
+                    "and retrospective point-in-time cohorts remain separate in summary.cohorts. "
                     "Returns use raw MOEX candles without fees, slippage or corporate-action "
                     "adjustment; this is not a calibrated backtest or proof of alpha."
                 ),
@@ -3241,11 +3384,11 @@ async def export_evals(
     ] = "all",
     config_version: Annotated[int | None, Query(ge=1)] = None,
     limit: Annotated[int, Query(ge=1, le=2000)] = 1000,
-    cursor: Annotated[int, Query(ge=0)] = 0,
+    cursor: Annotated[str | None, Query(min_length=1, max_length=1024)] = None,
     download: bool = False,
 ) -> Response:
     repository: NewsRepository = request.app.state.news_repository
-    epochs = await repository.list_evaluation_epochs()
+    epochs = await repository.list_evaluation_epochs(include_observations=False)
     selected_epochs = [
         epoch
         for epoch in epochs
@@ -3253,46 +3396,124 @@ async def export_evals(
         and (config_version is None or epoch.config_version == config_version)
     ]
     if dataset == "timeseries":
-        selected_epoch_keys = {
-            (epoch.model_version, epoch.config_version) for epoch in selected_epochs
-        }
-        observation_by_key = {
-            (
-                str(row.get("model_version") or epoch.model_version),
-                int(row.get("config_version") or epoch.config_version),
-                str(row.get("signal_id", "")),
-                str(row.get("observation_at", "")),
-            ): {
-                **dict(row),
-                "model_version": str(row.get("model_version") or epoch.model_version),
-                "config_version": int(
-                    row.get("config_version") or epoch.config_version
+        if download and cursor is not None:
+            return problem_response(
+                request,
+                status=400,
+                code="INVALID_EVAL_CURSOR",
+                title="A full download cannot start from a cursor",
+                detail=(
+                    "Remove download=true and continue with the opaque cursor, or retry "
+                    "download=true without a cursor."
                 ),
-            }
-            for epoch in selected_epochs
-            for row in epoch.observations
-            if row.get("signal_id") and row.get("observation_at")
-        }
-        for row in await repository.list_evaluation_observations():
-            key = (
-                str(row.get("model_version", "")),
-                int(row.get("config_version", 0) or 0),
-                str(row.get("signal_id", "")),
-                str(row.get("observation_at", "")),
             )
-            if (key[0], key[1]) in selected_epoch_keys and key[2] and key[3]:
-                observation_by_key[key] = dict(row)
-        rows = sorted(
-            observation_by_key.values(),
-            key=lambda row: (
-                str(row.get("model_version", "")),
-                int(row.get("config_version", 0) or 0),
-                str(row.get("signal_as_of", "")),
-                str(row.get("signal_id", "")),
-                str(row.get("observation_at", "")),
-            ),
-        )
-        truncated = any(epoch.observations_truncated for epoch in selected_epochs)
+        current_selected_epochs = [
+            epoch
+            for epoch in selected_epochs
+            if evaluation_epoch_methodology(epoch) == EVALUATION_METHODOLOGY_VERSION
+        ]
+        legacy_cursor = cursor is not None and cursor.startswith("legacy:")
+        if not current_selected_epochs or legacy_cursor:
+            # Atomic cutover: until 0.3 raw and epochs are fully persisted, keep
+            # the last complete legacy export readable instead of exposing an
+            # empty or half-written v2 dataset.
+            legacy_rows = [
+                row
+                for row in await repository.list_evaluation_observations()
+                if (model_version == "all" or row.get("model_version") == model_version)
+                and (
+                    config_version is None
+                    or int(row.get("config_version", 0) or 0) == config_version
+                )
+            ]
+            legacy_rows.sort(
+                key=lambda row: (
+                    str(row.get("model_version", "")),
+                    int(row.get("config_version", 0) or 0),
+                    str(row.get("signal_id", "")),
+                    str(row.get("observation_at", "")),
+                )
+            )
+            if cursor is None:
+                legacy_offset = 0
+            elif cursor.startswith("legacy:") and cursor.removeprefix(
+                "legacy:"
+            ).isdecimal():
+                legacy_offset = int(cursor.removeprefix("legacy:"))
+            elif cursor.isdecimal():
+                # Backward compatibility for callers that started paging before
+                # cursors became versioned.
+                legacy_offset = int(cursor)
+            else:
+                return problem_response(
+                    request,
+                    status=400,
+                    code="INVALID_EVAL_CURSOR",
+                    title="Invalid legacy Evals export cursor",
+                    detail="Legacy timeseries cursors must have the form legacy:<offset>.",
+                )
+            total_rows = len(legacy_rows)
+            page_rows = (
+                legacy_rows
+                if download
+                else legacy_rows[legacy_offset : legacy_offset + limit]
+            )
+            has_more = not download and legacy_offset + len(page_rows) < total_rows
+            next_cursor: str | int | None = (
+                f"legacy:{legacy_offset + len(page_rows)}" if has_more else None
+            )
+            truncated = any(epoch.observations_truncated for epoch in selected_epochs)
+        else:
+            page_limit = EVALUATION_TIMESERIES_MAX_DOWNLOAD_ROWS if download else limit
+            try:
+                observation_page = await repository.list_evaluation_observations_page(
+                    evaluation_methodology=EVALUATION_METHODOLOGY_VERSION,
+                    model_version=None if model_version == "all" else model_version,
+                    config_version=config_version,
+                    limit=page_limit,
+                    cursor=cursor,
+                )
+            except ValueError as error:
+                return problem_response(
+                    request,
+                    status=400,
+                    code="INVALID_EVAL_CURSOR",
+                    title="Invalid Evals export cursor",
+                    detail=str(error),
+                )
+            if (
+                download
+                and observation_page.total_count
+                > EVALUATION_TIMESERIES_MAX_DOWNLOAD_ROWS
+            ):
+                response = problem_response(
+                    request,
+                    status=413,
+                    code="EVAL_EXPORT_REQUIRES_PAGINATION",
+                    title="Timeseries export is too large for one response",
+                    detail=(
+                        f"The filtered export contains {observation_page.total_count} rows. "
+                        "Repeat the request with download=false and limit=2000, then pass "
+                        "meta.next_cursor to the next request until has_more is false."
+                    ),
+                    errors=[
+                        {
+                            "parameter": "cursor",
+                            "next_cursor": observation_page.next_cursor,
+                            "limit": EVALUATION_TIMESERIES_MAX_DOWNLOAD_ROWS,
+                        }
+                    ],
+                )
+                response.headers["X-EventEdge-Total-Rows"] = str(
+                    observation_page.total_count
+                )
+                response.headers["X-EventEdge-Next-Cursor"] = observation_page.next_cursor
+                return response
+            page_rows = list(observation_page.items)
+            total_rows = observation_page.total_count
+            has_more = observation_page.next_cursor is not None
+            next_cursor = observation_page.next_cursor
+            truncated = any(epoch.observations_truncated for epoch in current_selected_epochs)
         fieldnames = [
             "signal_id",
             "ticker",
@@ -3300,8 +3521,13 @@ async def export_evals(
             "signal_data_cutoff_at",
             "signal_created_at",
             "decision_at",
+            "live_decision_at",
+            "evaluation_anchor",
             "processing_lag_seconds",
             "evaluation_methodology",
+            "evaluation_eligible",
+            "exclusion_reason",
+            "eligibility_cohort",
             "direction",
             "score",
             "confidence",
@@ -3365,10 +3591,13 @@ async def export_evals(
             "signal_data_cutoff_at",
             "signal_created_at",
             "decision_at",
+            "live_decision_at",
+            "evaluation_anchor",
             "processing_lag_seconds",
             "evaluation_methodology",
             "evaluation_eligible",
             "exclusion_reason",
+            "eligibility_cohort",
             "direction",
             "score",
             "confidence",
@@ -3400,13 +3629,29 @@ async def export_evals(
             "latest_price",
             "latest_return_pct",
             "verdict",
+            "verdict_status",
+            "outcome_terminal",
+            "raw_observation_count",
         ]
 
+        if cursor is None:
+            outcome_offset = 0
+        elif cursor.isdecimal():
+            outcome_offset = int(cursor)
+        else:
+            return problem_response(
+                request,
+                status=400,
+                code="INVALID_EVAL_CURSOR",
+                title="Invalid Evals export cursor",
+                detail="Outcome export cursors must be non-negative integer offsets.",
+            )
+        total_rows = len(rows)
+        page_rows = rows if download else rows[outcome_offset : outcome_offset + limit]
+        has_more = not download and outcome_offset + len(page_rows) < total_rows
+        next_cursor = outcome_offset + len(page_rows) if has_more else None
+
     generated_at = utc_now()
-    total_rows = len(rows)
-    page_rows = rows if download else rows[cursor : cursor + limit]
-    has_more = not download and cursor + len(page_rows) < total_rows
-    next_cursor = cursor + len(page_rows) if has_more else None
     filename = f"eventedge-{dataset}-{generated_at[:10]}.{format}"
     headers = {
         "Cache-Control": "no-store",
@@ -3415,6 +3660,8 @@ async def export_evals(
         "X-EventEdge-Total-Rows": str(total_rows),
         "X-EventEdge-Truncated": str(truncated).lower(),
     }
+    if next_cursor is not None:
+        headers["X-EventEdge-Next-Cursor"] = str(next_cursor)
     if format == "json":
         content = json.dumps(
             {
