@@ -1,6 +1,8 @@
 const COHORTS = new Set(["live", "retrospective"]);
 const VERDICT_STATUSES = new Set([
   "evaluated",
+  "non_directional",
+  "not_applicable",
   "pending",
   "missed_window",
   "unavailable",
@@ -84,6 +86,7 @@ function observedHorizon(outcome) {
 }
 
 function outcomeStateLabel(outcome, verdictStatus) {
+  if (verdictStatus === "non_directional") return "Не участвует в hit rate";
   if (verdictStatus === "legacy_excluded") return "Старая методика";
   if (verdictStatus === "missed_window") return "Нет валидного outcome за 1–4 часа";
   if (verdictStatus === "unavailable") return "Нет точки входа или рыночной истории";
@@ -98,17 +101,24 @@ function outcomeStateLabel(outcome, verdictStatus) {
 
 export function evalOutcomeView(outcome, now = Date.now()) {
   const explicitVerdictStatus = outcome?.verdict_status;
-  const verdictStatus = outcome?.status === "excluded"
-    ? "legacy_excluded"
-    : VERDICT_STATUSES.has(explicitVerdictStatus)
-      ? explicitVerdictStatus
-      : fallbackVerdictStatus(outcome, now);
+  const verdictStatus = outcome?.direction === "neutral"
+    || explicitVerdictStatus === "non_directional"
+    || explicitVerdictStatus === "not_applicable"
+    ? "non_directional"
+    : outcome?.status === "excluded"
+      ? "legacy_excluded"
+      : VERDICT_STATUSES.has(explicitVerdictStatus)
+        ? explicitVerdictStatus
+        : fallbackVerdictStatus(outcome, now);
   const cohort = outcomeCohort(outcome);
   const reasonLabel = eligibilityReason(outcome);
 
   let verdictLabel = "Ждём 1 час";
   let verdictTone = "pending";
-  if (verdictStatus === "legacy_excluded") {
+  if (verdictStatus === "non_directional") {
+    verdictLabel = "Без направления";
+    verdictTone = "neutral";
+  } else if (verdictStatus === "legacy_excluded") {
     verdictLabel = "Не участвует в live";
     verdictTone = "retrospective";
   } else if (verdictStatus === "missed_window") {

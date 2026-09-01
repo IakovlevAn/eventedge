@@ -66,6 +66,7 @@ from eventedge.evals import (
     eval_summary,
     evaluate_signal,
     event_time_export_rows,
+    normalize_neutral_eval_outcome,
     outcome_export_rows,
 )
 from eventedge.events import (
@@ -292,13 +293,6 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     repository: NewsRepository = application.state.news_repository
     await repository.start()
     application.state.repository_last_success_at = time.monotonic()
-    if os.environ.get("EVENTEDGE_COMPONENT", "api") != "worker":
-        try:
-            await evaluation_epoch_index(application)
-        except Exception:
-            logger.exception(
-                "Evaluation epoch index prewarm failed; the first request will retry"
-            )
     try:
         yield
     finally:
@@ -2746,14 +2740,15 @@ async def _load_evaluation_material(
     complete_outcomes: dict[tuple[str, int, str], dict[str, object]] = {}
     for epoch in current_method_epochs:
         for outcome in epoch.outcomes:
+            normalized_outcome = normalize_neutral_eval_outcome(dict(outcome))
             key = (
-                str(outcome.get("model_version") or epoch.model_version),
-                int(outcome.get("config_version") or epoch.config_version),
-                str(outcome["signal_id"]),
+                str(normalized_outcome.get("model_version") or epoch.model_version),
+                int(normalized_outcome.get("config_version") or epoch.config_version),
+                str(normalized_outcome["signal_id"]),
             )
-            current_outcomes.setdefault(key, dict(outcome))
-            if _is_complete_eval_outcome(outcome):
-                complete_outcomes.setdefault(key, dict(outcome))
+            current_outcomes.setdefault(key, normalized_outcome)
+            if _is_complete_eval_outcome(normalized_outcome):
+                complete_outcomes.setdefault(key, normalized_outcome)
     refresh_signals = [
         signal
         for signal in signals
@@ -3075,9 +3070,13 @@ def _is_complete_eval_outcome(outcome: Mapping[str, object]) -> bool:
     ) <= 1:
         return False
     if outcome.get("outcome_terminal") is True:
+        terminal_statuses = {"not_applicable"} if outcome.get("direction") == "neutral" else {
+            "evaluated",
+            "missed_window",
+        }
         return outcome.get("status") in {"evaluated", "partial"} and outcome.get(
             "verdict_status"
-        ) in {"evaluated", "missed_window"}
+        ) in terminal_statuses
     # Compatibility for pre-terminal-field fixtures written with the current
     # methodology during a rolling deploy.
     return (
@@ -3086,7 +3085,12 @@ def _is_complete_eval_outcome(outcome: Mapping[str, object]) -> bool:
         and returns.get("3d") is not None
         and three_day.get("timely") is True
         and (
-            outcome.get("verdict_status") == "evaluated"
+            (
+                outcome.get("direction") == "neutral"
+                and outcome.get("verdict_status") == "not_applicable"
+                and outcome.get("verdict") is None
+            )
+            or outcome.get("verdict_status") == "evaluated"
             or (outcome.get("verdict_status") is None and outcome.get("verdict") is not None)
         )
     )
@@ -3176,7 +3180,7 @@ def directional_epoch_outcomes(
     """Return the complete signal ledger (legacy name kept for compatibility)."""
     if epoch is None:
         return []
-    return [dict(outcome) for outcome in epoch.outcomes]
+    return [normalize_neutral_eval_outcome(dict(outcome)) for outcome in epoch.outcomes]
 
 
 def evaluation_epoch_meta(
@@ -3637,6 +3641,7 @@ async def export_evals(
             "latest_return_pct",
             "verdict",
             "verdict_status",
+            "neutral_move_status",
             "outcome_terminal",
             "raw_observation_count",
         ]

@@ -43,6 +43,44 @@ test("uses explicit cohort and verdict status from the current API contract", ()
   assert.equal(view.reasonLabel, "Рассчитан позже live-окна на 2 ч 15 мин");
 });
 
+test("neutral outcomes never inherit a legacy hit or miss verdict", () => {
+  for (const { verdict, status } of [
+    { verdict: true, status: "evaluated" },
+    { verdict: false, status: "partial" },
+    { verdict: true, status: "excluded" },
+  ]) {
+    const view = evalOutcomeView({
+      direction: "neutral",
+      status,
+      verdict_status: "evaluated",
+      verdict,
+      returns: { "4h": verdict ? 0.2 : -0.8 },
+      eligibility: { cohort: "live", eligible: true },
+    });
+
+    assert.equal(view.verdictStatus, "non_directional");
+    assert.equal(view.verdictLabel, "Без направления");
+    assert.equal(view.verdictTone, "neutral");
+    assert.equal(view.stateLabel, "Не участвует в hit rate");
+    assert.equal(view.cohortLabel, "Live");
+  }
+});
+
+test("explicit not-applicable status is respected during a rolling deploy", () => {
+  const view = evalOutcomeView({
+    direction: "up",
+    status: "evaluated",
+    verdict_status: "not_applicable",
+    verdict: true,
+    eligibility: { cohort: "retrospective", eligible: false },
+  });
+
+  assert.equal(view.verdictStatus, "non_directional");
+  assert.equal(view.verdictLabel, "Без направления");
+  assert.equal(view.stateLabel, "Не участвует в hit rate");
+  assert.equal(view.cohortLabel, "Ретроспектива");
+});
+
 test("labels a decided partial outcome separately from a complete evaluation", () => {
   const view = evalOutcomeView({
     status: "partial",
