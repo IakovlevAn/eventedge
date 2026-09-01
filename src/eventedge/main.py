@@ -292,6 +292,13 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     repository: NewsRepository = application.state.news_repository
     await repository.start()
     application.state.repository_last_success_at = time.monotonic()
+    if os.environ.get("EVENTEDGE_COMPONENT", "api") != "worker":
+        try:
+            await evaluation_epoch_index(application)
+        except Exception:
+            logger.exception(
+                "Evaluation epoch index prewarm failed; the first request will retry"
+            )
     try:
         yield
     finally:
@@ -3114,9 +3121,9 @@ def latest_model_evaluation_epoch(
 
 
 async def evaluation_epoch_index(
-    request: Request,
+    application: FastAPI,
 ) -> tuple[list[EvaluationEpochRecord], dict[tuple[str, int], int]]:
-    state = request.app.state
+    state = application.state
     repository: NewsRepository = state.news_repository
     cache = state.evaluation_epoch_index_cache
     if (
@@ -3134,19 +3141,27 @@ async def evaluation_epoch_index(
             and time.monotonic() - cache["loaded_at"] < EVALUATION_EPOCH_INDEX_TTL_SECONDS
         ):
             return cache["epochs"], cache["observation_counts"]
-        try:
-            stored_epochs, observation_counts = await asyncio.gather(
-                repository.list_evaluation_epochs(include_observations=False),
-                repository.count_evaluation_observations(),
-            )
-            epochs = latest_evaluation_epochs(stored_epochs)
-        except Exception:
-            if cache is None or cache["repository"] is not repository:
-                raise
-            logger.exception(
-                "Evaluation epoch index refresh failed; serving last-known snapshot"
-            )
-            return cache["epochs"], cache["observation_counts"]
+        for attempt in range(3):
+            try:
+                stored_epochs, observation_counts = await asyncio.gather(
+                    repository.list_evaluation_epochs(include_observations=False),
+                    repository.count_evaluation_observations(),
+                )
+                epochs = latest_evaluation_epochs(stored_epochs)
+                break
+            except Exception:
+                if cache is not None and cache["repository"] is repository:
+                    logger.exception(
+                        "Evaluation epoch index refresh failed; serving last-known snapshot"
+                    )
+                    return cache["epochs"], cache["observation_counts"]
+                if attempt == 2:
+                    raise
+                logger.warning(
+                    "Evaluation epoch index cold read failed; retrying attempt %d/3",
+                    attempt + 2,
+                )
+                await asyncio.sleep(0.2 * (2**attempt))
         state.evaluation_epoch_index_cache = {
             "repository": repository,
             "loaded_at": time.monotonic(),
@@ -3165,7 +3180,7 @@ async def list_evals(
     ] = None,
     config_version: Annotated[int | None, Query(ge=1)] = None,
 ) -> JSONResponse:
-    epochs, observation_counts = await evaluation_epoch_index(request)
+    epochs, observation_counts = await evaluation_epoch_index(request.app)
     selected_model_version = model_version or CURRENT_NEWS_MODEL_VERSION
     selected_epoch = latest_model_evaluation_epoch(
         epochs,
