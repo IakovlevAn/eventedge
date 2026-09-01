@@ -82,9 +82,11 @@ def test_worker_startup_skips_public_read_model_prewarm(
         )
     )
     prewarm = AsyncMock()
+    eval_prewarm = AsyncMock()
     monkeypatch.setenv("EVENTEDGE_COMPONENT", "worker")
     monkeypatch.setattr(main_module, "CONTENT_SNAPSHOT_TTL_SECONDS", 60)
     monkeypatch.setattr(main_module, "refresh_content_snapshot_in_background", prewarm)
+    monkeypatch.setattr(main_module, "evaluation_epoch_index", eval_prewarm)
 
     async def scenario() -> None:
         async with main_module.lifespan(application):
@@ -95,6 +97,7 @@ def test_worker_startup_skips_public_read_model_prewarm(
     repository.start.assert_awaited_once()
     repository.stop.assert_awaited_once()
     prewarm.assert_not_awaited()
+    eval_prewarm.assert_not_awaited()
 
 
 def test_api_startup_does_not_block_on_public_read_model_prewarm(
@@ -110,9 +113,11 @@ def test_api_startup_does_not_block_on_public_read_model_prewarm(
         )
     )
     prewarm = AsyncMock(side_effect=AssertionError("startup must not build a broad snapshot"))
+    eval_prewarm = AsyncMock()
     monkeypatch.setenv("EVENTEDGE_COMPONENT", "api")
     monkeypatch.setattr(main_module, "CONTENT_SNAPSHOT_TTL_SECONDS", 60)
     monkeypatch.setattr(main_module, "refresh_content_snapshot_in_background", prewarm)
+    monkeypatch.setattr(main_module, "evaluation_epoch_index", eval_prewarm)
 
     async def scenario() -> None:
         async with main_module.lifespan(application):
@@ -123,6 +128,7 @@ def test_api_startup_does_not_block_on_public_read_model_prewarm(
     repository.start.assert_awaited_once()
     repository.stop.assert_awaited_once()
     prewarm.assert_not_awaited()
+    eval_prewarm.assert_awaited_once_with(application)
 
 
 def test_expired_content_snapshot_is_served_while_refresh_runs(
@@ -2832,6 +2838,48 @@ def test_evals_selects_highest_config_before_newest_evaluation_time(
     )
     assert stale.status_code == 200
     assert stale.json()["meta"]["selected_config_version"] == 2
+
+
+def test_evaluation_epoch_index_retries_a_cold_ydb_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    epoch = EvaluationEpochRecord(
+        epoch_id="eval_cold_retry",
+        model_version="signal-engine-0.6.1",
+        config_version=3,
+        evaluated_at=datetime(2026, 9, 1, 8, tzinfo=UTC),
+        outcomes=(),
+        observations=(),
+    )
+    repository = SimpleNamespace(
+        list_evaluation_epochs=AsyncMock(
+            side_effect=[
+                RuntimeError("cold read 1"),
+                RuntimeError("cold read 2"),
+                [epoch],
+            ]
+        ),
+        count_evaluation_observations=AsyncMock(return_value={}),
+    )
+    application = SimpleNamespace(
+        state=SimpleNamespace(
+            news_repository=repository,
+            evaluation_epoch_index_cache=None,
+            evaluation_epoch_index_lock=asyncio.Lock(),
+        )
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(main_module.asyncio, "sleep", sleep)
+
+    epochs, counts = asyncio.run(
+        main_module.evaluation_epoch_index(application)  # type: ignore[arg-type]
+    )
+
+    assert epochs == [epoch]
+    assert counts == {}
+    assert repository.list_evaluation_epochs.await_count == 3
+    assert repository.count_evaluation_observations.await_count == 3
+    assert sleep.await_count == 2
 
 
 def test_retrospective_signal_is_excluded_without_moex_request() -> None:
