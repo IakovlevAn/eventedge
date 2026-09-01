@@ -12,6 +12,7 @@ from eventedge.storage import NewsRecord, SignalRecord, to_rfc3339
 ASSESSMENT_MODEL_VERSION = "hybrid-market-0.2.1"
 ASSESSMENT_CONFIG_VERSION = 3
 EVALUATION_METHODOLOGY_VERSION = "market-outcome-0.3.0"
+QUALITY_METHODOLOGY = "directional_up_down_only_v1"
 MAX_LIVE_PROCESSING_LAG = timedelta(minutes=15)
 MAX_HORIZON_OBSERVATION_LAG = timedelta(minutes=20)
 POSITIVE_THRESHOLD = 18.0
@@ -437,7 +438,10 @@ def evaluate_signal(
             "returns": empty_returns,
             "horizon_observations": {},
             "verdict": None,
-            "verdict_status": "unavailable",
+            "verdict_status": (
+                "not_applicable" if signal.direction == "neutral" else "unavailable"
+            ),
+            "neutral_move_status": "unavailable" if signal.direction == "neutral" else None,
             "outcome_terminal": False,
         }
 
@@ -450,7 +454,10 @@ def evaluate_signal(
             "returns": empty_returns,
             "horizon_observations": {},
             "verdict": None,
-            "verdict_status": "unavailable",
+            "verdict_status": (
+                "not_applicable" if signal.direction == "neutral" else "unavailable"
+            ),
+            "neutral_move_status": "unavailable" if signal.direction == "neutral" else None,
             "outcome_terminal": False,
         }
     entry_time, entry_row = entry_pair
@@ -489,11 +496,9 @@ def evaluate_signal(
     primary = next((returns[key] for key in ("4h", "1h") if returns[key] is not None), None)
     verdict = None
     if primary is not None:
-        if signal.direction == "neutral":
-            verdict = abs(primary) < 0.5
-        elif signal.direction == "up":
+        if signal.direction == "up":
             verdict = primary > 0
-        else:
+        elif signal.direction == "down":
             verdict = primary < 0
     status = "evaluated" if returns["3d"] is not None else "partial"
     three_day_target = _parse_timestamp(str(horizon_observations["3d"]["target_at"]))
@@ -501,7 +506,26 @@ def evaluate_signal(
         returns["3d"] is not None
         or datetime.now(UTC) > three_day_target + MAX_HORIZON_OBSERVATION_LAG
     )
-    if verdict is not None:
+    neutral_move_status = None
+    if signal.direction == "neutral":
+        if primary is not None:
+            neutral_move_status = "quiet" if abs(primary) < 0.5 else "material_move"
+        elif status == "unavailable":
+            neutral_move_status = "unavailable"
+        else:
+            short_observations = [horizon_observations[key] for key in ("1h", "4h")]
+            one_hour_target = _parse_timestamp(str(horizon_observations["1h"]["target_at"]))
+            missed_window = (
+                any(
+                    observation.get("observed_at") is not None
+                    and not observation.get("timely")
+                    for observation in short_observations
+                )
+                or datetime.now(UTC) > one_hour_target + MAX_HORIZON_OBSERVATION_LAG
+            )
+            neutral_move_status = "missed_window" if missed_window else "pending"
+        verdict_status = "not_applicable"
+    elif verdict is not None:
         verdict_status = "evaluated"
     else:
         short_observations = [horizon_observations[key] for key in ("1h", "4h")]
@@ -528,6 +552,7 @@ def evaluate_signal(
         "latest_return_pct": latest_return,
         "verdict": verdict,
         "verdict_status": verdict_status,
+        "neutral_move_status": neutral_move_status,
         "outcome_terminal": outcome_terminal,
     }
 
@@ -563,13 +588,33 @@ def _signed_return(direction: object, value: float | None) -> float | None:
 def _verdict(direction: object, value: float | None) -> bool | None:
     if value is None:
         return None
-    if direction == "neutral":
-        return abs(value) < 0.5
     if direction == "up":
         return value > 0
     if direction == "down":
         return value < 0
     return None
+
+
+def normalize_neutral_eval_outcome(
+    outcome: dict[str, object],
+) -> dict[str, object]:
+    """Remove legacy hit/miss semantics from a stored neutral abstention."""
+    if outcome.get("direction") != "neutral":
+        return dict(outcome)
+    primary = _primary_return(outcome)
+    if primary is not None:
+        move_status = "quiet" if abs(primary) < 0.5 else "material_move"
+    elif outcome.get("status") == "unavailable":
+        move_status = "unavailable"
+    else:
+        previous = outcome.get("verdict_status")
+        move_status = previous if previous in {"pending", "missed_window"} else "unobserved"
+    return {
+        **outcome,
+        "verdict": None,
+        "verdict_status": "not_applicable",
+        "neutral_move_status": move_status,
+    }
 
 
 def deduplicate_eval_signals(signals: Iterable[SignalRecord]) -> list[SignalRecord]:
@@ -699,7 +744,9 @@ def _metric_slice(
     horizon: str | None = None,
 ) -> dict[str, object]:
     values = [
-        (item, _return_at(item, horizon) if horizon else _primary_return(item)) for item in items
+        (item, _return_at(item, horizon) if horizon else _primary_return(item))
+        for item in items
+        if item.get("direction") in {"up", "down"}
     ]
     evaluated = [(item, value) for item, value in values if value is not None]
     verdicts = [
@@ -714,6 +761,8 @@ def _metric_slice(
     ]
     return {
         "signals": len(items),
+        "directional_signals": len(values),
+        "neutral_signals": sum(item.get("direction") == "neutral" for item in items),
         "observations": len(evaluated),
         "hit_rate_pct": (round(sum(verdicts) / len(verdicts) * 100, 1) if verdicts else None),
         "average_signed_return_pct": (round(statistics.mean(signed), 2) if signed else None),
@@ -733,7 +782,13 @@ def eval_summary(outcomes: list[dict[str, object]]) -> dict[str, object]:
 
     def verdict_status(item: dict[str, object]) -> str:
         stored = item.get("verdict_status")
-        if stored in {"evaluated", "pending", "missed_window", "unavailable"}:
+        if stored in {
+            "evaluated",
+            "pending",
+            "missed_window",
+            "unavailable",
+            "not_applicable",
+        }:
             return str(stored)
         if item.get("verdict") is not None:
             return "evaluated"
@@ -742,16 +797,22 @@ def eval_summary(outcomes: list[dict[str, object]]) -> dict[str, object]:
         return "pending"
 
     def cohort_summary(items: list[dict[str, object]]) -> dict[str, object]:
-        decided = [item for item in items if item.get("verdict") is not None]
-        metrics = _metric_slice(items)
-        statuses = [verdict_status(item) for item in items]
+        directional = [item for item in items if item.get("direction") in {"up", "down"}]
+        neutral = [item for item in items if item.get("direction") == "neutral"]
+        decided = [item for item in directional if item.get("verdict") is not None]
+        metrics = _metric_slice(directional)
+        statuses = [verdict_status(item) for item in directional]
         return {
             "signals_total": len(items),
+            "directional_signals": len(directional),
+            "neutral_signals": len(neutral),
+            "not_applicable": len(neutral),
+            "quality_methodology": QUALITY_METHODOLOGY,
             "evaluated": len(decided),
             "complete": sum(item.get("status") == "evaluated" for item in items),
             "partial": sum(
                 item.get("status") == "partial" and item.get("verdict") is not None
-                for item in items
+                for item in directional
             ),
             "pending": statuses.count("pending"),
             "missed_window": statuses.count("missed_window"),
@@ -759,7 +820,9 @@ def eval_summary(outcomes: list[dict[str, object]]) -> dict[str, object]:
             "hit_rate_pct": metrics["hit_rate_pct"],
             "average_signed_return_pct": metrics["average_signed_return_pct"],
             "median_signed_return_pct": metrics["median_signed_return_pct"],
-            "coverage_pct": round(len(decided) / len(items) * 100, 1) if items else 0.0,
+            "coverage_pct": (
+                round(len(decided) / len(directional) * 100, 1) if directional else 0.0
+            ),
         }
 
     live = [item for item in outcomes if cohort(item) == "live"]
@@ -778,6 +841,7 @@ def eval_summary(outcomes: list[dict[str, object]]) -> dict[str, object]:
         # Stable product aliases intentionally describe the point-in-time live
         # cohort. Research/all-signal metrics remain explicit below.
         "metric_scope": "live",
+        "quality_methodology": QUALITY_METHODOLOGY,
         "hit_rate_pct": live_summary["hit_rate_pct"],
         "average_signed_return_pct": live_summary["average_signed_return_pct"],
         "median_signed_return_pct": live_summary["median_signed_return_pct"],
@@ -1012,6 +1076,7 @@ def outcome_export_rows(outcomes: list[dict[str, object]]) -> list[dict[str, obj
                 "latest_return_pct": item.get("latest_return_pct"),
                 "verdict": item.get("verdict"),
                 "verdict_status": item.get("verdict_status"),
+                "neutral_move_status": item.get("neutral_move_status"),
                 "outcome_terminal": item.get("outcome_terminal"),
                 "raw_observation_count": item.get("raw_observation_count"),
             }

@@ -27,6 +27,10 @@ runtime_caps:
     zone_instances_limit: 3
     zone_requests_limit: 3
     execution_timeout_seconds: 180
+  ydb_serverless:
+    throttling_rcu_limit: 100
+    storage_size_limit_mb: 1024
+    provisioned_rcu: 0
   source_collection:
     max_telegram_channels: 18
     static_telegram_poll_interval_seconds: 300

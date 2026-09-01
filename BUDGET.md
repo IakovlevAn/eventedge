@@ -30,6 +30,12 @@ Collection worker:
 - не более 3 одновременных worker-запросов в зоне;
 - timeout одного запроса — 180 секунд.
 
+YDB Serverless:
+
+- throughput cap — 100 RU/с без provisioned capacity;
+- storage cap — 1 GB;
+- оплачивается фактическое потребление RU, а не установленный throughput cap.
+
 При полном autoscaling оба контура занимают не более 8 vCPU и 16 GiB RAM,
 поэтому конфигурация не зависит от повышения облачных квот.
 

@@ -1698,7 +1698,7 @@ function EvalsScreen() {
   return (
     <main className="screen section-screen evals-screen">
       <section className="page-hero evals-hero">
-        <div><span className="eyebrow"><Activity size={13} /> Проверка реальностью</span><h1>Evals: сигналы в цифрах</h1><p>Каждый сохранённый сигнал — вверх, вниз или нейтрально, по компании, рынку или отрасли — получает outcome и ценовой ряд. Live и ретроспективные решения показаны раздельно.</p></div>
+        <div><span className="eyebrow"><Activity size={13} /> Проверка реальностью</span><h1>Evals: сигналы в цифрах</h1><p>Каждый сохранённый сигнал получает outcome и ценовой ряд. Hit rate считается только для live‑сигналов с направлением вверх или вниз; нейтральные решения хранятся, но в метрику направления не входят.</p></div>
         <div className="eval-hero-actions">
           <div className={`eval-live${error ? " is-stale" : ""}`}><i /><span><strong>{error ? "Показываем последний snapshot" : "Snapshot каждые 10 минут"}</strong><small>{payload.meta.generated_at ? `${formatRelative(payload.meta.generated_at)} · ` : "Расчёт новой эпохи ожидается · "}основной горизонт 4 часа</small></span></div>
           <FilterSelect className="eval-model-filter" label="Эпоха модели" value={activeEpochKey} onChange={setSelectedEpochKey} options={orderedModelEpochs.map((epoch) => ({ value: `${epoch.model_version}::${epoch.config_version}`, label: `${epoch.model_version} · cfg ${epoch.config_version} · n=${epoch.signals}` }))} />
@@ -1709,13 +1709,13 @@ function EvalsScreen() {
         </div>
       </section>
 
-      <section className="eval-warning"><ShieldCheck size={17} /><div><strong>Это технический eval, а не доказательство доходности</strong><span>Общая статистика покрывает весь ledger. Для честной оценки live-качества используй отдельный live cohort; ретро-срез нужен для исследования старых моделей.</span></div></section>
+      <section className="eval-warning"><ShieldCheck size={17} /><div><strong>Это технический eval, а не доказательство доходности</strong><span>Общая статистика покрывает весь ledger. Hit rate включает только directional live‑сигналы; нейтральные и ретроспективные outcome остаются в выгрузке для исследования.</span></div></section>
 
       <section className="eval-kpis">
-        <article><span>Проверено сигналов</span><strong>{summary.evaluated}</strong><small>из {summary.signals_total} · live {summary.live_evaluated ?? summary.evaluated} · ретро {summary.research_evaluated ?? 0}</small></article>
-        <article><span>Попадание направления</span><strong>{hitRate}</strong><small>через 4 часа, fallback на 1 час</small></article>
+        <article><span>Сигналов в ledger</span><strong>{summary.signals_total}</strong><small>directional {summary.directional_signals ?? summary.evaluated} · без направления {summary.neutral_signals ?? 0}</small></article>
+        <article><span>Hit rate · directional live</span><strong>{hitRate}</strong><small>только вверх/вниз · 4 часа, fallback на 1 час</small></article>
         <article><span>Средняя реакция</span><strong className={Number(liveSummary.average_signed_return_pct) >= 0 ? "market-positive" : "market-negative"}>{averageReturn}</strong><small>live · медиана {medianReturn} · signed return за 4 часа</small></article>
-        <article><span>Покрытие live eval</span><strong>{liveSummary.coverage_pct}%</strong><small>{liveSummary.pending} ждут · {liveSummary.missed_window || 0} без окна 1–4 ч · {liveSummary.unavailable} без истории</small></article>
+        <article><span>Покрытие directional live</span><strong>{liveSummary.coverage_pct}%</strong><small>{liveSummary.pending} ждут · {liveSummary.missed_window || 0} без окна 1–4 ч · {liveSummary.unavailable} без истории</small></article>
       </section>
 
       <section className="eval-analysis-grid">
@@ -1748,8 +1748,8 @@ function EvalsScreen() {
             {breakdowns.by_direction.map((item) => <div key={item.direction}>
               <Direction direction={item.direction} />
               <strong>{directionLabels[item.direction]}</strong>
-              <b>{item.hit_rate_pct === null ? "—" : `${item.hit_rate_pct}%`}</b>
-              <small>{item.observations} оценок · {formatPct(item.average_signed_return_pct)}</small>
+              <b>{item.direction === "neutral" || item.hit_rate_pct === null ? "—" : `${item.hit_rate_pct}%`}</b>
+              <small>{item.direction === "neutral" ? `Не участвует в hit rate · n=${item.signals}` : `${item.observations} оценок · ${formatPct(item.average_signed_return_pct)}`}</small>
             </div>)}
           </div>
           <div className="confidence-strip">
@@ -1793,7 +1793,9 @@ function EvalsScreen() {
             <tbody>
               {visibleOutcomes.map((outcome) => {
                 const outcomeView = evalOutcomeView(outcome);
-                const verdictIcon = outcomeView.verdictStatus === "evaluated"
+                const verdictIcon = outcomeView.verdictStatus === "non_directional"
+                  ? <Minus size={11} />
+                  : outcomeView.verdictStatus === "evaluated"
                   ? outcome.verdict ? <Check size={11} /> : <X size={11} />
                   : outcomeView.verdictStatus === "missed_window"
                     ? <Clock3 size={11} />

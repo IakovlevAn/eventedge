@@ -5428,6 +5428,7 @@ button.chart-event-detail.is-active {
 
 .eval-verdict.is-hit { color: var(--green); border-color: rgba(95, 201, 149, 0.23); background: rgba(95, 201, 149, 0.045); }
 .eval-verdict.is-miss { color: var(--red); border-color: rgba(222, 116, 133, 0.23); background: rgba(222, 116, 133, 0.045); }
+.eval-verdict.is-neutral { color: var(--neutral); border-color: rgba(164, 168, 178, 0.24); background: rgba(164, 168, 178, 0.045); }
 .eval-verdict.is-pending { color: #aaa3c6; border-color: rgba(170, 163, 198, 0.22); background: rgba(170, 163, 198, 0.045); }
 .eval-verdict.is-missed { color: #d1a76f; border-color: rgba(209, 167, 111, 0.24); background: rgba(209, 167, 111, 0.05); }
 .eval-verdict.is-retrospective { color: #9c91bd; border-color: rgba(156, 145, 189, 0.24); background: rgba(156, 145, 189, 0.05); }

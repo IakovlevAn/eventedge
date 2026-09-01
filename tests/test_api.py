@@ -128,7 +128,7 @@ def test_api_startup_does_not_block_on_public_read_model_prewarm(
     repository.start.assert_awaited_once()
     repository.stop.assert_awaited_once()
     prewarm.assert_not_awaited()
-    eval_prewarm.assert_awaited_once_with(application)
+    eval_prewarm.assert_not_awaited()
 
 
 def test_expired_content_snapshot_is_served_while_refresh_runs(
@@ -2607,6 +2607,120 @@ def test_complete_eval_outcome_is_reused_without_moex_request() -> None:
         archived = await repository.list_evaluation_observations()
         assert len(archived) == 4
         assert {row["signal_id"] for row in archived} == {signal.id}
+
+    asyncio.run(scenario())
+
+
+def test_legacy_neutral_outcome_normalizes_without_raw_or_moex_backfill() -> None:
+    async def scenario() -> None:
+        repository = MemoryNewsRepository()
+        timestamp = datetime(2026, 8, 20, 7, tzinfo=UTC)
+        news = NewsRecord(
+            id="news_neutral_normalization",
+            source_id="interfax",
+            external_id="neutral-normalization",
+            published_at=timestamp,
+            received_at=timestamp,
+            title="Сбербанк опубликовал операционные результаты",
+            url="https://example.com/neutral-normalization",
+            content="Сбербанк опубликовал операционные результаты.",
+            language="ru",
+            source_metadata={},
+            created_at=timestamp,
+        )
+        signal = SignalRecord(
+            id="sig_neutral_normalization",
+            news_id=news.id,
+            ticker="SBER",
+            as_of=timestamp,
+            data_cutoff_at=timestamp,
+            status="expired",
+            direction="neutral",
+            action="no_action",
+            horizon_value=3,
+            horizon_unit="calendar_days",
+            score=0.0,
+            strength=0.0,
+            confidence=0.7,
+            summary="Модель воздержалась от направления.",
+            factor_contributions=(),
+            evidence_refs=(news.id,),
+            expires_at=timestamp + timedelta(days=3),
+            invalidation_conditions=(),
+            model_version="signal-engine-0.6.1",
+            config_version=3,
+            created_at=timestamp,
+        )
+        repository._news[news.id] = news
+        repository._signals[signal.id] = signal
+        legacy_neutral = {
+            "signal_id": signal.id,
+            "ticker": signal.ticker,
+            "direction": "neutral",
+            "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
+            "eligibility": {
+                "eligible": True,
+                "reason": None,
+                "cohort": "live",
+            },
+            "status": "evaluated",
+            "returns": {"1h": 0.1, "4h": 0.2, "1d": 0.3, "3d": 0.4},
+            "horizon_observations": {"3d": {"timely": True}},
+            "verdict": True,
+            "verdict_status": "evaluated",
+            "outcome_terminal": True,
+            "raw_observation_count": 2,
+            "model_version": signal.model_version,
+            "config_version": signal.config_version,
+        }
+        await repository.upsert_evaluation_epoch(
+            EvaluationEpochRecord(
+                epoch_id="eval_neutral_normalization",
+                model_version=signal.model_version,
+                config_version=signal.config_version,
+                evaluated_at=timestamp + timedelta(days=3),
+                outcomes=(legacy_neutral,),
+                observations=(),
+            )
+        )
+        await repository.upsert_evaluation_observations(
+            [
+                {
+                    "signal_id": signal.id,
+                    "signal_as_of": to_rfc3339(signal.as_of),
+                    "observation_at": to_rfc3339(timestamp + timedelta(minutes=10 * index)),
+                    "model_version": signal.model_version,
+                    "config_version": signal.config_version,
+                }
+                for index in (1, 2)
+            ],
+            evaluated_at=timestamp + timedelta(days=3),
+            evaluation_methodology=EVALUATION_METHODOLOGY_VERSION,
+        )
+
+        class NoMoexExpected:
+            async def candles(self, *args: object, **kwargs: object) -> dict[str, object]:
+                raise AssertionError("neutral semantic normalization must be JSON-only")
+
+        outcomes, _, candles, _, epochs = await main_module._load_evaluation_material(
+            repository,
+            NoMoexExpected(),  # type: ignore[arg-type]
+        )
+
+        assert candles == {}
+        assert len(outcomes) == 1
+        assert outcomes[0]["verdict"] is None
+        assert outcomes[0]["verdict_status"] == "not_applicable"
+        assert outcomes[0]["neutral_move_status"] == "quiet"
+        assert outcomes[0]["raw_observation_count"] == 2
+        current = main_module.latest_model_evaluation_epoch(
+            main_module.latest_evaluation_epochs(epochs),
+            signal.model_version,
+            signal.config_version,
+        )
+        assert current is not None
+        assert current.outcomes[0]["verdict"] is None
+        assert current.outcomes[0]["verdict_status"] == "not_applicable"
 
     asyncio.run(scenario())
 

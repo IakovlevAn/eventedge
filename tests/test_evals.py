@@ -12,6 +12,7 @@ from eventedge.evals import (
     eval_summary,
     evaluate_signal,
     event_time_export_rows,
+    normalize_neutral_eval_outcome,
     outcome_export_rows,
     quant_factors,
 )
@@ -332,11 +333,24 @@ def test_eval_summary_top_level_quality_aliases_use_live_cohort() -> None:
             "cohort": "retrospective",
         },
     }
+    neutral = {
+        "signal_id": "sig_neutral_abstention",
+        "status": "evaluated",
+        "direction": "neutral",
+        "returns": {"4h": 8.0},
+        "verdict": None,
+        "verdict_status": "not_applicable",
+        "eligibility": {"eligible": True, "reason": None, "cohort": "live"},
+    }
 
-    summary = eval_summary([live, retrospective])
+    summary = eval_summary([live, retrospective, neutral])
 
-    assert summary["signals_total"] == 2
+    assert summary["signals_total"] == 3
     assert summary["evaluated"] == 2
+    assert summary["directional_signals"] == 2
+    assert summary["neutral_signals"] == 1
+    assert summary["not_applicable"] == 1
+    assert summary["quality_methodology"] == "directional_up_down_only_v1"
     assert summary["metric_scope"] == "live"
     assert summary["hit_rate_pct"] == 100.0
     assert summary["average_signed_return_pct"] == 1.0
@@ -344,7 +358,67 @@ def test_eval_summary_top_level_quality_aliases_use_live_cohort() -> None:
     assert summary["coverage_pct"] == 100.0
     assert summary["cohorts"]["all"]["hit_rate_pct"] == 50.0
     assert summary["cohorts"]["all"]["average_signed_return_pct"] == -1.0
+    assert summary["cohorts"]["all"]["directional_signals"] == 2
+    assert summary["cohorts"]["live"]["directional_signals"] == 1
+    assert summary["cohorts"]["live"]["neutral_signals"] == 1
     assert summary["cohorts"]["retrospective"]["hit_rate_pct"] == 0.0
+
+
+def test_neutral_signal_is_abstention_not_flat_price_prediction() -> None:
+    signal = replace(
+        signal_record(),
+        direction="neutral",
+        action="no_action",
+        score=0.0,
+    )
+    entry = signal.created_at + timedelta(minutes=10)
+    outcome = evaluate_signal(
+        signal,
+        [
+            {"begin": entry.isoformat(), "open": 100, "close": 100},
+            {
+                "begin": (entry + timedelta(hours=4)).isoformat(),
+                "open": 112,
+                "close": 112,
+            },
+            {
+                "begin": (entry + timedelta(days=3)).isoformat(),
+                "open": 115,
+                "close": 115,
+            },
+        ],
+        reporting_news(),
+    )
+
+    assert outcome["returns"]["4h"] == 12.0
+    assert outcome["verdict"] is None
+    assert outcome["verdict_status"] == "not_applicable"
+    assert outcome["neutral_move_status"] == "material_move"
+    summary = eval_summary([outcome])
+    assert summary["directional_signals"] == 0
+    assert summary["neutral_signals"] == 1
+    assert summary["evaluated"] == 0
+    assert summary["hit_rate_pct"] is None
+    assert summary["coverage_pct"] == 0.0
+
+
+def test_legacy_neutral_outcome_normalizes_without_changing_market_data() -> None:
+    legacy = {
+        "signal_id": "sig_legacy_neutral",
+        "direction": "neutral",
+        "returns": {"1h": 0.2, "4h": 0.3, "1d": 0.4, "3d": 0.5},
+        "verdict": True,
+        "verdict_status": "evaluated",
+        "raw_observation_count": 42,
+    }
+
+    normalized = normalize_neutral_eval_outcome(legacy)
+
+    assert normalized["verdict"] is None
+    assert normalized["verdict_status"] == "not_applicable"
+    assert normalized["neutral_move_status"] == "quiet"
+    assert normalized["returns"] == legacy["returns"]
+    assert normalized["raw_observation_count"] == 42
 
 
 def test_eval_never_uses_evidence_received_after_signal_creation() -> None:
@@ -530,6 +604,7 @@ def test_eval_breakdowns_cover_every_signal_direction() -> None:
     outcomes = [
         {"direction": "up", "ticker": "SBER", "returns": {"4h": 1.0}},
         {"direction": "down", "ticker": "LKOH", "returns": {"4h": -1.0}},
+        {"direction": "neutral", "ticker": "YDEX", "returns": {"4h": 12.0}},
     ]
 
     breakdowns = eval_breakdowns(outcomes)
@@ -539,6 +614,10 @@ def test_eval_breakdowns_cover_every_signal_direction() -> None:
         "down",
         "neutral",
     ]
+    neutral = breakdowns["by_direction"][-1]
+    assert neutral["signals"] == 1
+    assert neutral["observations"] == 0
+    assert neutral["hit_rate_pct"] is None
 
 
 def test_eval_summary_separates_partial_results_from_pending_signals() -> None:
