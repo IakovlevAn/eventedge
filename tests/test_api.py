@@ -2263,6 +2263,16 @@ def test_evals_export_paginates_filters_config_and_compresses_full_download(
             "signal_id": signal_id,
             "ticker": "SBER",
             "direction": "up",
+            "as_of": "2026-08-31T10:00:00Z",
+            "data_cutoff_at": "2026-08-31T10:00:00Z",
+            "signal_created_at": "2026-08-31T10:01:00Z",
+            "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
+            "eligibility": {"eligible": False, "reason": "test_fixture"},
+            "status": "excluded",
+            "score": 40.0,
+            "confidence": 0.8,
+            "returns": {"1h": None, "4h": None, "1d": None, "3d": None},
+            "horizon_observations": {},
             "model_version": "signal-engine-0.6.1",
             "config_version": config_version,
         }
@@ -2296,6 +2306,27 @@ def test_evals_export_paginates_filters_config_and_compresses_full_download(
                 evaluated_at=evaluated_at,
             )
         )
+    asyncio.run(
+        repository.upsert_evaluation_epoch(
+            EvaluationEpochRecord(
+                epoch_id="eval_cfg_2_superseded",
+                model_version="signal-engine-0.6.1",
+                config_version=2,
+                evaluated_at=evaluated_at - timedelta(days=1),
+                outcomes=(outcome("sig_cfg2_legacy", 2),),
+                observations=(
+                    {
+                        "signal_id": "sig_cfg2_legacy",
+                        "ticker": "SBER",
+                        "signal_as_of": "2026-08-30T10:00:00Z",
+                        "observation_at": "2026-08-30T11:00:00Z",
+                        "model_version": "signal-engine-0.6.1",
+                        "config_version": 2,
+                    },
+                ),
+            )
+        )
+    )
 
     monkeypatch.setattr(app.state, "news_repository", repository)
     first = client.get(
@@ -2328,6 +2359,15 @@ def test_evals_export_paginates_filters_config_and_compresses_full_download(
             "download": "true",
         },
     )
+    full_outcomes = client.get(
+        "/v1/evals/export",
+        params={
+            "format": "json",
+            "dataset": "outcomes",
+            "model_version": "all",
+            "download": "true",
+        },
+    )
 
     assert first.status_code == 200
     assert first.json()["meta"] == {
@@ -2346,9 +2386,17 @@ def test_evals_export_paginates_filters_config_and_compresses_full_download(
     assert second.json()["meta"]["next_cursor"] is None
     assert full.status_code == 200
     assert full.headers["content-encoding"] == "gzip"
-    assert full.json()["meta"]["rows"] == 3
-    assert full.json()["meta"]["total_rows"] == 3
+    assert full.json()["meta"]["rows"] == 4
+    assert full.json()["meta"]["total_rows"] == 4
     assert {row["config_version"] for row in full.json()["data"]} == {1, 2}
+    assert full_outcomes.status_code == 200
+    assert full_outcomes.json()["meta"]["total_rows"] == 4
+    assert {row["signal_id"] for row in full_outcomes.json()["data"]} == {
+        "sig_cfg1_a",
+        "sig_cfg1_b",
+        "sig_cfg2",
+        "sig_cfg2_legacy",
+    }
 
 
 def test_complete_eval_outcome_is_reused_without_moex_request() -> None:
