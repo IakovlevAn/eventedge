@@ -14,6 +14,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
@@ -132,7 +133,7 @@ BACKFILL_CONCURRENCY = min(4, max(1, int(os.environ.get("BACKFILL_CONCURRENCY", 
 # Leave enough time for that path plus the existing single retry while staying
 # well below the 180-second serverless execution timeout.
 SIGNAL_REPROCESS_DEADLINE_SECONDS = 60.0
-EVALUATION_REFRESH_DEADLINE_SECONDS = 60.0
+EVALUATION_REFRESH_DEADLINE_SECONDS = 150.0
 SIGNAL_READ_TIMEOUT_SECONDS = 12.0
 SIGNAL_FEED_TTL_SECONDS = 30 if os.environ.get("APP_ENV") == "prod" else 0
 SIGNAL_FEED_FAILURE_RETRY_SECONDS = 5.0
@@ -2758,16 +2759,10 @@ async def _load_evaluation_material(
         for signal in signals
         if (signal.model_version, signal.config_version, signal.id) not in complete_outcomes
     ]
-    truncated_groups = {
-        (epoch.model_version, epoch.config_version)
-        for epoch in current_method_epochs
-        if epoch.observations_truncated
-    }
     observation_refresh_signals = [
         signal
         for signal in signals
-        if (signal.model_version, signal.config_version) in truncated_groups
-        or _eval_raw_observations_need_refresh(
+        if _eval_raw_observations_need_refresh(
             current_outcomes.get((signal.model_version, signal.config_version, signal.id)),
             stored_observation_counts.get(
                 (signal.model_version, signal.config_version), {}
@@ -2909,7 +2904,6 @@ async def _load_evaluation_material(
             signal
             for signal in epoch_signals
             if signal.id not in complete_signal_ids
-            or (model_version, config_version) in truncated_groups
             or _eval_raw_observations_need_refresh(
                 current_outcomes.get((model_version, config_version, signal.id)),
                 stored_observation_counts.get((model_version, config_version), {}).get(
@@ -2981,10 +2975,7 @@ async def _load_evaluation_material(
         refreshed_outcomes_by_id = {
             str(outcome.get("signal_id", "")): outcome for outcome in epoch_outcomes
         }
-        raw_rebuild_complete = (
-            model_version,
-            config_version,
-        ) in truncated_groups and all(
+        raw_rebuild_complete = all(
             not _eval_raw_observations_need_refresh(
                 refreshed_outcomes_by_id.get(signal.id),
                 post_refresh_counts.get(signal.id, 0),
@@ -3013,17 +3004,23 @@ async def _load_evaluation_material(
                 # Raw rows live in evaluation_observations. Keep the epoch row
                 # small so repeated refreshes cannot hit YDB's row-size limit.
                 observations=(),
-                # A legacy true flag records an irrecoverable pre-migration gap;
-                # clear it only after every signal was rebuilt without a cap.
-                observations_truncated=bool(
-                    previous_epoch and previous_epoch.observations_truncated
-                    and not raw_rebuild_complete
-                ),
+                # A true flag marks an internal progress epoch. Public readers
+                # ignore it until every expected raw observation is persisted.
+                observations_truncated=not raw_rebuild_complete,
             )
         )
-    # Raw is the large side of the ledger. Publish the new methodology epochs
-    # only after every idempotent bulk-upsert finishes, so public readers either
-    # see the complete previous snapshot or the complete new one.
+    progress_epochs = [
+        replace(epoch, observations_truncated=True)
+        for epoch in epoch_records
+        if (epoch.model_version, epoch.config_version) not in epoch_by_model
+    ]
+    if progress_epochs:
+        await asyncio.gather(
+            *(repository.upsert_evaluation_epoch(epoch) for epoch in progress_epochs)
+        )
+    # Raw is the large side of the ledger. A failed write leaves a hidden
+    # progress epoch with expected per-signal counts; the next run resumes only
+    # incomplete signal_ids. Complete epochs are published after bulk-upsert.
     if observations_to_upsert:
         await repository.upsert_evaluation_observations(
             list(observations_to_upsert.values()),
@@ -3245,7 +3242,16 @@ async def evaluation_epoch_index(
                 stored_epochs = await repository.list_evaluation_epochs(
                     include_observations=False
                 )
-                epochs = latest_evaluation_epochs(stored_epochs)
+                ready_epochs = [
+                    epoch
+                    for epoch in stored_epochs
+                    if not (
+                        evaluation_epoch_methodology(epoch)
+                        == EVALUATION_METHODOLOGY_VERSION
+                        and epoch.observations_truncated
+                    )
+                ]
+                epochs = latest_evaluation_epochs(ready_epochs)
                 current_groups = [
                     (epoch.model_version, epoch.config_version)
                     for epoch in epochs
@@ -3394,6 +3400,10 @@ async def export_evals(
         for epoch in epochs
         if (model_version == "all" or epoch.model_version == model_version)
         and (config_version is None or epoch.config_version == config_version)
+        and not (
+            evaluation_epoch_methodology(epoch) == EVALUATION_METHODOLOGY_VERSION
+            and epoch.observations_truncated
+        )
     ]
     if dataset == "timeseries":
         if download and cursor is not None:

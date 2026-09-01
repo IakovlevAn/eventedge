@@ -1095,7 +1095,7 @@ def test_maintenance_timer_defers_work_before_trigger_timeout(
         "epochs": 0,
         "status": "partial",
         "deferred": ["signal_reprocessing"],
-        "deadline_seconds": 60.0,
+        "deadline_seconds": 150.0,
     }
     assert eval_refreshed is True
 
@@ -2681,6 +2681,7 @@ def test_eval_raw_backfill_resumes_when_v2_count_is_below_outcome_count() -> Non
                 evaluated_at=timestamp + timedelta(days=1),
                 outcomes=(cached_outcome,),
                 observations=(),
+                observations_truncated=True,
             )
         )
         await repository.upsert_evaluation_observations(
@@ -2727,13 +2728,20 @@ def test_eval_raw_backfill_resumes_when_v2_count_is_below_outcome_count() -> Non
                 }
 
         market = HistoricalMarket()
-        outcomes, _, _, _, _ = await main_module._load_evaluation_material(
+        outcomes, _, _, _, refreshed_epochs = await main_module._load_evaluation_material(
             repository,
             market,  # type: ignore[arg-type]
         )
 
         assert market.calls == 1
         assert outcomes[0]["raw_observation_count"] == 4
+        refreshed_epoch = next(
+            epoch
+            for epoch in refreshed_epochs
+            if epoch.model_version == signal.model_version
+            and epoch.config_version == signal.config_version
+        )
+        assert refreshed_epoch.observations_truncated is False
         page = await repository.list_evaluation_observations_page(
             evaluation_methodology=EVALUATION_METHODOLOGY_VERSION,
             model_version=signal.model_version,
@@ -3184,6 +3192,56 @@ def test_evaluation_epoch_index_retries_a_cold_ydb_read(
     assert repository.list_evaluation_epochs.await_count == 3
     assert repository.count_evaluation_observations_by_signal.await_count == 1
     assert sleep.await_count == 2
+
+
+def test_evaluation_epoch_index_hides_incomplete_methodology_cutover() -> None:
+    async def scenario() -> None:
+        repository = MemoryNewsRepository()
+        evaluated_at = datetime(2026, 9, 1, 8, tzinfo=UTC)
+        await repository.upsert_evaluation_epoch(
+            EvaluationEpochRecord(
+                epoch_id="eval_legacy_ready",
+                model_version="signal-engine-0.6.1",
+                config_version=3,
+                evaluated_at=evaluated_at,
+                outcomes=(
+                    {
+                        "signal_id": "sig_legacy_ready",
+                        "evaluation_methodology": "market-outcome-0.2.0",
+                    },
+                ),
+                observations=(),
+            )
+        )
+        await repository.upsert_evaluation_epoch(
+            EvaluationEpochRecord(
+                epoch_id="eval_current_building",
+                model_version="signal-engine-0.6.1",
+                config_version=3,
+                evaluated_at=evaluated_at + timedelta(minutes=1),
+                outcomes=(
+                    {
+                        "signal_id": "sig_current_building",
+                        "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
+                    },
+                ),
+                observations=(),
+                observations_truncated=True,
+            )
+        )
+        application = SimpleNamespace(
+            state=SimpleNamespace(
+                news_repository=repository,
+                evaluation_epoch_index_cache=None,
+                evaluation_epoch_index_lock=asyncio.Lock(),
+            )
+        )
+
+        epochs, _ = await main_module.evaluation_epoch_index(application)  # type: ignore[arg-type]
+
+        assert [epoch.epoch_id for epoch in epochs] == ["eval_legacy_ready"]
+
+    asyncio.run(scenario())
 
 
 def test_retrospective_signal_is_backfilled_with_outcome_and_raw_rows() -> None:
