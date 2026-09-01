@@ -2748,7 +2748,12 @@ def test_evals_selects_highest_config_before_newest_evaluation_time(
     repository = MemoryNewsRepository()
     asyncio.run(repository.upsert_evaluation_epoch(lower_config))
     asyncio.run(repository.upsert_evaluation_epoch(current_config))
+    list_epochs = AsyncMock(wraps=repository.list_evaluation_epochs)
+    count_observations = AsyncMock(wraps=repository.count_evaluation_observations)
+    repository.list_evaluation_epochs = list_epochs  # type: ignore[method-assign]
+    repository.count_evaluation_observations = count_observations  # type: ignore[method-assign]
     monkeypatch.setattr(app.state, "news_repository", repository)
+    app.state.evaluation_epoch_index_cache = None
 
     response = client.get("/v1/evals")
     lower_response = client.get(
@@ -2767,6 +2772,18 @@ def test_evals_selects_highest_config_before_newest_evaluation_time(
     assert [
         row["signal_id"] for row in lower_response.json()["data"]["outcomes"]
     ] == ["sig_config_1"]
+    assert list_epochs.await_count == 1
+    assert count_observations.await_count == 1
+
+    app.state.evaluation_epoch_index_cache["loaded_at"] = 0.0
+    list_epochs.side_effect = RuntimeError("temporary YDB read failure")
+    count_observations.side_effect = RuntimeError("temporary YDB read failure")
+    stale = client.get(
+        "/v1/evals",
+        params={"model_version": "signal-engine-0.6.1", "config_version": 2},
+    )
+    assert stale.status_code == 200
+    assert stale.json()["meta"]["selected_config_version"] == 2
 
 
 def test_retrospective_signal_is_excluded_without_moex_request() -> None:

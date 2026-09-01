@@ -123,6 +123,7 @@ NEWS_COLLECTION_INTERVAL_SECONDS = next(
 NEWS_CLIENT_REFRESH_INTERVAL_SECONDS = 30
 NEWS_DELIVERY_TARGET_SECONDS = 120
 EVALUATION_CACHE_TTL_SECONDS = 60
+EVALUATION_EPOCH_INDEX_TTL_SECONDS = 60
 ASSESSMENT_SNAPSHOT_BUCKET_SECONDS = 30
 ASSESSMENT_SNAPSHOT_RETENTION_SECONDS = 600
 BACKFILL_BATCH_LIMIT = min(40, max(1, int(os.environ.get("BACKFILL_BATCH_LIMIT", "4"))))
@@ -352,6 +353,8 @@ app.state.market_data_client = MoexMarketDataClient()
 app.state.evaluation_material_cache = None
 app.state.evaluation_material_inflight = None
 app.state.evaluation_material_lock = asyncio.Lock()
+app.state.evaluation_epoch_index_cache = None
+app.state.evaluation_epoch_index_lock = asyncio.Lock()
 app.state.content_snapshot_cache = None
 app.state.content_snapshot_lock = asyncio.Lock()
 app.state.content_snapshot_inflight = None
@@ -614,6 +617,7 @@ def invalidate_content_snapshot(request: Request) -> None:
     request.app.state.source_observation_cache = None
     request.app.state.news_response_cache = None
     request.app.state.event_response_cache = None
+    request.app.state.evaluation_epoch_index_cache = None
 
 
 def cached_news_response(
@@ -3109,6 +3113,49 @@ def latest_model_evaluation_epoch(
     )
 
 
+async def evaluation_epoch_index(
+    request: Request,
+) -> tuple[list[EvaluationEpochRecord], dict[tuple[str, int], int]]:
+    state = request.app.state
+    repository: NewsRepository = state.news_repository
+    cache = state.evaluation_epoch_index_cache
+    if (
+        cache is not None
+        and cache["repository"] is repository
+        and time.monotonic() - cache["loaded_at"] < EVALUATION_EPOCH_INDEX_TTL_SECONDS
+    ):
+        return cache["epochs"], cache["observation_counts"]
+
+    async with state.evaluation_epoch_index_lock:
+        cache = state.evaluation_epoch_index_cache
+        if (
+            cache is not None
+            and cache["repository"] is repository
+            and time.monotonic() - cache["loaded_at"] < EVALUATION_EPOCH_INDEX_TTL_SECONDS
+        ):
+            return cache["epochs"], cache["observation_counts"]
+        try:
+            stored_epochs, observation_counts = await asyncio.gather(
+                repository.list_evaluation_epochs(include_observations=False),
+                repository.count_evaluation_observations(),
+            )
+            epochs = latest_evaluation_epochs(stored_epochs)
+        except Exception:
+            if cache is None or cache["repository"] is not repository:
+                raise
+            logger.exception(
+                "Evaluation epoch index refresh failed; serving last-known snapshot"
+            )
+            return cache["epochs"], cache["observation_counts"]
+        state.evaluation_epoch_index_cache = {
+            "repository": repository,
+            "loaded_at": time.monotonic(),
+            "epochs": epochs,
+            "observation_counts": observation_counts,
+        }
+        return epochs, observation_counts
+
+
 @app.get("/v1/evals", tags=["Evals"])
 async def list_evals(
     request: Request,
@@ -3118,12 +3165,7 @@ async def list_evals(
     ] = None,
     config_version: Annotated[int | None, Query(ge=1)] = None,
 ) -> JSONResponse:
-    repository: NewsRepository = request.app.state.news_repository
-    stored_epochs, observation_counts = await asyncio.gather(
-        repository.list_evaluation_epochs(include_observations=False),
-        repository.count_evaluation_observations(),
-    )
-    epochs = latest_evaluation_epochs(stored_epochs)
+    epochs, observation_counts = await evaluation_epoch_index(request)
     selected_model_version = model_version or CURRENT_NEWS_MODEL_VERSION
     selected_epoch = latest_model_evaluation_epoch(
         epochs,
