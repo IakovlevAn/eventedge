@@ -125,6 +125,7 @@ NEWS_DELIVERY_TARGET_SECONDS = 120
 EVALUATION_CACHE_TTL_SECONDS = 60
 EVALUATION_EPOCH_INDEX_TTL_SECONDS = 60
 EVALUATION_TIMESERIES_MAX_DOWNLOAD_ROWS = 2_000
+EVALUATION_COUNT_SIGNAL_FILTER_LIMIT = 100
 ASSESSMENT_SNAPSHOT_BUCKET_SECONDS = 30
 ASSESSMENT_SNAPSHOT_RETENTION_SECONDS = 600
 BACKFILL_BATCH_LIMIT = min(40, max(1, int(os.environ.get("BACKFILL_BATCH_LIMIT", "4"))))
@@ -2711,17 +2712,11 @@ async def _load_evaluation_material(
     signal_groups = sorted(
         {(signal.model_version, signal.config_version) for signal in signals}
     )
-    observation_count_results = await asyncio.gather(
-        *(
-            repository.count_evaluation_observations_by_signal(
-                evaluation_methodology=EVALUATION_METHODOLOGY_VERSION,
-                model_version=model_version,
-                config_version=config_version,
-            )
-            for model_version, config_version in signal_groups
+    signals_by_group: dict[tuple[str, int], list[SignalRecord]] = {}
+    for signal in signals:
+        signals_by_group.setdefault((signal.model_version, signal.config_version), []).append(
+            signal
         )
-    )
-    stored_observation_counts = dict(zip(signal_groups, observation_count_results, strict=True))
     stored_news = await repository.get_news_by_ids(frozenset(signal.news_id for signal in signals))
     # Evaluation is an immutable historical audit. A signal must not disappear
     # merely because its source item is later hidden from the public product feed.
@@ -2749,15 +2744,60 @@ async def _load_evaluation_material(
             current_outcomes.setdefault(key, normalized_outcome)
             if _is_complete_eval_outcome(normalized_outcome):
                 complete_outcomes.setdefault(key, normalized_outcome)
+    pending_signal_ids_by_group = {
+        group: _evaluation_epoch_pending_signal_ids(
+            epoch_by_model.get(group),
+            signals_by_group[group],
+        )
+        for group in signal_groups
+    }
+    dirty_groups = [
+        group
+        for group in signal_groups
+        if pending_signal_ids_by_group[group] is None
+        or pending_signal_ids_by_group[group]
+    ]
+    count_filters: dict[tuple[str, int], frozenset[str] | None] = {}
+    for group in dirty_groups:
+        pending_signal_ids = pending_signal_ids_by_group[group]
+        count_filters[group] = (
+            pending_signal_ids
+            if pending_signal_ids is not None
+            and len(pending_signal_ids) <= EVALUATION_COUNT_SIGNAL_FILTER_LIMIT
+            else None
+        )
+    observation_count_results = await asyncio.gather(
+        *(
+            repository.count_evaluation_observations_by_signal(
+                evaluation_methodology=EVALUATION_METHODOLOGY_VERSION,
+                model_version=model_version,
+                config_version=config_version,
+                signal_ids=count_filters[(model_version, config_version)],
+            )
+            for model_version, config_version in dirty_groups
+        )
+    )
+    stored_observation_counts: dict[tuple[str, int], dict[str, int]] = {}
+    for group, actual_counts in zip(dirty_groups, observation_count_results, strict=True):
+        count_filter = count_filters[group]
+        if count_filter is None:
+            counts: dict[str, int] = {}
+        else:
+            counts = _evaluation_epoch_observation_counts(epoch_by_model.get(group))
+            counts.update({signal_id: 0 for signal_id in count_filter})
+        counts.update(actual_counts)
+        stored_observation_counts[group] = counts
     refresh_signals = [
         signal
         for signal in signals
-        if (signal.model_version, signal.config_version, signal.id) not in complete_outcomes
+        if (signal.model_version, signal.config_version) in stored_observation_counts
+        and (signal.model_version, signal.config_version, signal.id) not in complete_outcomes
     ]
     observation_refresh_signals = [
         signal
         for signal in signals
-        if _eval_raw_observations_need_refresh(
+        if (signal.model_version, signal.config_version) in stored_observation_counts
+        and _eval_raw_observations_need_refresh(
             current_outcomes.get((signal.model_version, signal.config_version, signal.id)),
             stored_observation_counts.get(
                 (signal.model_version, signal.config_version), {}
@@ -2849,6 +2889,8 @@ async def _load_evaluation_material(
     # One-time migration shield: copy every legacy JSON observation into the
     # normalized append-only table before compacting epoch snapshots.
     for epoch in current_method_epochs:
+        if (epoch.model_version, epoch.config_version) not in stored_observation_counts:
+            continue
         for stored_row in epoch.observations:
             row = {
                 **dict(stored_row),
@@ -2864,14 +2906,8 @@ async def _load_evaluation_material(
             if all((key[0], key[1], key[2], key[3])):
                 observations_to_upsert[key] = row
     epoch_records = []
-    for model_version, config_version in sorted(
-        {(signal.model_version, signal.config_version) for signal in signals}
-    ):
-        epoch_signals = [
-            signal
-            for signal in signals
-            if signal.model_version == model_version and signal.config_version == config_version
-        ]
+    for model_version, config_version in dirty_groups:
+        epoch_signals = signals_by_group[(model_version, config_version)]
         signal_ids = {signal.id for signal in epoch_signals}
         refreshed_outcomes = [outcome for outcome in outcomes if outcome["signal_id"] in signal_ids]
         previous_epoch = epoch_by_model.get((model_version, config_version))
@@ -3096,6 +3132,49 @@ def _is_complete_eval_outcome(outcome: Mapping[str, object]) -> bool:
     )
 
 
+def _evaluation_epoch_observation_counts(
+    epoch: EvaluationEpochRecord | None,
+) -> dict[str, int]:
+    if epoch is None:
+        return {}
+    counts: dict[str, int] = {}
+    for outcome in epoch.outcomes:
+        signal_id = str(outcome.get("signal_id", ""))
+        count = _eval_outcome_raw_observation_count(outcome)
+        if signal_id and count is not None:
+            counts[signal_id] = count
+    return counts
+
+
+def _evaluation_epoch_pending_signal_ids(
+    epoch: EvaluationEpochRecord | None,
+    signals: list[SignalRecord],
+) -> frozenset[str] | None:
+    """Return exact rows needing verification, or None for a full recovery check."""
+    expected_signal_ids = frozenset(signal.id for signal in signals)
+    if epoch is None or epoch.observations_truncated:
+        return None
+
+    outcomes_by_id: dict[str, dict[str, object]] = {}
+    for stored_outcome in epoch.outcomes:
+        outcome = dict(stored_outcome)
+        signal_id = str(outcome.get("signal_id", ""))
+        normalized = normalize_neutral_eval_outcome(outcome)
+        if not signal_id or signal_id in outcomes_by_id or normalized != outcome:
+            return None
+        outcomes_by_id[signal_id] = outcome
+    if set(outcomes_by_id) - expected_signal_ids:
+        return None
+
+    pending = set(expected_signal_ids - set(outcomes_by_id))
+    for signal_id, outcome in outcomes_by_id.items():
+        if not _is_complete_eval_outcome(outcome) or (
+            _eval_outcome_raw_observation_count(outcome) is None
+        ):
+            pending.add(signal_id)
+    return frozenset(pending)
+
+
 def _merge_eval_observations(
     preserved: list[dict[str, object]],
     fresh: list[dict[str, object]],
@@ -3253,32 +3332,12 @@ async def evaluation_epoch_index(
                     )
                 ]
                 epochs = latest_evaluation_epochs(ready_epochs)
-                current_groups = [
-                    (epoch.model_version, epoch.config_version)
+                observation_counts = {
+                    (epoch.model_version, epoch.config_version): sum(
+                        _evaluation_epoch_observation_counts(epoch).values()
+                    )
                     for epoch in epochs
-                    if evaluation_epoch_methodology(epoch)
-                    == EVALUATION_METHODOLOGY_VERSION
-                ]
-                legacy_counts_task = repository.count_evaluation_observations()
-                per_signal_counts = await asyncio.gather(
-                    *(
-                        repository.count_evaluation_observations_by_signal(
-                            evaluation_methodology=EVALUATION_METHODOLOGY_VERSION,
-                            model_version=model_version,
-                            config_version=config_version,
-                        )
-                        for model_version, config_version in current_groups
-                    )
-                )
-                observation_counts = await legacy_counts_task
-                observation_counts.update({
-                    group: sum(counts.values())
-                    for group, counts in zip(
-                        current_groups,
-                        per_signal_counts,
-                        strict=True,
-                    )
-                })
+                }
                 break
             except Exception:
                 if cache is not None and cache["repository"] is repository:

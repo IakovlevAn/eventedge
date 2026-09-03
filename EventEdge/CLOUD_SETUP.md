@@ -46,7 +46,7 @@ cloud: eventedge
 | GitHub Actions variable | `YC_DEV_FOLDER_ID` | Идентификатор development-каталога, не секрет |
 | Container Registry | `eventedge` | Неизменяемые Docker-образы API |
 | Service account | `eventedge-api` | Скачивание production-образа и runtime-идентичность API |
-| Serverless Container | `eventedge-api` | Публичный read API: один прогретый инстанс на активную зону, до семи параллельных запросов |
+| Serverless Container | `eventedge-api` | Публичный read API с scale-to-zero и до семи параллельных запросов после холодного старта |
 | Serverless Container | `eventedge-worker` | Сбор новостей, reprocess и Evals без прогретых инстансов |
 | Service account | `eventedge-gateway` | Вызов только приватного контейнера API |
 | API Gateway | `eventedge-api` | Публичная точка входа и маршрутизация к контейнеру |
@@ -63,7 +63,7 @@ cloud: eventedge
 - После bootstrap trusted workflow автоматически делает squash merge зелёных PR из веток `agent/*` в `main`.
 - Workflow сверяет SHA проверенной ревизии, репозиторий ветки и target `main`; draft и PR с label `do-not-merge` не мержатся.
 - После зелёного CI на `main` выполняется OIDC-аутентификация, публикация образа и деплой новой ревизии.
-- API-ревизия использует 2 vCPU / 4 GB, concurrency 7, `min-instances=1` и лимит одного инстанса на зону. Короткоживущие assessment-snapshot канонизируются транзакцией в YDB, поэтому согласованность не зависит от process-local кеша. Worker использует те же ресурсы по требованию, но обрабатывает только одну timer-задачу одновременно и имеет `min-instances=0`.
+- API-ревизия использует 1 vCPU / 1 GB, concurrency 7, `min-instances=0` и лимит одного инстанса на зону. Первый запрос после простоя может быть медленнее из-за холодного старта. Короткоживущие assessment-snapshot канонизируются транзакцией в YDB, поэтому согласованность не зависит от process-local кеша. Worker также использует 1 vCPU / 1 GB по требованию, обрабатывает только одну timer-задачу одновременно и имеет `min-instances=0`. Live-срез перед rightsizing показал максимум 407 MiB памяти и 11,5% CPU; снижение ресурсов может увеличить время тяжёлых запусков, но не меняет сбор, LLM, YDB и покрытие источников.
 - YDB не имеет зарезервированной мощности, ограничена 500 RU/с и 1 ГБ, защищена от удаления. Лимит RU/с разрешает короткий burst для параллельных news/Evals операций, но не резервирует платную мощность.
 - Перед публикацией serverless-ревизии CI применяет DDL из того же Docker-образа. Для этого `eventedge-ci` должен иметь `ydb.editor` только на базе `eventedge-prod`.
 - Runtime service account имеет `ydb.editor` только на базе `eventedge-prod`; роль не выдана на каталог или облако.
@@ -108,4 +108,4 @@ Yandex Cloud OIDC exchange succeeded
 
 ## Следующий этап
 
-Следующий этап — накопить 72 часа метрик раздельных API/worker-контуров, затем решить, можно ли безопасно уменьшить API до 512 MB. Object Storage нужен для будущих тяжёлых архивов и экспортов; Message Queue не подключается, пока последовательного worker и timer-очереди достаточно.
+Следующий этап — накопить 72 часа метрик после rightsizing: проверить холодный старт API, memory p95/p99, timeout worker и свежесть новостей/Evals. Object Storage нужен для будущих тяжёлых архивов и экспортов; Message Queue не подключается, пока последовательного worker и timer-очереди достаточно.
