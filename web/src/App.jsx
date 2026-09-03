@@ -33,7 +33,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { separateAssessmentLayers } from "./assessment.js";
 import { companyCoverageView } from "./companyCoverage.js";
 import { evalOutcomeView, newestEvalOutcomes } from "./evalOutcome.js";
-import { CANONICAL_NEWS_PATH, newsCoverageView } from "./newsCoverage.js";
+import {
+  CANONICAL_NEWS_PATH,
+  DASHBOARD_REFRESH_MS,
+  dashboardLoadMode,
+  dashboardRefreshDue,
+  newsCoverageView,
+} from "./newsCoverage.js";
 import { resolveSignalEvidence } from "./provenance.js";
 import { shouldAcceptSnapshot } from "./snapshot.js";
 import { sourceFreshnessView, sourceScheduleLabel } from "./sourceHealth.js";
@@ -2121,7 +2127,7 @@ sig_01,SBER,2026-08-08T07:00:00Z,up,42.7,0.76,signal-engine-0.6.1,1,2026-08-08T0
     "total":84,
     "has_more":true,
     "poll_interval_seconds":60,
-    "client_refresh_interval_seconds":30,
+    "client_refresh_interval_seconds":300,
     "delivery_target_seconds":120,
     "processing_coverage":{"stored":84,"relevant":61,"analysis_candidates":54,"signaled":27,"candidate_coverage_pct":88.5,"signal_yield_pct":50.0,"signal_model_version":"signal-engine-0.6.1"},
     "company_coverage":{"basis":"current_content_snapshot","window_news":84,"supported":20,"with_relevant_news":12,"with_analysis_candidates":10,"with_signal":5,"items":[{"ticker":"SBER","relevant_news":3,"analysis_candidates":3,"signaled_news":1,"last_published_at":"2026-08-27T12:00:00Z","status":"signal_available"}]},
@@ -2263,6 +2269,7 @@ export default function App() {
   const [marketUpdatedAt, setMarketUpdatedAt] = useState(null);
   const [reloadKey, setReloadKey] = useState(0);
   const acceptedAssessmentSnapshot = useRef(null);
+  const dashboardMode = dashboardLoadMode(route.view);
 
   useEffect(() => {
     const handleHashChange = () => setRoute(parseRoute());
@@ -2271,11 +2278,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (dashboardMode === "off") return undefined;
+
     const controller = new AbortController();
     let loaded = false;
     let refreshing = false;
-    const load = async () => {
-      if (refreshing || (loaded && document.visibilityState === "hidden")) return;
+    let lastLoadedAt = 0;
+    const load = async ({ force = false } = {}) => {
+      if (refreshing) return;
+      if (!force && !dashboardRefreshDue({
+        mode: dashboardMode,
+        visibilityState: document.visibilityState,
+        lastLoadedAt,
+        now: Date.now(),
+      })) return;
+      const refreshStartedAt = Date.now();
       refreshing = true;
       if (!loaded) setDataStatus("loading");
       setDataError("");
@@ -2341,6 +2358,7 @@ export default function App() {
         setNewsMeta({ ...(newsPayload.meta || { total: nextNews.length, sources: [] }), loaded: newsPayload.data.length });
         setDataStatus("ready");
         loaded = true;
+        lastLoadedAt = refreshStartedAt;
       } catch (error) {
         if (error.name === "AbortError") return;
         if (!loaded) {
@@ -2351,19 +2369,24 @@ export default function App() {
         refreshing = false;
       }
     };
-    load();
-    const refreshMs = 60000;
-    const interval = window.setInterval(load, refreshMs);
+    load({ force: true });
+    const interval = dashboardMode === "auto"
+      ? window.setInterval(load, DASHBOARD_REFRESH_MS)
+      : null;
     const handleVisibility = () => {
-      if (document.visibilityState === "visible") load();
+      load();
     };
-    document.addEventListener("visibilitychange", handleVisibility);
+    if (dashboardMode === "auto") {
+      document.addEventListener("visibilitychange", handleVisibility);
+    }
     return () => {
       controller.abort();
-      window.clearInterval(interval);
-      document.removeEventListener("visibilitychange", handleVisibility);
+      if (interval !== null) window.clearInterval(interval);
+      if (dashboardMode === "auto") {
+        document.removeEventListener("visibilitychange", handleVisibility);
+      }
     };
-  }, [reloadKey]);
+  }, [reloadKey, dashboardMode]);
 
   const navigate = (view, ticker = null) => {
     const nextHash = `#${view}${ticker ? `/${ticker}` : ""}`;

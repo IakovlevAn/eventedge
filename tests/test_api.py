@@ -173,6 +173,18 @@ def test_expired_content_snapshot_is_served_while_refresh_runs(
     list_signals.assert_not_awaited()
 
 
+def test_dashboard_read_policy_uses_one_five_minute_interval() -> None:
+    assert main_module.DASHBOARD_REFRESH_INTERVAL_SECONDS == 300
+    assert (
+        main_module.NEWS_CLIENT_REFRESH_INTERVAL_SECONDS
+        == main_module.DASHBOARD_REFRESH_INTERVAL_SECONDS
+    )
+    assert (
+        main_module.ASSESSMENT_SNAPSHOT_BUCKET_SECONDS
+        == main_module.DASHBOARD_REFRESH_INTERVAL_SECONDS
+    )
+
+
 def test_signal_feed_cache_reuses_complete_repository_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1656,7 +1668,7 @@ def test_news_ingestion_is_idempotent_and_job_is_readable() -> None:
     news = client.get("/v1/news", params={"source_id": "interfax"})
     assert news.status_code == 200
     assert news.json()["meta"]["poll_interval_seconds"] == 60
-    assert news.json()["meta"]["client_refresh_interval_seconds"] == 30
+    assert news.json()["meta"]["client_refresh_interval_seconds"] == 300
     assert news.json()["meta"]["delivery_target_seconds"] == 120
     assert news.json()["meta"]["excluded_irrelevant"] == 0
     assert news.json()["meta"]["processing_coverage"] == {
@@ -2168,10 +2180,11 @@ def test_assessments_cover_companies_without_fresh_news_signal(
     }
     assert response.json()["meta"]["returned"] == 2
     assert response.json()["meta"]["market_biases"] == 2
+    assert response.json()["meta"]["refresh_after_seconds"] == 300
     assert response.json()["meta"]["snapshot_as_of"] == "2026-08-08T16:00:08Z"
     assert response.json()["meta"]["snapshot_id"].startswith("market_")
     assert response.headers["etag"] == f'"{response.json()["meta"]["snapshot_id"]}"'
-    assert response.headers["cache-control"] == "public, max-age=15, stale-while-revalidate=15"
+    assert response.headers["cache-control"] == "public, max-age=300, stale-while-revalidate=300"
     snapshot_store.assert_awaited_once()
     assert ":" in snapshot_store.await_args.args[0]
 
