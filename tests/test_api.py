@@ -2590,6 +2590,20 @@ def test_complete_eval_outcome_is_reused_without_moex_request() -> None:
             evaluated_at=datetime(2026, 8, 5, tzinfo=UTC),
             evaluation_methodology=EVALUATION_METHODOLOGY_VERSION,
         )
+        count_observations = AsyncMock(
+            wraps=repository.count_evaluation_observations_by_signal
+        )
+        upsert_epoch = AsyncMock(wraps=repository.upsert_evaluation_epoch)
+        upsert_observations = AsyncMock(
+            wraps=repository.upsert_evaluation_observations
+        )
+        repository.count_evaluation_observations_by_signal = (  # type: ignore[method-assign]
+            count_observations
+        )
+        repository.upsert_evaluation_epoch = upsert_epoch  # type: ignore[method-assign]
+        repository.upsert_evaluation_observations = (  # type: ignore[method-assign]
+            upsert_observations
+        )
 
         class NoMoexExpected:
             async def candles(self, *args: object, **kwargs: object) -> dict[str, object]:
@@ -2605,8 +2619,16 @@ def test_complete_eval_outcome_is_reused_without_moex_request() -> None:
         current = next(epoch for epoch in epochs if epoch.model_version == signal.model_version)
         assert current.observations == ()
         archived = await repository.list_evaluation_observations()
-        assert len(archived) == 4
-        assert {row["signal_id"] for row in archived} == {signal.id}
+        assert archived == [
+            {
+                **observation,
+                "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
+            }
+            for observation in cached_observations
+        ]
+        assert count_observations.await_count == 0
+        assert upsert_epoch.await_count == 0
+        assert upsert_observations.await_count == 0
 
     asyncio.run(scenario())
 
@@ -2812,6 +2834,20 @@ def test_eval_raw_backfill_resumes_when_v2_count_is_below_outcome_count() -> Non
             evaluated_at=timestamp + timedelta(days=1),
             evaluation_methodology=EVALUATION_METHODOLOGY_VERSION,
         )
+        count_observations = AsyncMock(
+            wraps=repository.count_evaluation_observations_by_signal
+        )
+        upsert_epoch = AsyncMock(wraps=repository.upsert_evaluation_epoch)
+        upsert_observations = AsyncMock(
+            wraps=repository.upsert_evaluation_observations
+        )
+        repository.count_evaluation_observations_by_signal = (  # type: ignore[method-assign]
+            count_observations
+        )
+        repository.upsert_evaluation_epoch = upsert_epoch  # type: ignore[method-assign]
+        repository.upsert_evaluation_observations = (  # type: ignore[method-assign]
+            upsert_observations
+        )
 
         class HistoricalMarket:
             calls = 0
@@ -2866,6 +2902,11 @@ def test_eval_raw_backfill_resumes_when_v2_count_is_below_outcome_count() -> Non
         assert {row["evaluation_methodology"] for row in page.items} == {
             EVALUATION_METHODOLOGY_VERSION
         }
+        assert count_observations.await_count == 1
+        assert count_observations.await_args.kwargs["signal_ids"] is None
+        assert upsert_epoch.await_count == 1
+        assert upsert_observations.await_count == 1
+        write_counts = (upsert_epoch.await_count, upsert_observations.await_count)
 
         class NoSecondFetch:
             async def candles(self, *args: object, **kwargs: object) -> dict[str, object]:
@@ -2879,6 +2920,8 @@ def test_eval_raw_backfill_resumes_when_v2_count_is_below_outcome_count() -> Non
         )
         assert second_candles == {}
         assert second_outcomes[0]["raw_observation_count"] == 4
+        assert count_observations.await_count == 1
+        assert (upsert_epoch.await_count, upsert_observations.await_count) == write_counts
 
     asyncio.run(scenario())
 
@@ -2949,6 +2992,8 @@ def test_eval_refresh_never_drops_previous_outcomes_for_the_same_config() -> Non
             "status": "evaluated",
             "returns": {"1h": 0.1, "4h": 0.2, "1d": 0.3, "3d": 0.4},
             "horizon_observations": {"3d": {"timely": True}},
+            "verdict": True,
+            "raw_observation_count": 1,
         }
         await repository.upsert_evaluation_epoch(
             EvaluationEpochRecord(
@@ -2960,14 +3005,40 @@ def test_eval_refresh_never_drops_previous_outcomes_for_the_same_config() -> Non
                 observations=(),
             )
         )
+        await repository.upsert_evaluation_observations(
+            [
+                {
+                    "signal_id": old_signal.id,
+                    "ticker": old_signal.ticker,
+                    "model_version": old_signal.model_version,
+                    "config_version": old_signal.config_version,
+                    "signal_as_of": to_rfc3339(old_signal.as_of),
+                    "observation_at": to_rfc3339(old_signal.as_of + timedelta(hours=1)),
+                }
+            ],
+            evaluated_at=timestamp,
+            evaluation_methodology=EVALUATION_METHODOLOGY_VERSION,
+        )
+        count_observations = AsyncMock(
+            wraps=repository.count_evaluation_observations_by_signal
+        )
+        upsert_epoch = AsyncMock(wraps=repository.upsert_evaluation_epoch)
+        repository.count_evaluation_observations_by_signal = (  # type: ignore[method-assign]
+            count_observations
+        )
+        repository.upsert_evaluation_epoch = upsert_epoch  # type: ignore[method-assign]
 
         class EmptyMarket:
+            calls: list[str] = []
+
             async def candles(self, *args: object, **kwargs: object) -> dict[str, object]:
+                self.calls.append(str(args[0]))
                 return {"candles": []}
 
+        market = EmptyMarket()
         await main_module._load_evaluation_material(
             repository,
-            EmptyMarket(),  # type: ignore[arg-type]
+            market,  # type: ignore[arg-type]
         )
 
         current = main_module.latest_model_evaluation_epoch(
@@ -2982,6 +3053,12 @@ def test_eval_refresh_never_drops_previous_outcomes_for_the_same_config() -> Non
             old_signal.id,
             new_signal.id,
         }
+        assert market.calls == [new_signal.ticker]
+        assert count_observations.await_count == 1
+        assert count_observations.await_args.kwargs["signal_ids"] == frozenset(
+            {new_signal.id}
+        )
+        assert upsert_epoch.await_count == 1
 
     asyncio.run(scenario())
 
@@ -3195,6 +3272,7 @@ def test_evals_selects_highest_config_before_newest_evaluation_time(
                 "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
                 "status": "excluded",
                 "eligibility": {"eligible": False, "reason": "test_fixture"},
+                "raw_observation_count": 3,
             },
         ),
         observations=(),
@@ -3212,6 +3290,7 @@ def test_evals_selects_highest_config_before_newest_evaluation_time(
                 "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
                 "status": "excluded",
                 "eligibility": {"eligible": False, "reason": "test_fixture"},
+                "raw_observation_count": 5,
             },
         ),
     )
@@ -3246,12 +3325,16 @@ def test_evals_selects_highest_config_before_newest_evaluation_time(
     assert [
         row["signal_id"] for row in lower_response.json()["data"]["outcomes"]
     ] == ["sig_config_1"]
+    epoch_meta = {
+        item["config_version"]: item for item in response.json()["meta"]["model_epochs"]
+    }
+    assert epoch_meta[1]["observations"] == 3
+    assert epoch_meta[2]["observations"] == 5
     assert list_epochs.await_count == 1
-    assert count_observations.await_count == 2
+    assert count_observations.await_count == 0
 
     app.state.evaluation_epoch_index_cache["loaded_at"] = 0.0
     list_epochs.side_effect = RuntimeError("temporary YDB read failure")
-    count_observations.side_effect = RuntimeError("temporary YDB read failure")
     stale = client.get(
         "/v1/evals",
         params={"model_version": "signal-engine-0.6.1", "config_version": 2},
@@ -3304,7 +3387,7 @@ def test_evaluation_epoch_index_retries_a_cold_ydb_read(
     assert epochs == [epoch]
     assert counts == {("signal-engine-0.6.1", 3): 0}
     assert repository.list_evaluation_epochs.await_count == 3
-    assert repository.count_evaluation_observations_by_signal.await_count == 1
+    assert repository.count_evaluation_observations_by_signal.await_count == 0
     assert sleep.await_count == 2
 
 

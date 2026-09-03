@@ -141,6 +141,17 @@ def test_evaluation_observation_signal_count_query_is_methodology_scoped() -> No
     assert "GROUP BY signal_id" in query
     assert parameters["$evaluation_methodology"] == "point-in-time-0.3.0"
 
+    targeted_query, targeted_parameters = count_evaluation_observations_by_signal_query(
+        evaluation_methodology="point-in-time-0.3.0",
+        model_version="signal-engine-0.6.1",
+        config_version=3,
+        signal_ids=frozenset({"sig_b", "sig_a"}),
+    )
+
+    assert "signal_id IN ($signal_id_0, $signal_id_1)" in targeted_query
+    assert targeted_parameters["$signal_id_0"] == "sig_a"
+    assert targeted_parameters["$signal_id_1"] == "sig_b"
+
 
 def test_schema_migration_backfills_legacy_epoch_observations() -> None:
     captured: list[tuple[str, dict[str, object] | None]] = []
@@ -576,6 +587,12 @@ def test_memory_evaluation_observation_pages_preserve_methodology_and_total() ->
             model_version="signal-engine-0.6.1",
             config_version=3,
         ) == {"sig_a": 2, "sig_b": 1}
+        assert await repository.count_evaluation_observations_by_signal(
+            evaluation_methodology="point-in-time-0.3.0",
+            model_version="signal-engine-0.6.1",
+            config_version=3,
+            signal_ids=frozenset({"sig_b"}),
+        ) == {"sig_b": 1}
 
     asyncio.run(scenario())
 

@@ -49,11 +49,13 @@ def build_payload(
         ),
         "description": f"GitHub {environment['DEPLOY_SHA']} ({component})",
         "resources": {
-            # Yandex Cloud requires at least 4 GiB to allocate 2 full vCPUs.
-            # Both contours use the 2-vCPU tier. This prevents cold read-model
-            # projection and timer collection from saturating a single core.
-            "memory": "4294967296",
-            "cores": "2",
+            # Both contours are I/O-bound. The latest production audit observed
+            # worker peaks of 407 MiB and 11.5% CPU, so 1 GiB / 1 vCPU retains
+            # headroom without paying for mostly idle compute. Lower CPU can
+            # lengthen cold starts and heavy requests; persisted data, source
+            # coverage, YDB throughput and LLM behaviour remain unchanged.
+            "memory": "1073741824",
+            "cores": "1",
             "coreFraction": "100",
         },
         "executionTimeout": "180s",
@@ -62,16 +64,16 @@ def build_payload(
             "imageUrl": environment["IMAGE_URL"],
             "environment": runtime_environment,
         },
-        # The public API keeps one warm instance per active zone as a cost cap.
-        # Its work is I/O-bound, so seven concurrent requests cover one
-        # dashboard refresh plus burst reads. Cross-instance assessment
-        # snapshots are canonicalized in YDB, not in process-local memory.
+        # The public API is allowed to scale to zero. This trades the first
+        # request after an idle period for a cold-start delay and removes the
+        # dominant always-on container charge. Seven concurrent requests still
+        # cover one dashboard refresh plus burst reads after startup.
         "concurrency": "1" if is_worker else "7",
-        "provisionPolicy": {"minInstances": "0" if is_worker else "1"},
+        "provisionPolicy": {"minInstances": "0"},
         "scalingPolicy": {
-            # Peak allocation per zone is quota-safe: API 1x(2 CPU, 4 GiB) plus
-            # worker 3x(2 CPU, 4 GiB) = 8 CPU and 16 GiB. The API cap controls
-            # spend; YDB provides cross-zone snapshot consistency.
+            # Peak allocation per zone is quota-safe: API 1x(1 CPU, 1 GiB) plus
+            # worker 3x(1 CPU, 1 GiB) = 4 CPU and 4 GiB. Instance caps and
+            # scale-to-zero control spend; YDB keeps snapshots consistent.
             "zoneInstancesLimit": "3" if is_worker else "1",
             "zoneRequestsLimit": "3" if is_worker else "7",
         },

@@ -371,6 +371,7 @@ class NewsRepository(Protocol):
         evaluation_methodology: str,
         model_version: str,
         config_version: int,
+        signal_ids: frozenset[str] | None = None,
     ) -> dict[str, int]: ...
 
     async def get_or_create_assessment_snapshot(
@@ -986,6 +987,7 @@ class MemoryNewsRepository:
         evaluation_methodology: str,
         model_version: str,
         config_version: int,
+        signal_ids: frozenset[str] | None = None,
     ) -> dict[str, int]:
         normalized_methodology = normalize_evaluation_methodology(evaluation_methodology)
         counts: dict[str, int] = {}
@@ -996,6 +998,7 @@ class MemoryNewsRepository:
                 methodology == normalized_methodology
                 and stored_model == model_version
                 and stored_config == config_version
+                and (signal_ids is None or signal_id in signal_ids)
             ):
                 counts[signal_id] = counts.get(signal_id, 0) + 1
         return counts
@@ -1454,11 +1457,15 @@ class YdbNewsRepository:
         evaluation_methodology: str,
         model_version: str,
         config_version: int,
+        signal_ids: frozenset[str] | None = None,
     ) -> dict[str, int]:
+        if signal_ids == frozenset():
+            return {}
         query, parameters = count_evaluation_observations_by_signal_query(
             evaluation_methodology=evaluation_methodology,
             model_version=model_version,
             config_version=config_version,
+            signal_ids=signal_ids,
         )
         result_sets = await self._require_pool().execute_with_retries(query, parameters)
         rows = result_sets[0].rows if result_sets else []
@@ -1869,17 +1876,42 @@ def count_evaluation_observations_by_signal_query(
     evaluation_methodology: str,
     model_version: str,
     config_version: int,
+    signal_ids: frozenset[str] | None = None,
 ) -> tuple[str, dict[str, object]]:
     methodology = normalize_evaluation_methodology(evaluation_methodology)
     if not model_version:
         raise ValueError("model_version must not be empty")
     if config_version < 1:
         raise ValueError("config_version must be positive")
-    return COUNT_EVALUATION_OBSERVATIONS_BY_SIGNAL_QUERY, {
+    parameters: dict[str, object] = {
         "$evaluation_methodology": methodology,
         "$model_version": model_version,
         "$config_version": ydb.TypedValue(config_version, ydb.PrimitiveType.Uint32),
     }
+    if signal_ids is None:
+        return COUNT_EVALUATION_OBSERVATIONS_BY_SIGNAL_QUERY, parameters
+    normalized_signal_ids = sorted(signal_id for signal_id in signal_ids if signal_id)
+    if len(normalized_signal_ids) != len(signal_ids):
+        raise ValueError("signal_ids must contain only non-empty strings")
+    if not normalized_signal_ids:
+        raise ValueError("signal_ids must not be empty")
+    declarations = []
+    placeholders = []
+    for index, signal_id in enumerate(normalized_signal_ids):
+        parameter = f"$signal_id_{index}"
+        declarations.append(f"DECLARE {parameter} AS Utf8;")
+        placeholders.append(parameter)
+        parameters[parameter] = signal_id
+    query = COUNT_EVALUATION_OBSERVATIONS_BY_SIGNAL_QUERY.replace(
+        "\nSELECT\n",
+        "\n" + "\n".join(declarations) + "\n\nSELECT\n",
+        1,
+    ).replace(
+        "\nGROUP BY signal_id",
+        f"\n    AND signal_id IN ({', '.join(placeholders)})\nGROUP BY signal_id",
+        1,
+    )
+    return query, parameters
 
 
 def evaluation_observation_bulk_upsert_rows(

@@ -12,16 +12,16 @@ enforcement:
   automatic_shutdown: false
 runtime_caps:
   serverless_container:
-    memory_mb: 4096
-    cores: 2
+    memory_mb: 1024
+    cores: 1
     concurrency: 7
-    min_instances: 1
+    min_instances: 0
     zone_instances_limit: 1
     zone_requests_limit: 7
     execution_timeout_seconds: 180
   collection_worker:
-    memory_mb: 4096
-    cores: 2
+    memory_mb: 1024
+    cores: 1
     concurrency: 1
     min_instances: 0
     zone_instances_limit: 3
@@ -43,11 +43,11 @@ runtime_caps:
     interval_seconds: 600
 notes:
   - The Yandex Cloud billing budget sends alerts but does not stop resource consumption.
-  - One provisioned 2-vCPU API instance per active zone serves up to seven concurrent I/O-bound requests; shared assessment snapshots are canonicalized in YDB across instances.
-  - Public endpoints serve the last successful market snapshot immediately and refresh it every 60 seconds in the background.
+  - The 1-vCPU, 1-GiB API scales to zero and serves up to seven concurrent I/O-bound requests after startup; the first request after an idle period can be slower, while shared assessment snapshots remain canonicalized in YDB.
+  - Public endpoints serve the last successful market snapshot and refresh it every 60 seconds in the background after the API has started.
   - A cold API instance finishes the default news projection before reporting startup complete, and concurrent projection misses share one single-flight task.
   - News collection and LLM analysis run in a separate non-provisioned worker so timer jobs cannot block the public API.
-  - The pay-per-use worker uses 2 vCPU and 4 GiB per instance and scales overlapping timer lanes across up to three isolated instances; collection is raw-only, YDB has an eight-session pool, and semantic LLM work remains single-flight in maintenance.
+  - The pay-per-use worker uses 1 vCPU and 1 GiB per instance and scales overlapping timer lanes across up to three isolated instances; the latest live audit observed a 407-MiB memory maximum and 11.5% CPU maximum, leaving headroom while accepting longer heavy runs.
   - Broad RSS and Telegram sources use five stable minute buckets so each source keeps a five-minute interval without a connection burst.
   - At 12000 RUB, freeze resource increases and review the current-month forecast before the 15000 RUB hard notification threshold.
   - Historical reprocessing is capped at one targetable candidate per five-minute maintenance run so even a cold batch fits the trigger's 30-second request window without cancellation.
