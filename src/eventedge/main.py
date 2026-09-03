@@ -120,13 +120,14 @@ NEWS_COLLECTION_LANES = tuple(lane.as_api_dict() for lane in COLLECTION_CONFIG.l
 NEWS_COLLECTION_INTERVAL_SECONDS = next(
     lane.interval_seconds for lane in COLLECTION_CONFIG.lanes if lane.id == "fast"
 )
-NEWS_CLIENT_REFRESH_INTERVAL_SECONDS = 30
+DASHBOARD_REFRESH_INTERVAL_SECONDS = 300
+NEWS_CLIENT_REFRESH_INTERVAL_SECONDS = DASHBOARD_REFRESH_INTERVAL_SECONDS
 NEWS_DELIVERY_TARGET_SECONDS = 120
 EVALUATION_CACHE_TTL_SECONDS = 60
 EVALUATION_EPOCH_INDEX_TTL_SECONDS = 60
 EVALUATION_TIMESERIES_MAX_DOWNLOAD_ROWS = 2_000
 EVALUATION_COUNT_SIGNAL_FILTER_LIMIT = 100
-ASSESSMENT_SNAPSHOT_BUCKET_SECONDS = 30
+ASSESSMENT_SNAPSHOT_BUCKET_SECONDS = DASHBOARD_REFRESH_INTERVAL_SECONDS
 ASSESSMENT_SNAPSHOT_RETENTION_SECONDS = 600
 BACKFILL_BATCH_LIMIT = min(40, max(1, int(os.environ.get("BACKFILL_BATCH_LIMIT", "4"))))
 BACKFILL_CONCURRENCY = min(4, max(1, int(os.environ.get("BACKFILL_CONCURRENCY", "1"))))
@@ -137,9 +138,13 @@ BACKFILL_CONCURRENCY = min(4, max(1, int(os.environ.get("BACKFILL_CONCURRENCY", 
 SIGNAL_REPROCESS_DEADLINE_SECONDS = 60.0
 EVALUATION_REFRESH_DEADLINE_SECONDS = 150.0
 SIGNAL_READ_TIMEOUT_SECONDS = 12.0
-SIGNAL_FEED_TTL_SECONDS = 30 if os.environ.get("APP_ENV") == "prod" else 0
+SIGNAL_FEED_TTL_SECONDS = (
+    DASHBOARD_REFRESH_INTERVAL_SECONDS if os.environ.get("APP_ENV") == "prod" else 0
+)
 SIGNAL_FEED_FAILURE_RETRY_SECONDS = 5.0
-CONTENT_SNAPSHOT_TTL_SECONDS = 60 if os.environ.get("APP_ENV") == "prod" else 0
+CONTENT_SNAPSHOT_TTL_SECONDS = (
+    DASHBOARD_REFRESH_INTERVAL_SECONDS if os.environ.get("APP_ENV") == "prod" else 0
+)
 CANONICAL_NEWS_RESPONSE_LIMIT = 500
 RECENT_REPOSITORY_SUCCESS_TTL_SECONDS = 120 if os.environ.get("APP_ENV") == "prod" else 0
 SOURCE_REGISTRY_TTL_SECONDS = 60.0
@@ -2620,7 +2625,7 @@ async def list_assessments(
                 item["market_context"]["bias_direction"] != "neutral" for item in data
             ),
             "news_backed": sum(item["assessment_type"] == "hybrid" for item in data),
-            "refresh_after_seconds": 30,
+            "refresh_after_seconds": DASHBOARD_REFRESH_INTERVAL_SECONDS,
             "score_scale": {
                 "min": -100,
                 "neutral_low": -18,
@@ -2648,7 +2653,10 @@ async def list_assessments(
     canonical_snapshot_id = str(payload["meta"]["snapshot_id"])
     response = JSONResponse(content=payload)
     response.headers["ETag"] = f'"{canonical_snapshot_id}"'
-    response.headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=15"
+    response.headers["Cache-Control"] = (
+        f"public, max-age={DASHBOARD_REFRESH_INTERVAL_SECONDS}, "
+        f"stale-while-revalidate={DASHBOARD_REFRESH_INTERVAL_SECONDS}"
+    )
     return response
 
 

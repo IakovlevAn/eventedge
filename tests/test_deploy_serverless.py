@@ -20,9 +20,9 @@ def test_deployment_payload_has_budget_caps() -> None:
     )
 
     assert payload["resources"] == {
-        "memory": "1073741824",
+        "memory": "805306368",
         "cores": "1",
-        "coreFraction": "100",
+        "coreFraction": "20",
     }
     assert payload["concurrency"] == "7"
     assert payload["provisionPolicy"] == {"minInstances": "0"}
@@ -87,9 +87,9 @@ def test_worker_payload_has_no_provisioned_instances() -> None:
 
     assert payload["containerId"] == "worker-container-id"
     assert payload["resources"] == {
-        "memory": "1073741824",
+        "memory": "805306368",
         "cores": "1",
-        "coreFraction": "100",
+        "coreFraction": "20",
     }
     assert payload["concurrency"] == "1"
     assert payload["provisionPolicy"] == {"minInstances": "0"}
@@ -114,8 +114,9 @@ def test_budget_policy_matches_deployment_caps() -> None:
         "automatic_shutdown": False,
     }
     assert runtime == {
-        "memory_mb": 1024,
+        "memory_mb": 768,
         "cores": 1,
+        "core_fraction": 20,
         "concurrency": 7,
         "min_instances": 0,
         "zone_instances_limit": 1,
@@ -123,8 +124,9 @@ def test_budget_policy_matches_deployment_caps() -> None:
         "execution_timeout_seconds": 180,
     }
     assert policy["runtime_caps"]["collection_worker"] == {
-        "memory_mb": 1024,
+        "memory_mb": 768,
         "cores": 1,
+        "core_fraction": 20,
         "concurrency": 1,
         "min_instances": 0,
         "zone_instances_limit": 3,
