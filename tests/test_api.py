@@ -30,7 +30,7 @@ NEWS_PAYLOAD = {
     "published_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     "title": "Сбербанк опубликовал результаты за семь месяцев",
     "url": "https://example.com/news/001",
-    "content": "Чистая прибыль выросла быстрее рыночного консенсуса.",
+    "content": "Чистая прибыль выросла на 20% и оказалась выше рыночного консенсуса.",
     "language": "ru",
     "source_metadata": {"section": "companies"},
 }
@@ -1492,7 +1492,7 @@ def test_signal_list_reads_repository_instead_of_stale_empty_snapshot(
         "decision_at": payload[0]["created_at"],
         "data_cutoff_at": timestamp.isoformat().replace("+00:00", "Z"),
         "model_version": "signal-engine-0.6.1",
-        "config_version": 6,
+        "config_version": 7,
         "evidence_status": "complete",
         "evidence_expected": 1,
         "evidence_resolved": 1,
@@ -1505,6 +1505,49 @@ def test_signal_list_reads_repository_instead_of_stale_empty_snapshot(
     assert unresolved["provenance"]["evidence_status"] == "missing"
     assert unresolved["provenance"]["evidence_expected"] == 1
     snapshot_read.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_direction"),
+    [
+        ("Компания раскрыла результаты за полугодие.", "up"),
+        (
+            "Выручка выросла на 7%, себестоимость выросла на 10%. "
+            "Валовая прибыль снизилась на 19%, операционный убыток сократился на 55,5%.",
+            "neutral",
+        ),
+    ],
+)
+def test_financial_direction_survives_persistence_and_public_signal_readback(
+    monkeypatch: pytest.MonkeyPatch, content: str, expected_direction: str
+) -> None:
+    repository = MemoryNewsRepository()
+    timestamp = datetime.now(UTC).replace(microsecond=0)
+    document = NewsDocument(
+        source_id="interfax",
+        external_id=f"financial-readback-{expected_direction}",
+        published_at=timestamp,
+        received_at=timestamp,
+        title="КАМАЗ снизил чистый убыток по РСБУ на 29,5%",
+        url="https://example.com/financial-readback",
+        content=content,
+        language="ru",
+        source_metadata={"signal_candidate": True},
+        payload_hash=f"financial-readback-{expected_direction}",
+    )
+    result = asyncio.run(repository.ingest(f"financial-readback-{expected_direction}", document))
+    monkeypatch.setattr(app.state, "news_repository", repository)
+
+    response = client.get("/v1/signals", params={"ticker": "KMAZ"})
+
+    assert response.status_code == 200
+    signals = response.json()["data"]
+    assert len(signals) == 1
+    assert signals[0]["id"] == result.job.result_ref
+    assert signals[0]["direction"] == expected_direction
+    assert signals[0]["config_version"] == 7
+    assert signals[0]["provenance"]["config_version"] == 7
+    assert signals[0]["evidence"][0]["title"] == document.title
 
 
 def test_signal_list_hides_context_history_but_keeps_strong_company_down(

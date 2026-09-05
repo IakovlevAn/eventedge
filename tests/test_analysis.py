@@ -41,8 +41,8 @@ def test_positive_company_results_create_algorithmic_up_signal() -> None:
     assert signals[0].score == 50.5
     assert signals[0].confidence == pytest.approx(0.9063)
     assert signals[0].model_version == "signal-engine-0.6.1"
-    assert signals[0].config_version == 6
-    assert signals[0].extractor_version == "rules-0.2.0"
+    assert signals[0].config_version == 7
+    assert signals[0].extractor_version == "rules-0.3.0"
 
 
 def test_negative_restrictions_create_down_signal() -> None:
@@ -84,7 +84,7 @@ def test_down_signal_requires_conservative_score_and_confidence() -> None:
         config=BaselineScoringConfig(negative_threshold=-60),
     )[0]
 
-    assert BaselineScoringConfig().config_version == 6
+    assert BaselineScoringConfig().config_version == 7
     assert BaselineScoringConfig().negative_threshold == -30
     assert BaselineScoringConfig().minimum_down_confidence == 0.80
     assert low_confidence.direction is SignalDirection.NEUTRAL
@@ -290,3 +290,155 @@ def test_extraction_and_scoring_are_reproducible() -> None:
     assert first == second
     assert first[1][0].config_version == 7
     assert len(first[1][0].factor_contributions) == 5
+
+
+@pytest.mark.parametrize(
+    ("title", "expected_polarity", "expected_direction"),
+    [
+        ("КАМАЗ снизил чистый убыток по РСБУ на 29,5%", 1, SignalDirection.UP),
+        ("АЛРОСА сократила затраты на 65 млрд рублей", 1, SignalDirection.UP),
+        ("АЛРОСА снизила долг на 50 млрд рублей", 1, SignalDirection.UP),
+        ("Чистый убыток АЛРОСА сократился на 50%", 1, SignalDirection.UP),
+        ("Расходы АЛРОСА снизились на 20%", 1, SignalDirection.UP),
+        ("Чистый убыток АЛРОСА вырос на 50%", -1, SignalDirection.DOWN),
+        ("АЛРОСА увеличила расходы на 20%", -1, SignalDirection.DOWN),
+        ("Долг АЛРОСА увеличился на 50 млрд рублей", -1, SignalDirection.DOWN),
+        ("Сбербанк снизил чистую прибыль на 20%", -1, SignalDirection.DOWN),
+        ("Выручка Сбербанка выросла на 20%", 1, SignalDirection.UP),
+        (
+            "Прибыль Газпрома по МСФО за II квартал выросла на 60.7% - akm.ru",
+            1,
+            SignalDirection.UP,
+        ),
+    ],
+)
+def test_financial_direction_follows_the_metric_not_the_change_word(
+    title: str, expected_polarity: float, expected_direction: SignalDirection
+) -> None:
+    features, signals = extract_and_score(
+        NewsAnalysisInput(
+            source_id="interfax",
+            title=title,
+            content="Компания раскрыла результаты по МСФО.",
+        )
+    )
+
+    assert features.event_type is EventType.FINANCIAL_RESULTS
+    assert features.polarity == expected_polarity
+    assert signals[0].direction is expected_direction
+
+
+@pytest.mark.parametrize(
+    ("title", "content"),
+    [
+        ("КАМАЗ не снизил чистый убыток на 29,5%", "Компания раскрыла результаты по РСБУ."),
+        ("Сбербанк ожидает роста прибыли на 20%", "Компания представила прогноз."),
+        ("АЛРОСА может сократить расходы на 20%", "Компания представила прогноз по МСФО."),
+        ("Сбербанк опроверг рост прибыли на 20%", "Компания опубликовала пояснение."),
+        (
+            "Сбербанк увеличил чистую прибыль на 20%",
+            "Чистая прибыль выросла на 20%, но оказалась ниже ожиданий рынка.",
+        ),
+        (
+            "Сбербанк снизил чистую прибыль на 20%",
+            "Чистая прибыль снизилась на 20%, но оказалась выше ожиданий рынка.",
+        ),
+        (
+            "КАМАЗ снизил чистый убыток по РСБУ на 29,5%",
+            "Выручка выросла на 7%, себестоимость выросла на 10%. "
+            "Валовая прибыль снизилась на 19%, операционный убыток сократился на 55,5%.",
+        ),
+        (
+            "Сбербанк опубликовал финансовые результаты",
+            "Чистая прибыль составила 100 млрд рублей. Число клиентов выросло на 20%.",
+        ),
+        (
+            "Сбербанк опубликовал финансовые результаты",
+            "Годом ранее чистая прибыль выросла на 20%. За текущий период сравнение не приведено.",
+        ),
+        (
+            "Сбербанк увеличил чистую прибыль на 20%",
+            "Результат оказался ниже ожиданий рынка.",
+        ),
+        (
+            "Сбербанк опубликовал финансовые результаты",
+            "Прибыль выросла на 20%, оказавшись хуже прогноза аналитиков.",
+        ),
+        (
+            "Сбербанк опубликовал финансовые результаты",
+            "Чистая прибыль выросла на 20% в прошлом году. В этом году она снизилась на 10%.",
+        ),
+        (
+            "Сбербанк опубликовал финансовые результаты",
+            "Чистая прибыль выросла на 20% в 2025 году. В 2026 году она снизилась на 10%.",
+        ),
+        (
+            "Сбербанк опубликовал финансовые результаты",
+            "Прибыль составила 100 млрд рублей благодаря росту числа клиентов на 20%.",
+        ),
+        (
+            "Сбербанк опубликовал финансовые результаты",
+            "Сбербанк опубликовал выручку 100 млрд рублей при росте клиентской базы на 20%.",
+        ),
+        ("АЛРОСА отказалась от сокращения расходов на 20%", "Компания раскрыла данные по МСФО."),
+        ("АЛРОСА исключила рост прибыли на 20%", "Компания раскрыла данные по МСФО."),
+        (
+            "АЛРОСА сообщила об отсутствии роста выручки на 20%",
+            "Компания раскрыла данные по МСФО.",
+        ),
+        ("Сбербанк сократил долги заемщиков на 20%", "Банк раскрыл финансовые результаты."),
+    ],
+)
+def test_uncertain_or_mixed_financial_evidence_abstains(title: str, content: str) -> None:
+    features, signals = extract_and_score(
+        NewsAnalysisInput(source_id="interfax", title=title, content=content)
+    )
+
+    if features.event_type is EventType.FINANCIAL_RESULTS:
+        assert features.polarity == 0
+    assert signals[0].direction is SignalDirection.NEUTRAL
+    assert signals[0].score == 0
+
+
+def test_prior_year_loss_does_not_reverse_current_profit_growth() -> None:
+    features, signals = extract_and_score(
+        NewsAnalysisInput(
+            source_id="interfax",
+            title="Сбербанк увеличил чистую прибыль на 20%",
+            content="Годом ранее компания получила чистый убыток в 10 млрд рублей.",
+        )
+    )
+
+    assert features.polarity == 1
+    assert signals[0].direction is SignalDirection.UP
+
+
+@pytest.mark.parametrize(
+    ("title", "content", "expected_direction"),
+    [
+        (
+            "Сбербанк снизил расходы на 20%",
+            "Банк внедрил новую технологию.",
+            SignalDirection.UP,
+        ),
+        (
+            "АЛРОСА снизила долг на 50 млрд рублей",
+            "Компания продала непрофильные активы.",
+            SignalDirection.UP,
+        ),
+        (
+            "АЛРОСА снизила долг на 50 млрд рублей",
+            "Компания продала непрофильные активы. Выручка снизилась на 20%.",
+            SignalDirection.NEUTRAL,
+        ),
+    ],
+)
+def test_primary_financial_headline_is_not_overridden_by_incidental_event_words(
+    title: str, content: str, expected_direction: SignalDirection
+) -> None:
+    features, signals = extract_and_score(
+        NewsAnalysisInput(source_id="interfax", title=title, content=content)
+    )
+
+    assert features.event_type is EventType.FINANCIAL_RESULTS
+    assert signals[0].direction is expected_direction

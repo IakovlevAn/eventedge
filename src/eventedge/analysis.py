@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from eventedge.configs.scoring import load_scoring_config
 
 CURRENT_NEWS_MODEL_VERSION = "signal-engine-0.6.1"
-CURRENT_SIGNAL_CONFIG_VERSION = 6
+CURRENT_SIGNAL_CONFIG_VERSION = 7
 DOWN_SCORE_THRESHOLD = -30.0
 MINIMUM_DOWN_CONFIDENCE = 0.80
 
@@ -365,10 +365,157 @@ NON_ISSUER_ENTITY_PATTERNS: dict[str, tuple[str, ...]] = {
 }
 
 
+# These signs describe the business metric, not an expected share-price return.
+# Keep the vocabulary small: an unrecognized relation must remain an abstention.
+FINANCIAL_METRIC_SIGNS = {
+    "прибыл": 1,
+    "выручк": 1,
+    "ebitda": 1,
+    "рентабельност": 1,
+    "марж": 1,
+    "убыт": -1,
+    "расход": -1,
+    "затрат": -1,
+    "издерж": -1,
+    "себестоим": -1,
+    "долг": -1,
+}
+FINANCIAL_INCREASE = re.compile(
+    r"(?:вырос|возрос|увеличил|увеличен|повысил|удвоил|утроил|рост)\w*|выше|больше"
+)
+FINANCIAL_DECREASE = re.compile(
+    r"(?:снизил|снижен|снижени|сократил|сокращен|сокращени|уменьшил|уменьшен|"
+    r"упал|падени)\w*|ниже|меньше"
+)
+FINANCIAL_UNCERTAINTY = re.compile(
+    r"\b(?:не|нет|если|может|могут|ожида\w*|прогноз\w*|планир\w*|намерен\w*|"
+    r"опроверг\w*|отрица\w*|отказ\w*|исключ\w*|отсутств\w*)\b|при достижении"
+)
+FINANCIAL_HISTORY = re.compile(
+    r"^(?:годом ранее|ранее|в прошлом|в предыдущем|за аналогичный период годом ранее)\b"
+)
+FINANCIAL_AMOUNT = re.compile(
+    r"\d+(?:[.,]\d+)?\s*(?:%|млн\b|млрд\b|трлн\b|руб\w*|раз\w*)"
+)
+FINANCIAL_CLAUSES = re.compile(r"(?<!\d),(?!\d)|;|\b(?:и|но|однако|а|при этом)\b")
+FINANCIAL_WORDS = re.compile(r"[a-zа-яё]+|\d+(?:[.,]\d+)?")
+FINANCIAL_EXPECTATIONS = re.compile(
+    r"\b(ниже|хуже|выше|лучше)\s+(?:\w+\s+){0,2}(?:ожидани\w*|прогноз\w*|консенсус\w*)\b"
+)
+FINANCIAL_RELATION_BARRIERS = frozenset({"при", "благодаря", "вследствие", "после", "фоне"})
+FINANCIAL_NOMINAL_CHANGES = ("рост", "падени", "снижени", "сокращени", "увеличени")
+
+
+def financial_metric_polarity(document: NewsAnalysisInput) -> float | None:
+    """Resolve explicit metric changes; return 0 for ambiguity and None without evidence.
+
+    Relations are local to a clause and cannot cross another financial metric.
+    Opposing metric effects, negation and forecasts are deliberately not netted
+    by word frequency or arbitrary numeric magnitudes.
+    """
+    effects: set[int] = set()
+    rejected_relation = False
+    text = f"{document.title}. {document.content}".casefold()
+    # A currency abbreviation is not a sentence boundary separating a result
+    # from its amount ("получила 10,7 млрд руб. чистого убытка").
+    text = re.sub(r"\b(руб|млн|млрд|трлн)\.(?=\s)", r"\1", text)
+    if not any(
+        word.startswith(prefix)
+        and not (prefix == "долг" and word.startswith("долгосроч"))
+        for word in FINANCIAL_WORDS.findall(text)
+        for prefix in FINANCIAL_METRIC_SIGNS
+    ):
+        return None
+    expectation_effects = {
+        -1 if match.group(1) in {"ниже", "хуже"} else 1
+        for match in FINANCIAL_EXPECTATIONS.finditer(text)
+    }
+    for sentence in SENTENCE_PATTERN.split(text):
+        sentence = sentence.strip()
+        if FINANCIAL_HISTORY.search(sentence):
+            continue
+        # A trailing historic qualifier is not a current result. Without an
+        # issuer/period model we cannot resolve a later "она снизилась" safely.
+        if re.search(r"\b(?:в прошлом году|в предыдущем году|годом ранее)\b", sentence):
+            if not re.search(r"\b(?:по сравнению|против|чем)\b", sentence):
+                return 0.0
+        sentence_effects: set[int] = set()
+        for clause in FINANCIAL_CLAUSES.split(sentence):
+            words = FINANCIAL_WORDS.findall(clause)
+            metrics = {
+                index: sign
+                for index, word in enumerate(words)
+                for prefix, sign in FINANCIAL_METRIC_SIGNS.items()
+                if word.startswith(prefix)
+                and not (prefix == "долг" and word.startswith("долгосроч"))
+            }
+            if not metrics:
+                if (
+                    {"она", "он", "они", "показатель", "результат"}.intersection(words)
+                    and FINANCIAL_AMOUNT.search(clause)
+                    and any(
+                        FINANCIAL_INCREASE.fullmatch(word) or FINANCIAL_DECREASE.fullmatch(word)
+                        for word in words
+                    )
+                ):
+                    return 0.0
+                continue
+            if FINANCIAL_UNCERTAINTY.search(clause):
+                return 0.0
+            if not FINANCIAL_AMOUNT.search(clause):
+                continue
+            if any(words[index].startswith("долг") for index in metrics) and re.search(
+                r"\b(?:клиент\w*|заемщик\w*|заёмщик\w*|дебитор\w*|списал\w*|списани\w*)\b",
+                clause,
+            ):
+                return 0.0
+            changes = {
+                index: 1 if FINANCIAL_INCREASE.fullmatch(word) else -1
+                for index, word in enumerate(words)
+                if FINANCIAL_INCREASE.fullmatch(word) or FINANCIAL_DECREASE.fullmatch(word)
+            }
+            for metric_index, metric_sign in metrics.items():
+                local_changes = set()
+                for change_index, sign in changes.items():
+                    left, right = sorted((metric_index, change_index))
+                    if right - left > 10 or any(left < other < right for other in metrics):
+                        continue
+                    if FINANCIAL_RELATION_BARRIERS.intersection(words[left + 1 : right]):
+                        rejected_relation = True
+                        continue
+                    # "Рост прибыли" binds forward. "Прибыль ... при росте
+                    # числа клиентов" must not bind a different subject back.
+                    if change_index > metric_index and words[change_index].startswith(
+                        FINANCIAL_NOMINAL_CHANGES
+                    ):
+                        rejected_relation = True
+                        continue
+                    local_changes.add(sign)
+                if len(local_changes) > 1:
+                    return 0.0
+                if local_changes:
+                    sentence_effects.add(metric_sign * next(iter(local_changes)))
+                elif words[metric_index].startswith("убыт") and any(
+                    word.startswith(("получил", "зафиксировал", "понес", "понёс"))
+                    for word in words[max(0, metric_index - 6) : metric_index]
+                ):
+                    sentence_effects.add(-1)
+        effects.update(sentence_effects)
+    if len(effects) > 1:
+        return 0.0
+    # A separate sentence about consensus still qualifies the financial
+    # result. Do not mistake year-on-year growth for a positive surprise.
+    if expectation_effects and effects and effects != expectation_effects:
+        return 0.0
+    if rejected_relation and not effects:
+        return 0.0
+    return float(next(iter(effects))) if effects else None
+
+
 class RuleBasedNewsExtractor:
     """Cheap deterministic baseline used before connecting the LLM extractor."""
 
-    version = "rules-0.2.0"
+    version = "rules-0.3.0"
 
     def __init__(self, aliases: dict[str, tuple[str, ...]] | None = None) -> None:
         self._aliases = aliases or DEFAULT_MOEX_ALIASES
@@ -383,6 +530,22 @@ class RuleBasedNewsExtractor:
         negative_hits = sum(body.count(term) for term in NEGATIVE_TERMS)
         total_hits = positive_hits + negative_hits
         polarity = 0.0 if total_hits == 0 else (positive_hits - negative_hits) / total_hits
+        financial_polarity = financial_metric_polarity(document)
+        # A financial headline does not become a product/partnership event
+        # because its explanation mentions technology or an asset sale.
+        headline_financial_polarity = financial_metric_polarity(
+            document.model_copy(update={"content": document.title})
+        )
+        if (
+            headline_financial_polarity is not None
+            and event_type not in {EventType.SANCTIONS, EventType.FINANCIAL_RESULTS}
+        ):
+            event_type, base_materiality = EventType.FINANCIAL_RESULTS, 0.90
+        if event_type is EventType.FINANCIAL_RESULTS:
+            polarity = financial_polarity or 0.0
+        elif event_type is EventType.OTHER and financial_polarity is not None:
+            event_type, base_materiality = EventType.FINANCIAL_RESULTS, 0.90
+            polarity = financial_polarity
         materiality = min(
             1.0,
             base_materiality + (0.05 if facts else 0) + (0.05 if abs(polarity) >= 0.75 else 0),

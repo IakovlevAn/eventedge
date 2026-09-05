@@ -19,6 +19,7 @@ from eventedge.analysis import (
     RuleBasedNewsExtractor,
     SemanticFeatures,
     TemporalStatus,
+    financial_metric_polarity,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -95,7 +96,7 @@ class MetadataIamTokenProvider:
 class YandexGptNewsAnalyzer:
     """Target-neutral semantic extractor with a deterministic rule fallback."""
 
-    version = "yandexgpt-lite-0.6.0"
+    version = "yandexgpt-lite-0.6.1"
 
     def __init__(
         self,
@@ -133,7 +134,7 @@ class YandexGptNewsAnalyzer:
                 "using rules fallback"
             )
             return baseline.model_copy(
-                update={"extractor_version": "rules-fallback-timeout-0.1.0"}
+                update={"extractor_version": "rules-fallback-timeout-0.2.0"}
             )
         except UngroundedLlmOutputError as error:
             LOGGER.warning(
@@ -141,23 +142,30 @@ class YandexGptNewsAnalyzer:
                 error,
             )
             return baseline.model_copy(
-                update={"extractor_version": "rules-fallback-grounding-0.1.0"}
+                update={"extractor_version": "rules-fallback-grounding-0.2.0"}
             )
         except Exception as error:  # the deterministic path must remain available
             LOGGER.warning(
                 "YandexGPT semantic extraction failed; using rules fallback: %s",
                 type(error).__name__,
             )
-            return baseline.model_copy(update={"extractor_version": "rules-fallback-0.1.0"})
-        # Structured financial results with numeric rule evidence must not be
-        # neutralized by a contradictory generic LLM sentiment.
+            return baseline.model_copy(update={"extractor_version": "rules-fallback-0.2.0"})
         if (
-            baseline.event_type == EventType.FINANCIAL_RESULTS
-            and baseline.facts
-            and abs(baseline.polarity) >= 0.75
-            and baseline.polarity * payload.polarity < 0
+            baseline.event_type is EventType.FINANCIAL_RESULTS
+            or payload.event_type is EventType.FINANCIAL_RESULTS
         ):
-            polarity = baseline.polarity
+            # A number anywhere in the document is not evidence for the sign
+            # of a metric change. Preserve semantic abstention and fail closed
+            # when explicit metric evidence contradicts the model.
+            metric_polarity = financial_metric_polarity(document)
+            if payload.polarity == 0 or metric_polarity == 0:
+                polarity = 0.0
+            elif metric_polarity is None:
+                polarity = payload.polarity
+            elif payload.polarity * metric_polarity < 0:
+                polarity = 0.0
+            else:
+                polarity = self._reconcile_polarity(payload.polarity, metric_polarity)
         else:
             polarity = self._reconcile_polarity(payload.polarity, baseline.polarity)
         return SemanticFeatures(
