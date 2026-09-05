@@ -82,7 +82,7 @@ def test_company_event_wins_when_a_traded_ticker_is_known() -> None:
     assert event["sectors"] == ["Финансы"]
     assert event["event_type"] == "financial_results"
     assert event["materiality"] > 0
-    assert event["extractor_version"] == "rules-0.2.0"
+    assert event["extractor_version"] == "rules-0.3.0"
 
 
 def test_warehouse_incident_becomes_retail_logistics_context() -> None:

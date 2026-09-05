@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from eventedge.analysis import NewsAnalysisInput
+from eventedge.analysis import NewsAnalysisInput, SignalDirection, score_features
 from eventedge.llm import YandexGptNewsAnalyzer
 
 
@@ -75,7 +75,7 @@ def test_yandexgpt_extracts_semantics_but_keeps_ticker_deterministic() -> None:
     features = asyncio.run(analyzer.extract(document))
 
     assert [item.ticker for item in features.instruments] == ["SBER"]
-    assert features.extractor_version == "yandexgpt-lite-0.6.0"
+    assert features.extractor_version == "yandexgpt-lite-0.6.1"
     assert features.evidence_quotes == ("Чистая прибыль выросла на 15%",)
     assert features.polarity == 0.86
     request = session.calls[0]
@@ -136,7 +136,7 @@ def test_confident_llm_rule_polarity_conflict_is_neutralized() -> None:
     assert YandexGptNewsAnalyzer._reconcile_polarity(-0.9, 1.0) == 0.0
 
 
-def test_structured_financial_loss_keeps_negative_rule_evidence() -> None:
+def test_explicit_financial_loss_conflicting_with_llm_abstains() -> None:
     session = FakeSession(
         json.dumps(
             {
@@ -177,7 +177,7 @@ def test_structured_financial_loss_keeps_negative_rule_evidence() -> None:
 
     assert features.event_type.value == "financial_results"
     assert features.facts
-    assert features.polarity == -1
+    assert features.polarity == 0
 
 
 def test_ungrounded_evidence_uses_explicit_rules_fallback() -> None:
@@ -211,7 +211,7 @@ def test_ungrounded_evidence_uses_explicit_rules_fallback() -> None:
         )
     )
 
-    assert features.extractor_version == "rules-fallback-grounding-0.1.0"
+    assert features.extractor_version == "rules-fallback-grounding-0.2.0"
     assert len(session.calls) == 1
 
 
@@ -240,7 +240,7 @@ def test_async_deadline_uses_explicit_rules_fallback(
         )
     )
 
-    assert features.extractor_version == "rules-fallback-timeout-0.1.0"
+    assert features.extractor_version == "rules-fallback-timeout-0.2.0"
     assert [instrument.ticker for instrument in features.instruments] == ["SBER"]
 
 
@@ -284,7 +284,7 @@ def test_structured_fact_value_must_be_present_in_its_quote() -> None:
         )
     )
 
-    assert features.extractor_version == "rules-fallback-grounding-0.1.0"
+    assert features.extractor_version == "rules-fallback-grounding-0.2.0"
 
 
 def test_grounding_tolerates_source_whitespace_normalization() -> None:
@@ -318,4 +318,112 @@ def test_grounding_tolerates_source_whitespace_normalization() -> None:
         )
     )
 
-    assert features.extractor_version == "yandexgpt-lite-0.6.0"
+    assert features.extractor_version == "yandexgpt-lite-0.6.1"
+
+
+@pytest.mark.parametrize(
+    ("title", "content", "llm_polarity", "expected_polarity", "expected_direction"),
+    [
+        (
+            "КАМАЗ снизил чистый убыток по РСБУ на 29,5%",
+            "Компания раскрыла результаты за полугодие.",
+            0.8, 0.86, SignalDirection.UP,
+        ),
+        (
+            "АЛРОСА снизила долг на 50 млрд рублей",
+            "Компания раскрыла результаты по МСФО.",
+            0.8, 0.86, SignalDirection.UP,
+        ),
+        (
+            "АЛРОСА увеличила чистый убыток по РСБУ на 50%",
+            "Компания раскрыла результаты за полугодие.",
+            -0.8, -0.86, SignalDirection.DOWN,
+        ),
+        (
+            "Сбербанк увеличил чистую прибыль на 20%",
+            "Компания раскрыла результаты за полугодие.",
+            0.0, 0.0, SignalDirection.NEUTRAL,
+        ),
+        (
+            "Сбербанк увеличил чистую прибыль на 20%",
+            "Компания раскрыла результаты за полугодие.",
+            -0.2, 0.0, SignalDirection.NEUTRAL,
+        ),
+        (
+            "КАМАЗ снизил чистый убыток по РСБУ на 29,5%",
+            "Выручка выросла на 7%, себестоимость выросла на 10%.",
+            0.8, 0.0, SignalDirection.NEUTRAL,
+        ),
+        (
+            "АЛРОСА не снизила чистый убыток на 50%",
+            "Компания раскрыла результаты по МСФО.",
+            0.8, 0.0, SignalDirection.NEUTRAL,
+        ),
+        (
+            "Сбербанк опубликовал финансовые результаты",
+            "Сбербанк опубликовал выручку 100 млрд рублей при росте клиентской базы на 20%.",
+            0.8, 0.0, SignalDirection.NEUTRAL,
+        ),
+        (
+            "Сбербанк опубликовал финансовые результаты",
+            "Прибыль составила 100 млрд рублей благодаря росту числа клиентов на 20%.",
+            0.8, 0.0, SignalDirection.NEUTRAL,
+        ),
+    ],
+)
+def test_financial_llm_reconciliation_preserves_metric_semantics_and_abstention(
+    title: str,
+    content: str,
+    llm_polarity: float,
+    expected_polarity: float,
+    expected_direction: SignalDirection,
+) -> None:
+    session = FakeSession(
+        json.dumps(
+            {
+                "event_type": "financial_results",
+                "facts": [],
+                "evidence_quotes": [title],
+                "polarity": llm_polarity,
+                "materiality": 0.9,
+                "temporal_status": "past",
+                "rationale": "Оценка финансовых результатов по источнику.",
+            },
+            ensure_ascii=False,
+        )
+    )
+    analyzer = YandexGptNewsAnalyzer(
+        folder_id="folder-id",
+        session=session,  # type: ignore[arg-type]
+        token_provider=FakeTokenProvider(),  # type: ignore[arg-type]
+    )
+
+    features = asyncio.run(
+        analyzer.extract(NewsAnalysisInput(source_id="interfax", title=title, content=content))
+    )
+
+    assert features.extractor_version == "yandexgpt-lite-0.6.1"
+    assert features.polarity == expected_polarity
+    assert score_features(features, source_id="interfax")[0].direction is expected_direction
+
+
+def test_llm_failure_fallback_understands_a_reduction_in_losses() -> None:
+    analyzer = YandexGptNewsAnalyzer(
+        folder_id="folder-id",
+        session=FakeSession("{}"),  # type: ignore[arg-type]
+        token_provider=FakeTokenProvider(),  # type: ignore[arg-type]
+    )
+
+    features = asyncio.run(
+        analyzer.extract(
+            NewsAnalysisInput(
+                source_id="interfax",
+                title="КАМАЗ снизил чистый убыток по РСБУ на 29,5%",
+                content="Компания раскрыла результаты за полугодие.",
+            )
+        )
+    )
+
+    assert features.extractor_version == "rules-fallback-0.2.0"
+    assert features.polarity == 1
+    assert score_features(features, source_id="interfax")[0].direction is SignalDirection.UP
