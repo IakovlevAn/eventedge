@@ -24,7 +24,11 @@ from eventedge.storage import (
     SELECT_ASSESSMENT_SNAPSHOT_QUERY,
     SELECT_EVALUATION_EPOCHS_QUERY,
     SELECT_EVALUATION_SIGNALS_QUERY,
+    SELECT_MATERIALITY_PREDICTIONS_BY_MODEL_QUERY,
+    SELECT_MATERIALITY_PREDICTIONS_QUERY,
+    UPSERT_MATERIALITY_PREDICTION_QUERY,
     EvaluationEpochRecord,
+    MaterialityPredictionRecord,
     MemoryNewsRepository,
     NewsDocument,
     NewsRecord,
@@ -37,6 +41,8 @@ from eventedge.storage import (
     evaluation_observation_page_query,
     evaluation_observation_upsert_batches,
     filter_signals,
+    materiality_prediction_from_row,
+    materiality_prediction_parameters,
     migrate_ydb_schema,
     normalize_signal_freshness,
     process_document,
@@ -45,6 +51,94 @@ from eventedge.storage import (
     signal_rejection_reason,
     stable_id,
 )
+
+
+def _materiality_prediction(
+    *,
+    prediction_id: str = "mat_example",
+    news_id: str = "news_example",
+    model_version: str = "update-5m-symmetric-materiality-logistic-1.0",
+) -> MaterialityPredictionRecord:
+    timestamp = datetime(2026, 9, 10, 9, 5, tzinfo=UTC)
+    return MaterialityPredictionRecord(
+        id=prediction_id,
+        news_id=news_id,
+        ticker="SBER",
+        decision_at=timestamp,
+        data_cutoff_at=timestamp,
+        status="ready",
+        reason=None,
+        raw_probability=0.7,
+        calibrated_probability=0.8,
+        selected_at_coverage_pct={"raw": (20, 50, 100), "calibrated": (20, 50, 100)},
+        eligible_for_ranking=True,
+        missing_features=(),
+        model_id="update_5m_symmetric_materiality_logistic",
+        model_version=model_version,
+        artifact_payload_sha256="a" * 64,
+        feature_schema_version="news-materiality-runtime-features-1.0",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+
+def test_memory_repository_attaches_idempotent_materiality_predictions() -> None:
+    async def scenario() -> None:
+        repository = MemoryNewsRepository()
+        timestamp = datetime(2026, 9, 10, 9, tzinfo=UTC)
+        document = NewsDocument(
+            source_id="telegram_markettwits",
+            external_id="materiality-example",
+            published_at=timestamp,
+            received_at=timestamp,
+            title="Сбербанк сообщил о новом событии",
+            url="https://example.com/materiality",
+            content="Сбербанк сообщил о существенном событии.",
+            language="ru",
+            source_metadata={"tickers": ["SBER"], "analysis_candidate": True},
+            payload_hash="materiality-payload",
+        )
+        await repository.ingest("materiality-ingest", document)
+        news = await repository.list_news(source_id=None, limit=10)
+        prediction = _materiality_prediction(news_id=news[0].id)
+
+        await repository.upsert_materiality_prediction(prediction)
+        await repository.upsert_materiality_prediction(prediction)
+        attached = await repository.list_news(source_id=None, limit=10)
+        selected = await repository.list_materiality_predictions(
+            news_ids=frozenset({news[0].id}),
+            model_version=prediction.model_version,
+        )
+
+        assert attached[0].materiality_predictions == (prediction,)
+        assert selected == [prediction]
+
+    asyncio.run(scenario())
+
+
+def test_materiality_prediction_ydb_serialization_round_trip() -> None:
+    prediction = _materiality_prediction()
+    parameters = materiality_prediction_parameters(prediction)
+    payload = json.loads(str(parameters["$payload"].value))
+    row = SimpleNamespace(
+        prediction_id=prediction.id,
+        news_id=prediction.news_id,
+        ticker=prediction.ticker,
+        decision_at=prediction.decision_at,
+        data_cutoff_at=prediction.data_cutoff_at,
+        status=prediction.status,
+        model_id=prediction.model_id,
+        model_version=prediction.model_version,
+        artifact_payload_sha256=prediction.artifact_payload_sha256,
+        payload=json.dumps(payload),
+        created_at=prediction.created_at,
+        updated_at=prediction.updated_at,
+    )
+
+    assert materiality_prediction_from_row(row) == prediction
+    assert "UPSERT INTO `materiality_predictions`" in UPSERT_MATERIALITY_PREDICTION_QUERY
+    assert "news_id IN $news_ids" in SELECT_MATERIALITY_PREDICTIONS_QUERY
+    assert "model_version = $model_version" in SELECT_MATERIALITY_PREDICTIONS_BY_MODEL_QUERY
 
 
 def test_evaluation_signal_query_is_not_bounded_by_public_api_limit() -> None:

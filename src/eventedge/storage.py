@@ -100,6 +100,54 @@ class IngestResult:
 
 
 @dataclass(frozen=True)
+class MaterialityPredictionRecord:
+    """One immutable-versioned materiality decision for a news/ticker pair."""
+
+    id: str
+    news_id: str
+    ticker: str
+    decision_at: datetime
+    data_cutoff_at: datetime
+    status: str
+    reason: str | None
+    raw_probability: float | None
+    calibrated_probability: float | None
+    selected_at_coverage_pct: Mapping[str, tuple[int, ...]]
+    eligible_for_ranking: bool
+    missing_features: tuple[str, ...]
+    model_id: str
+    model_version: str
+    artifact_payload_sha256: str
+    feature_schema_version: str
+    created_at: datetime
+    updated_at: datetime
+
+    def as_api_dict(self) -> dict[str, object | None]:
+        return {
+            "id": self.id,
+            "ticker": self.ticker,
+            "status": self.status,
+            "reason": self.reason,
+            "raw_probability": self.raw_probability,
+            "probability": self.calibrated_probability,
+            "selected_at_coverage_pct": {
+                name: list(values)
+                for name, values in self.selected_at_coverage_pct.items()
+            },
+            "eligible_for_ranking": self.eligible_for_ranking,
+            "missing_features": list(self.missing_features),
+            "decision_at": to_rfc3339(self.decision_at),
+            "data_cutoff_at": to_rfc3339(self.data_cutoff_at),
+            "model_id": self.model_id,
+            "model_version": self.model_version,
+            "artifact_payload_sha256": self.artifact_payload_sha256,
+            "feature_schema_version": self.feature_schema_version,
+            "created_at": to_rfc3339(self.created_at),
+            "updated_at": to_rfc3339(self.updated_at),
+        }
+
+
+@dataclass(frozen=True)
 class NewsRecord:
     id: str
     source_id: str
@@ -112,6 +160,7 @@ class NewsRecord:
     language: str
     source_metadata: Mapping[str, object]
     created_at: datetime
+    materiality_predictions: tuple[MaterialityPredictionRecord, ...] = ()
 
     def as_api_dict(self) -> dict[str, object]:
         explicit_event_candidate = self.source_metadata.get("event_candidate")
@@ -309,6 +358,18 @@ class NewsRepository(Protocol):
         self,
         news_ids: frozenset[str],
     ) -> list[NewsRecord]: ...
+
+    async def list_materiality_predictions(
+        self,
+        *,
+        news_ids: frozenset[str],
+        model_version: str | None = None,
+    ) -> list[MaterialityPredictionRecord]: ...
+
+    async def upsert_materiality_prediction(
+        self,
+        prediction: MaterialityPredictionRecord,
+    ) -> MaterialityPredictionRecord: ...
 
     async def list_signals(
         self,
@@ -711,6 +772,7 @@ class MemoryNewsRepository:
         self._jobs: dict[str, Job] = {}
         self._news: dict[str, NewsRecord] = {}
         self._signals: dict[str, SignalRecord] = {}
+        self._materiality_predictions: dict[str, MaterialityPredictionRecord] = {}
         self._telegram_sources: dict[str, TelegramSourceRecord] = {}
         self._evaluation_epochs: dict[str, EvaluationEpochRecord] = {}
         self._evaluation_observations: dict[
@@ -806,17 +868,55 @@ class MemoryNewsRepository:
         records = (
             item for item in self._news.values() if source_id is None or item.source_id == source_id
         )
-        return sorted(
+        selected = sorted(
             records,
             key=lambda item: (item.published_at, item.id),
             reverse=True,
         )[:limit]
+        return attach_materiality_predictions(
+            selected,
+            list(self._materiality_predictions.values()),
+        )
 
     async def get_news_by_ids(
         self,
         news_ids: frozenset[str],
     ) -> list[NewsRecord]:
-        return [self._news[news_id] for news_id in sorted(news_ids) if news_id in self._news]
+        selected = [
+            self._news[news_id] for news_id in sorted(news_ids) if news_id in self._news
+        ]
+        return attach_materiality_predictions(
+            selected,
+            list(self._materiality_predictions.values()),
+        )
+
+    async def list_materiality_predictions(
+        self,
+        *,
+        news_ids: frozenset[str],
+        model_version: str | None = None,
+    ) -> list[MaterialityPredictionRecord]:
+        return sorted(
+            (
+                prediction
+                for prediction in self._materiality_predictions.values()
+                if prediction.news_id in news_ids
+                and (
+                    model_version is None
+                    or prediction.model_version == model_version
+                )
+            ),
+            key=lambda item: (item.updated_at, item.id),
+            reverse=True,
+        )
+
+    async def upsert_materiality_prediction(
+        self,
+        prediction: MaterialityPredictionRecord,
+    ) -> MaterialityPredictionRecord:
+        async with self._lock:
+            self._materiality_predictions[prediction.id] = prediction
+        return prediction
 
     async def list_signals(
         self,
@@ -1234,7 +1334,11 @@ class YdbNewsRepository:
         records = (
             news_from_row(row) for row in rows if source_id is None or row.source_id == source_id
         )
-        return list(records)[:limit]
+        selected = list(records)[:limit]
+        predictions = await self.list_materiality_predictions(
+            news_ids=frozenset(item.id for item in selected)
+        )
+        return attach_materiality_predictions(selected, predictions)
 
     async def get_news_by_ids(
         self,
@@ -1252,7 +1356,44 @@ class YdbNewsRepository:
             },
         )
         rows = result_sets[0].rows if result_sets else []
-        return [news_from_row(row) for row in rows]
+        selected = [news_from_row(row) for row in rows]
+        predictions = await self.list_materiality_predictions(news_ids=news_ids)
+        return attach_materiality_predictions(selected, predictions)
+
+    async def list_materiality_predictions(
+        self,
+        *,
+        news_ids: frozenset[str],
+        model_version: str | None = None,
+    ) -> list[MaterialityPredictionRecord]:
+        if not news_ids:
+            return []
+        query = (
+            SELECT_MATERIALITY_PREDICTIONS_BY_MODEL_QUERY
+            if model_version is not None
+            else SELECT_MATERIALITY_PREDICTIONS_QUERY
+        )
+        parameters: dict[str, object] = {
+            "$news_ids": ydb.TypedValue(
+                sorted(news_ids),
+                ydb.ListType(ydb.PrimitiveType.Utf8),
+            )
+        }
+        if model_version is not None:
+            parameters["$model_version"] = model_version
+        result_sets = await self._require_pool().execute_with_retries(query, parameters)
+        rows = result_sets[0].rows if result_sets else []
+        return [materiality_prediction_from_row(row) for row in rows]
+
+    async def upsert_materiality_prediction(
+        self,
+        prediction: MaterialityPredictionRecord,
+    ) -> MaterialityPredictionRecord:
+        await self._require_pool().execute_with_retries(
+            UPSERT_MATERIALITY_PREDICTION_QUERY,
+            materiality_prediction_parameters(prediction),
+        )
+        return prediction
 
     async def list_signals(
         self,
@@ -1584,6 +1725,49 @@ def signal_parameters(signal: SignalRecord) -> dict[str, object]:
     }
 
 
+def materiality_prediction_parameters(
+    prediction: MaterialityPredictionRecord,
+) -> dict[str, object]:
+    """Serialize one prediction without nullable YDB parameters."""
+    payload = {
+        "reason": prediction.reason,
+        "raw_probability": prediction.raw_probability,
+        "calibrated_probability": prediction.calibrated_probability,
+        "selected_at_coverage_pct": {
+            name: list(values)
+            for name, values in prediction.selected_at_coverage_pct.items()
+        },
+        "eligible_for_ranking": prediction.eligible_for_ranking,
+        "missing_features": list(prediction.missing_features),
+        "feature_schema_version": prediction.feature_schema_version,
+    }
+    return {
+        "$prediction_id": prediction.id,
+        "$news_id": prediction.news_id,
+        "$ticker": prediction.ticker,
+        "$decision_at": ydb.TypedValue(
+            prediction.decision_at, ydb.PrimitiveType.Timestamp
+        ),
+        "$data_cutoff_at": ydb.TypedValue(
+            prediction.data_cutoff_at, ydb.PrimitiveType.Timestamp
+        ),
+        "$status": prediction.status,
+        "$model_id": prediction.model_id,
+        "$model_version": prediction.model_version,
+        "$artifact_payload_sha256": prediction.artifact_payload_sha256,
+        "$payload": ydb.TypedValue(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            ydb.PrimitiveType.Json,
+        ),
+        "$created_at": ydb.TypedValue(
+            prediction.created_at, ydb.PrimitiveType.Timestamp
+        ),
+        "$updated_at": ydb.TypedValue(
+            prediction.updated_at, ydb.PrimitiveType.Timestamp
+        ),
+    }
+
+
 def json_list(value: object) -> list[object]:
     if isinstance(value, bytes):
         value = value.decode("utf-8")
@@ -1619,6 +1803,82 @@ def news_from_row(row: object) -> NewsRecord:
         source_metadata=json_object(row.source_metadata),
         created_at=ensure_utc(row.created_at),
     )
+
+
+def materiality_prediction_from_row(row: object) -> MaterialityPredictionRecord:
+    """Load one typed prediction from its indexed fields and JSON details."""
+    payload = json_object(row.payload)
+    selected = payload.get("selected_at_coverage_pct")
+    if not isinstance(selected, dict):
+        raise ValueError("stored materiality coverage must be an object")
+    missing = payload.get("missing_features")
+    if not isinstance(missing, list):
+        raise ValueError("stored materiality missing features must be a list")
+    return MaterialityPredictionRecord(
+        id=row.prediction_id,
+        news_id=row.news_id,
+        ticker=row.ticker,
+        decision_at=ensure_utc(row.decision_at),
+        data_cutoff_at=ensure_utc(row.data_cutoff_at),
+        status=row.status,
+        reason=(str(payload["reason"]) if payload.get("reason") is not None else None),
+        raw_probability=_optional_stored_float(payload.get("raw_probability")),
+        calibrated_probability=_optional_stored_float(
+            payload.get("calibrated_probability")
+        ),
+        selected_at_coverage_pct={
+            str(name): tuple(int(value) for value in values)
+            for name, values in selected.items()
+            if isinstance(values, list)
+        },
+        eligible_for_ranking=bool(payload.get("eligible_for_ranking", False)),
+        missing_features=tuple(str(value) for value in missing),
+        model_id=row.model_id,
+        model_version=row.model_version,
+        artifact_payload_sha256=row.artifact_payload_sha256,
+        feature_schema_version=str(payload["feature_schema_version"]),
+        created_at=ensure_utc(row.created_at),
+        updated_at=ensure_utc(row.updated_at),
+    )
+
+
+def attach_materiality_predictions(
+    news: Iterable[NewsRecord],
+    predictions: Iterable[MaterialityPredictionRecord],
+) -> list[NewsRecord]:
+    """Attach predictions without mutating immutable stored news records."""
+    by_news: dict[str, list[MaterialityPredictionRecord]] = {}
+    for prediction in predictions:
+        by_news.setdefault(prediction.news_id, []).append(prediction)
+    return [
+        replace(
+            item,
+            materiality_predictions=tuple(
+                sorted(
+                    by_news.get(item.id, ()),
+                    key=lambda prediction: (
+                        prediction.model_version,
+                        prediction.ticker,
+                        prediction.updated_at,
+                        prediction.id,
+                    ),
+                    reverse=True,
+                )
+            ),
+        )
+        for item in news
+    ]
+
+
+def _optional_stored_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError("stored materiality probability must be numeric")
+    result = float(value)
+    if not 0 <= result <= 1:
+        raise ValueError("stored materiality probability must be within [0, 1]")
+    return result
 
 
 def signal_from_row(row: object) -> SignalRecord:
@@ -2172,6 +2432,23 @@ SCHEMA_STATEMENTS = (
     );
     """,
     """
+    CREATE TABLE IF NOT EXISTS `materiality_predictions` (
+        `prediction_id` Utf8 NOT NULL,
+        `news_id` Utf8 NOT NULL,
+        `ticker` Utf8 NOT NULL,
+        `decision_at` Timestamp NOT NULL,
+        `data_cutoff_at` Timestamp NOT NULL,
+        `status` Utf8 NOT NULL,
+        `model_id` Utf8 NOT NULL,
+        `model_version` Utf8 NOT NULL,
+        `artifact_payload_sha256` Utf8 NOT NULL,
+        `payload` Json NOT NULL,
+        `created_at` Timestamp NOT NULL,
+        `updated_at` Timestamp NOT NULL,
+        PRIMARY KEY (`prediction_id`)
+    );
+    """,
+    """
     CREATE TABLE IF NOT EXISTS `assessment_snapshots` (
         `snapshot_key` Utf8 NOT NULL,
         `payload` Json NOT NULL,
@@ -2192,6 +2469,7 @@ SCHEMA_TABLE_NAMES = (
     "evaluation_epochs",
     "evaluation_observations",
     "evaluation_observations_v2",
+    "materiality_predictions",
     "assessment_snapshots",
 )
 
@@ -2480,6 +2758,65 @@ FROM `news_items`
 WHERE news_id IN $news_ids;
 """
 
+MATERIALITY_PREDICTION_SELECT_COLUMNS = """
+    prediction_id,
+    news_id,
+    ticker,
+    decision_at,
+    data_cutoff_at,
+    status,
+    model_id,
+    model_version,
+    artifact_payload_sha256,
+    payload,
+    created_at,
+    updated_at
+"""
+
+SELECT_MATERIALITY_PREDICTIONS_QUERY = f"""
+DECLARE $news_ids AS List<Utf8>;
+
+SELECT {MATERIALITY_PREDICTION_SELECT_COLUMNS}
+FROM `materiality_predictions`
+WHERE news_id IN $news_ids
+ORDER BY updated_at DESC, prediction_id DESC
+LIMIT 10000;
+"""
+
+SELECT_MATERIALITY_PREDICTIONS_BY_MODEL_QUERY = f"""
+DECLARE $news_ids AS List<Utf8>;
+DECLARE $model_version AS Utf8;
+
+SELECT {MATERIALITY_PREDICTION_SELECT_COLUMNS}
+FROM `materiality_predictions`
+WHERE news_id IN $news_ids AND model_version = $model_version
+ORDER BY updated_at DESC, prediction_id DESC
+LIMIT 10000;
+"""
+
+UPSERT_MATERIALITY_PREDICTION_QUERY = """
+DECLARE $prediction_id AS Utf8;
+DECLARE $news_id AS Utf8;
+DECLARE $ticker AS Utf8;
+DECLARE $decision_at AS Timestamp;
+DECLARE $data_cutoff_at AS Timestamp;
+DECLARE $status AS Utf8;
+DECLARE $model_id AS Utf8;
+DECLARE $model_version AS Utf8;
+DECLARE $artifact_payload_sha256 AS Utf8;
+DECLARE $payload AS Json;
+DECLARE $created_at AS Timestamp;
+DECLARE $updated_at AS Timestamp;
+
+UPSERT INTO `materiality_predictions` (
+    prediction_id, news_id, ticker, decision_at, data_cutoff_at, status,
+    model_id, model_version, artifact_payload_sha256, payload, created_at, updated_at
+) VALUES (
+    $prediction_id, $news_id, $ticker, $decision_at, $data_cutoff_at, $status,
+    $model_id, $model_version, $artifact_payload_sha256, $payload, $created_at, $updated_at
+);
+"""
+
 SIGNAL_SELECT_COLUMNS = """
     signal_id,
     news_id,
@@ -2754,6 +3091,9 @@ VALIDATED_QUERIES = (
     SELECT_JOB_QUERY,
     SELECT_NEWS_QUERY,
     SELECT_NEWS_BY_IDS_QUERY,
+    SELECT_MATERIALITY_PREDICTIONS_QUERY,
+    SELECT_MATERIALITY_PREDICTIONS_BY_MODEL_QUERY,
+    UPSERT_MATERIALITY_PREDICTION_QUERY,
     SELECT_SIGNALS_QUERY,
     SELECT_SIGNAL_QUERY,
     SELECT_TELEGRAM_SOURCES_QUERY,
