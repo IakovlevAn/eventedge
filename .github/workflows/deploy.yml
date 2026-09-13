@@ -7,6 +7,15 @@ on:
         description: Exact tested main commit to deploy
         required: true
         type: string
+      news_materiality_mode:
+        description: Materiality inference rollout mode (disabled is the safe default)
+        required: true
+        default: disabled
+        type: choice
+        options:
+          - disabled
+          - shadow
+          - rank
 
 permissions:
   contents: read
@@ -33,6 +42,7 @@ jobs:
       YDB_ENDPOINT: ${{ vars.YDB_ENDPOINT }}
       YDB_DATABASE: ${{ vars.YDB_DATABASE }}
       EVENTEDGE_ADMIN_KEY: ${{ secrets.EVENTEDGE_ADMIN_KEY }}
+      NEWS_MATERIALITY_MODE: ${{ inputs.news_materiality_mode }}
     steps:
       - name: Check out the tested main revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
