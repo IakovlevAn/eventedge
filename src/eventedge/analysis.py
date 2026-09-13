@@ -349,6 +349,7 @@ RUSSIAN_CASE_SUFFIXES = ("а", "у", "ом", "е", "ой", "ы", "и")
 DIRECT_TITLE_RELEVANCE = 0.96
 CONTEXTUAL_TITLE_RELEVANCE = 0.84
 BODY_RELEVANCE = 0.78
+MAX_EXTRACTED_INSTRUMENTS = 20
 ATTRIBUTION_VERB_PATTERN = (
     r"(?:оценил|назвал|спрогнозировал|допустил|объяснил|рассказал)\w*"
 )
@@ -607,7 +608,13 @@ class RuleBasedNewsExtractor:
                         matched_alias=body_alias,
                     )
                 )
-        return matches
+        if len(matches) <= MAX_EXTRACTED_INSTRUMENTS:
+            return matches
+        return sorted(
+            matches,
+            key=lambda match: match.relevance,
+            reverse=True,
+        )[:MAX_EXTRACTED_INSTRUMENTS]
 
     def _matching_alias(
         self,
