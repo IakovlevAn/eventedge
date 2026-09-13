@@ -682,6 +682,64 @@ def test_batch_manifest_verifies_archive_hash_count_identity_and_window(
     assert report["records"] == 1
 
 
+def test_batch_manifest_accepts_empty_channel_in_nonempty_batch(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "artifacts"
+    archive = root / "raw/archive.jsonl"
+    empty_archive = root / "raw/empty.jsonl"
+    archive.parent.mkdir(parents=True)
+    archive.write_text(_manifest_record().model_dump_json() + "\n", encoding="utf-8")
+    empty_archive.write_text("", encoding="utf-8")
+    manifest = _batch_manifest(
+        data_path="raw/archive.jsonl",
+        data_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+        records_written=1,
+    )
+    empty_channel = dict(manifest["channels"][0])
+    empty_channel.update(
+        {
+            "source_id": "telegram_empty",
+            "channel": "empty_channel",
+            "data_path": "raw/empty.jsonl",
+            "data_sha256": hashlib.sha256(empty_archive.read_bytes()).hexdigest(),
+            "records_written": 0,
+        }
+    )
+    manifest["channels"].append(empty_channel)
+    manifest_path = root / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    paths, report = load_verified_telegram_archive_manifests(
+        [manifest_path],
+        artifact_root=root,
+    )
+
+    assert paths == [archive.resolve(), empty_archive.resolve()]
+    assert report["archives"] == 2
+    assert report["records"] == 1
+
+
+def test_batch_manifest_rejects_batch_without_archive_rows(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    archive = root / "raw/empty.jsonl"
+    archive.parent.mkdir(parents=True)
+    archive.write_text("", encoding="utf-8")
+    manifest = _batch_manifest(
+        data_path="raw/empty.jsonl",
+        data_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+        records_written=0,
+    )
+    manifest_path = root / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="contain no archive rows"):
+        load_verified_telegram_archive_manifests(
+            [manifest_path],
+            artifact_root=root,
+        )
+
+
 @pytest.mark.parametrize(
     ("data_path", "digest", "rows", "error"),
     [

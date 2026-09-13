@@ -200,6 +200,8 @@ def load_verified_telegram_archive_manifests(
                 "records": manifest_rows,
             }
         )
+    if total_rows == 0:
+        raise ValueError("Telegram manifests contain no archive rows")
     return archives, {
         "mode": "verified_batch_manifests",
         "verified": True,
@@ -226,7 +228,7 @@ def _verified_manifest_channel(
         or not re.fullmatch(r"[0-9a-f]{64}", str(expected_sha256))
         or not isinstance(expected_rows, int)
         or isinstance(expected_rows, bool)
-        or not 1 <= expected_rows <= MAX_ARCHIVE_ROWS
+        or not 0 <= expected_rows <= MAX_ARCHIVE_ROWS
     ):
         raise ValueError("Telegram manifest channel is incomplete or incompatible")
     permission = channel.get("permission")
@@ -256,7 +258,10 @@ def _verified_manifest_channel(
     if file_sha256(archive) != expected_sha256:
         raise ValueError("Telegram archive fingerprint differs from its manifest")
     actual_rows = 0
-    for record in iter_telegram_archive_records([archive], max_rows=expected_rows):
+    for record in iter_telegram_archive_records(
+        [archive],
+        max_rows=max(1, expected_rows),
+    ):
         actual_rows += 1
         if (
             record.source_id != source_id
