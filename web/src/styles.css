@@ -3123,6 +3123,13 @@ kbd {
   background: rgba(141, 132, 159, 0.08);
 }
 
+.feed-copy .news-materiality-chip,
+.reader-meta > .reader-materiality {
+  color: #78c7ae;
+  border-color: rgba(95, 201, 149, 0.24);
+  background: rgba(95, 201, 149, 0.06);
+}
+
 .feed-copy time {
   margin-left: auto;
   color: #555c67;
