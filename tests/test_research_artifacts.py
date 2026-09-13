@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import gzip
 import json
 import os
 import threading
@@ -69,6 +70,24 @@ def test_jsonl_round_trip_stops_at_eof(tmp_path):
     research_artifacts.write_jsonl(path, rows)
 
     assert list(research_artifacts.iter_jsonl(path)) == rows
+
+
+def test_jsonl_reader_supports_bounded_gzip(tmp_path: Path) -> None:
+    path = tmp_path / "rows.jsonl.gz"
+    row = {"value": "x" * 2_000}
+    rows = (json.dumps(row) + "\n").encode()
+    with gzip.open(path, "wb") as output:
+        output.write(rows)
+
+    assert path.stat().st_size < 1_000
+    assert list(research_artifacts.iter_jsonl(path)) == [row]
+    with pytest.raises(ValueError, match="line or row bound"):
+        list(
+            research_artifacts.iter_jsonl(
+                path,
+                maximum_file_bytes=1_000,
+            )
+        )
 
 
 def test_publish_immutable_file_preserves_competing_destination(tmp_path) -> None:

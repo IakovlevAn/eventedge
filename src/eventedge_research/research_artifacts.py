@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
@@ -120,12 +121,19 @@ def iter_jsonl(
     path = Path(path)
     if not path.is_file() or path.stat().st_size > maximum_file_bytes:
         raise ValueError(f"JSONL input is missing or too large: {path}")
-    with path.open("rb") as source:
+    opener = gzip.open if path.suffix == ".gz" else open
+    decoded_bytes = 0
+    with opener(path, "rb") as source:
         for index in range(maximum_rows + 1):
             line = source.readline(maximum_line_bytes + 1)
             if line == b"":
                 return
-            if len(line) > maximum_line_bytes or index >= maximum_rows:
+            decoded_bytes += len(line)
+            if (
+                decoded_bytes > maximum_file_bytes
+                or len(line) > maximum_line_bytes
+                or index >= maximum_rows
+            ):
                 raise ValueError(f"JSONL input exceeds line or row bound: {path}")
             if not line.strip():
                 continue
