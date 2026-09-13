@@ -1136,6 +1136,7 @@ class YdbNewsRepository:
         credentials: ydb.Credentials | None = None,
         analyzer: NewsAnalyzer | None = None,
         pool_size: int = 4,
+        include_materiality_predictions: bool = False,
     ) -> None:
         if not 1 <= pool_size <= 32:
             raise ValueError("YDB pool size must be between 1 and 32")
@@ -1144,6 +1145,7 @@ class YdbNewsRepository:
         self._credentials = credentials or ydb.iam.MetadataUrlCredentials()
         self._analyzer = analyzer or RuleBasedNewsAnalyzer()
         self._pool_size = pool_size
+        self._include_materiality_predictions = include_materiality_predictions
         self._driver: ydb.aio.Driver | None = None
         self._pool: ydb.aio.QuerySessionPool | None = None
 
@@ -1335,6 +1337,8 @@ class YdbNewsRepository:
             news_from_row(row) for row in rows if source_id is None or row.source_id == source_id
         )
         selected = list(records)[:limit]
+        if not self._include_materiality_predictions:
+            return selected
         predictions = await self.list_materiality_predictions(
             news_ids=frozenset(item.id for item in selected)
         )
@@ -1357,6 +1361,8 @@ class YdbNewsRepository:
         )
         rows = result_sets[0].rows if result_sets else []
         selected = [news_from_row(row) for row in rows]
+        if not self._include_materiality_predictions:
+            return selected
         predictions = await self.list_materiality_predictions(news_ids=news_ids)
         return attach_materiality_predictions(selected, predictions)
 
@@ -2445,7 +2451,7 @@ SCHEMA_STATEMENTS = (
         `payload` Json NOT NULL,
         `created_at` Timestamp NOT NULL,
         `updated_at` Timestamp NOT NULL,
-        PRIMARY KEY (`prediction_id`)
+        PRIMARY KEY (`news_id`, `model_version`, `ticker`, `decision_at`)
     );
     """,
     """

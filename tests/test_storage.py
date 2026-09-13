@@ -139,6 +139,66 @@ def test_materiality_prediction_ydb_serialization_round_trip() -> None:
     assert "UPSERT INTO `materiality_predictions`" in UPSERT_MATERIALITY_PREDICTION_QUERY
     assert "news_id IN $news_ids" in SELECT_MATERIALITY_PREDICTIONS_QUERY
     assert "model_version = $model_version" in SELECT_MATERIALITY_PREDICTIONS_BY_MODEL_QUERY
+    materiality_schema = next(
+        statement
+        for statement in SCHEMA_STATEMENTS
+        if "CREATE TABLE IF NOT EXISTS `materiality_predictions`" in statement
+    )
+    assert (
+        "PRIMARY KEY (`news_id`, `model_version`, `ticker`, `decision_at`)"
+        in materiality_schema
+    )
+
+
+def test_ydb_news_reads_materiality_ledger_only_when_enabled() -> None:
+    timestamp = datetime(2026, 9, 10, 9, tzinfo=UTC)
+    row = SimpleNamespace(
+        news_id="news_example",
+        source_id="telegram_markettwits",
+        external_id="example",
+        published_at=timestamp,
+        received_at=timestamp,
+        title="Сбербанк сообщил о событии",
+        url="https://example.com/news",
+        content="Сбербанк сообщил о существенном событии.",
+        language="ru",
+        source_metadata=json.dumps(
+            {"analysis_candidate": True, "tickers": ["SBER"]}
+        ),
+        created_at=timestamp,
+    )
+
+    class FakePool:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        async def execute_with_retries(
+            self,
+            query: str,
+            parameters: dict[str, object] | None = None,
+        ) -> list[SimpleNamespace]:
+            self.queries.append(query)
+            if "FROM `news_items`" in query:
+                return [SimpleNamespace(rows=[row])]
+            return [SimpleNamespace(rows=[])]
+
+    async def query_count(include_materiality_predictions: bool) -> int:
+        pool = FakePool()
+        repository = YdbNewsRepository(
+            endpoint="grpcs://localhost:2135",
+            database="/local",
+            credentials=ydb.AnonymousCredentials(),
+            include_materiality_predictions=include_materiality_predictions,
+        )
+        repository._pool = pool  # type: ignore[assignment]
+
+        records = await repository.list_news(source_id=None, limit=10)
+
+        assert [item.id for item in records] == ["news_example"]
+        return len(pool.queries)
+
+    assert asyncio.run(query_count(False)) == 1
+    assert asyncio.run(query_count(True)) == 2
 
 
 def test_evaluation_signal_query_is_not_bounded_by_public_api_limit() -> None:

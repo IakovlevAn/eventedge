@@ -299,6 +299,10 @@ def repository_from_environment(environment: Mapping[str, str]) -> NewsRepositor
             database=database,
             analyzer=analyzer,
             pool_size=pool_size,
+            include_materiality_predictions=(
+                environment.get("NEWS_MATERIALITY_MODE", "disabled").casefold()
+                != "disabled"
+            ),
         )
     if endpoint or database:
         raise RuntimeError("YDB_ENDPOINT and YDB_DATABASE must be configured together")
