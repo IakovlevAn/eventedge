@@ -1,0 +1,215 @@
+{
+  "schema_version": "eventedge-ml-artifact-manifest-2.0",
+  "status": "historical_research_proxy",
+  "updated_at": "2026-09-13",
+  "safety": {
+    "production_changed": false,
+    "remote_ydb_required_for_reproduction": false,
+    "deployment_status": "offline_research_candidate",
+    "requires_untracked_local_checkpoint_bundle": true
+  },
+  "dataset": {
+    "id": "canonical_v4_point_in_time_1238",
+    "path_from_project_root": ".local-artifacts/telegram-expanded-research-v4-point-in-time-20260913/dataset.jsonl",
+    "sha256": "ee47437edd61f2f444f32e1d85e7562fb0a07c47750651217ffc898c55ca632c",
+    "rows": 1238,
+    "events": 1226,
+    "information_groups": 1108,
+    "label_availability_corrected_rows": 23,
+    "benchmark_id": "IMOEX2",
+    "benchmark_coverage_rows": 1238,
+    "date_range": [
+      "2024-09-16",
+      "2026-09-04"
+    ],
+    "sources": {
+      "Markettwits": 891,
+      "BCS": 324,
+      "Russianmacro": 12,
+      "AK47": 11
+    },
+    "tracked_summary": "EventEdge/ML_PIPELINE.md"
+  },
+  "fresh_telegram_v2_candidate_checkpoint": {
+    "path_from_project_root": ".local-artifacts/telegram-admission-v2-rules-0.3.0-20260913/candidates.jsonl",
+    "report_path_from_project_root": ".local-artifacts/telegram-admission-v2-rules-0.3.0-20260913/report.json",
+    "schema_version": "signal-event-candidate-2.0",
+    "admission_version": "telegram-archive-admission-1.0",
+    "semantic_extractor": "rules-0.3.0",
+    "rows": 11215,
+    "information_groups": 7014,
+    "candidate_sha256": "0858a45179dc58169a819b4ac799e978ca6c0bb09ada1ceb0f40cc8b43532834",
+    "report_sha256": "d9919bb6aef16ccef874d67f12d0c1b46fd6e0d9402a14869afdc59beb150a9e",
+    "raw_manifest_records_verified": 100067,
+    "edited_current_view_rows_excluded": 26425,
+    "label_status": "unlabeled_candidates_only",
+    "relationship_to_canonical_dataset": "fresh derived checkpoint; it does not replace or re-version the locked canonical dataset"
+  },
+  "materiality_model": {
+    "id": "update_5m_symmetric_materiality_logistic",
+    "decision_point": "publication_plus_5_minutes",
+    "target": "abs(stock_return(entry_at,entry_at+4h)-benchmark_return(entry_at,entry_at+4h)) >= 0.5 percentage points",
+    "estimator": "regularized_logistic_regression",
+    "uses_text_or_luna_semantics": false,
+    "evaluation_rows": 480,
+    "raw_roc_auc": 0.7050090504037871,
+    "raw_pr_auc": 0.6817059839675079,
+    "calibrated_roc_auc": 0.6904935950988583,
+    "calibrated_brier": 0.22284121081189684,
+    "daily_top_1_precision_pct": 60.30534351145038,
+    "validation_selected_coverage_pct": 22.708333333333332,
+    "validation_selected_precision_pct": 68.80733944954129,
+    "signed_reaction_context_baseline_calibrated_roc_auc": 0.6471386800334169,
+    "paired_calibrated_auc_delta_from_absolute_reaction_transforms": 0.043354915065441424,
+    "paired_delta_day_cluster_bootstrap_95": [
+      0.015478943808724882,
+      0.07109988012109185
+    ],
+    "decision": "research_candidate_for_shadow_integration"
+  },
+  "direction_model": {
+    "id": "update_5m_corrected_reaction_interactions",
+    "feature_spec": "update_5m_corrected_reaction_interactions",
+    "model_version": "update-5m-corrected-reaction-interactions-logistic-1.0",
+    "contract_scope": "canonical accepted feature checkpoint only",
+    "decision_point": "publication_plus_5_minutes",
+    "target": "remaining_abnormal_return_to_publication_plus_240_minutes",
+    "estimator": "regularized_logistic_regression",
+    "evaluation_rows": 480,
+    "calibrated_roc_auc": 0.49824836601307193,
+    "calibrated_hit_rate_pct": 49.583333333333336,
+    "market_control_calibrated_roc_auc": 0.5073115468409587,
+    "market_control_hit_rate_pct": 50.625,
+    "always_down_hit_rate_pct": 53.125,
+    "formula_intersection": {
+      "rows": 157,
+      "model_roc_auc": 0.4969015003261578,
+      "model_hit_rate_pct": 51.59235668789809,
+      "formula_confidence_roc_auc": 0.5236464448793215,
+      "formula_hit_rate_pct": 50.955414012738856,
+      "paired_hit_rate_difference_95_pct": [
+        -12.101910828025474,
+        12.41594827586204
+      ],
+      "scope": "historical_stored_config_6_rows_only"
+    },
+    "decision": "directional_no_go"
+  },
+  "fresh_generic_direction_model": {
+    "id": "update_5m_common_direction_logistic",
+    "feature_spec": "update_5m_common_direction",
+    "model_version": "update-5m-common-direction-logistic-1.0",
+    "contract_scope": "fresh v1/v2 dataset prepared by scripts/prepare_news_model_dataset.py",
+    "locked_quality_metrics_available": false,
+    "relationship_to_canonical_model": "separately versioned model; it does not reproduce the canonical corrected semantic feature contract",
+    "decision": "research_only_unreported"
+  },
+  "tracked_evidence": {
+    "benchmark_contract": {
+      "path": "EventEdge/NEWS_MODEL_BENCHMARK_CONTRACT.json",
+      "sha256": "33f5f85973cd39041d3ef3b4dd7e4547b19b127c3bb5afe33f8e76c310fbe40d"
+    },
+    "dataset_lineage_contract": {
+      "path": "EventEdge/DATASET_LINEAGE_CONTRACT.json",
+      "sha256": "0d641605ca78b8caa1cad8daf134bf7421ea7a7edfb572c330e1a5b1c1bf6348"
+    },
+    "pipeline_summary": "EventEdge/ML_PIPELINE.md"
+  },
+  "local_dataset_rebuild": {
+    "directory_from_project_root": ".local-artifacts/canonical-rebuild-point-in-time-20260913",
+    "report_sha256": "01308bf5f196a38e061f3f2a9a13499fa254ce4bf27de3880b14d8bcc0aceed3",
+    "final_dataset_relative_path": "canonical_v4_point_in_time_1238/dataset.jsonl",
+    "final_dataset_sha256": "ee47437edd61f2f444f32e1d85e7562fb0a07c47750651217ffc898c55ca632c"
+  },
+  "local_oof_benchmark_evidence": {
+    "directory_from_project_root": ".local-artifacts/news-model-benchmark-v4-point-in-time-20260913",
+    "publication_inputs_sha256": "fe74b5dbea2183e056de77f915b19c9891910c2e8640eaace8dc41a36bad79cf",
+    "update_5m_inputs_sha256": "a1e5e51c3ad53fe0e2097119526cc800b8c7c10964376d1fc4c36aefaf54ee04",
+    "fit_bundle_sha256": "94b8cc03a2b975f9078ec2d758ce6649e58d7a7c8688f18486067498af1a7f93",
+    "outcomes_sha256": "68b61a45933fbc7a7d05491d5a200eb624ad402c3f4cb61e3ff8378d9574f415",
+    "scoring_seal_sha256": "510bbb0acccbf1342cd53b7a4c9b2f993573377862fb88bd308d72e32e231d9b",
+    "freeze_sha256": "d16b22d0a5113f0047814d1053bd17d6b65d265a0ae27a98f01d0fb260490f29",
+    "frozen_probabilities_sha256": "263d99881c29a871dedf79eb170af22ae6fc3ac3f98052a6aefd9080daa26039",
+    "report_sha256": "0d06d8c49c646fe697c223120f36af6475756bc5e09830f163aa4bd59359d590",
+    "deployable_estimator_included": false
+  },
+  "portable_materiality_artifact": {
+    "path_from_project_root": ".local-artifacts/news-materiality-model-20260913-v2/model.json",
+    "artifact_schema_version": "news-materiality-model-artifact-1.0",
+    "model_id": "update_5m_symmetric_materiality_logistic",
+    "fit_entrypoint": "scripts/fit_news_materiality_model.py",
+    "inference_entrypoint": "scripts/predict_news_materiality.py",
+    "file_sha256": "8a2406e6942ed1e51259346d7b035c1c45afc77cd07327dbd9ac76681f115fbf",
+    "artifact_payload_sha256": "18bb8bd1d91078710ed83379aa04c7110dd547bf87ffd914c5fb44c616ab9b6c",
+    "model_version": "update-5m-symmetric-materiality-logistic-1.0",
+    "fit_bundle_sha256": "94b8cc03a2b975f9078ec2d758ce6649e58d7a7c8688f18486067498af1a7f93",
+    "fold": "2026_09",
+    "training_rows": 1101,
+    "validation_rows": 105,
+    "vectorized_features": 107,
+    "fit_policy": "latest_walk_forward_fold_no_post_evaluation_refit",
+    "not_refit_on_evaluation": true,
+    "prediction_smoke_test": {
+      "path_from_project_root": ".local-artifacts/news-materiality-model-20260913-v2/predictions.jsonl",
+      "input_rows": 1238,
+      "input_sha256": "a1e5e51c3ad53fe0e2097119526cc800b8c7c10964376d1fc4c36aefaf54ee04",
+      "output_sha256": "62024833e5d066c7c9370fcda94918f974a30e8793ea5122fafb7da7a584e463"
+    },
+    "deployment_status": "offline_research_candidate"
+  },
+  "portable_direction_artifact": {
+    "tracked_binary_in_git": false,
+    "path_from_project_root": ".local-artifacts/news-direction-model-20260913-v1/model.json",
+    "artifact_schema_version": "news-direction-model-artifact-1.0",
+    "file_sha256": "d5373bba6e70db7bc24c51d68fd309f924388c22c2481ab2dfd710cde3d22130",
+    "artifact_payload_sha256": "2a6cb5c93b06b24e78b84041b1f610ab34913d2d45e317e5008e643504bbb30e",
+    "fit_bundle_sha256": "94b8cc03a2b975f9078ec2d758ce6649e58d7a7c8688f18486067498af1a7f93",
+    "fold": "2026_09",
+    "training_rows": 1100,
+    "validation_rows": 105,
+    "vectorized_features": 147,
+    "fit_entrypoint": "scripts/fit_news_direction_model.py",
+    "inference_entrypoint": "scripts/predict_news_direction.py",
+    "fit_policy": "latest_walk_forward_fold_no_post_evaluation_refit",
+    "prediction_smoke_test": {
+      "path_from_project_root": ".local-artifacts/news-direction-model-20260913-v1/predictions.jsonl",
+      "input_rows": 1238,
+      "input_sha256": "a1e5e51c3ad53fe0e2097119526cc800b8c7c10964376d1fc4c36aefaf54ee04",
+      "output_sha256": "4672f47a29e1f4b645792bd69c652cc63542796f41ec98e322ec7282078d7e36"
+    },
+    "canonical_contract": {
+      "model_id": "update_5m_corrected_reaction_interactions",
+      "model_version": "update-5m-corrected-reaction-interactions-logistic-1.0",
+      "feature_spec": "update_5m_corrected_reaction_interactions",
+      "metrics_source": "locked canonical 1238-row benchmark",
+      "deployment_status": "directional_no_go"
+    },
+    "fresh_generic_contract": {
+      "model_id": "update_5m_common_direction_logistic",
+      "model_version": "update-5m-common-direction-logistic-1.0",
+      "feature_spec": "update_5m_common_direction",
+      "metrics_source": null,
+      "deployment_status": "research_only_unreported"
+    }
+  },
+  "current_reproduction_entrypoints": {
+    "telegram_archive_download": "scripts/download_telegram_archive.py",
+    "telegram_v2_candidate_build": "scripts/build_telegram_archive_candidates.py",
+    "ydb_read_only_export": "scripts/export_ydb_signal_data.py",
+    "ydb_v1_candidate_build": "scripts/build_ydb_signal_candidates.py",
+    "issuer_open_download": "scripts/download_moex_market_opens.py",
+    "benchmark_open_download": "scripts/download_moex_index_opens.py",
+    "fresh_dataset_labeling": "scripts/build_signal_dataset.py",
+    "fresh_feature_preparation": "scripts/prepare_news_model_dataset.py",
+    "dataset_lineage_verification": "scripts/verify_dataset_lineage.py",
+    "canonical_dataset_rebuild_module": "scripts.rebuild_canonical_signal_dataset",
+    "benchmark_contract": "EventEdge/NEWS_MODEL_BENCHMARK_CONTRACT.json",
+    "feature_preparation": "scripts/prepare_news_model_data.py",
+    "benchmark_fit_and_score": "scripts/evaluate_news_models.py",
+    "materiality_artifact_fit": "scripts/fit_news_materiality_model.py",
+    "materiality_inference": "scripts/predict_news_materiality.py",
+    "direction_artifact_fit": "scripts/fit_news_direction_model.py",
+    "direction_inference": "scripts/predict_news_direction.py",
+    "formula_comparison": "integrated_into_benchmark_score"
+  }
+}

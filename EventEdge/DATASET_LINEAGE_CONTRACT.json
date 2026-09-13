@@ -1,0 +1,285 @@
+{
+  "schema_version": "eventedge-dataset-lineage-contract-2.0",
+  "status": "historical_research_proxy",
+  "locked_at": "2026-09-13T00:00:00+03:00",
+  "purpose": "Verify four sealed direct datasets and rebuild the PIT-safe canonical v4 dataset.",
+  "exact_replay_starts_at": "repaired_592",
+  "upstream_limit": "Raw Telegram and LLM stages are provenance, not byte-exact replay. Exact rebuild starts from repaired_592 and consumes three separately sealed direct dataset additions.",
+  "seal_scope": "Each SHA locks the named file; benchmark complete.json files bind their IMOEX2.jsonl and are revalidated by the rebenchmark loader.",
+  "guards": {
+    "production_access_allowed": false,
+    "remote_ydb_access_allowed": false,
+    "network_access_allowed": false
+  },
+  "source_seals": [
+    {
+      "id": "telegram_archive_2024_2025",
+      "path": ".local-data/telegram-archive-2024-09-06_2025-09-06/manifest.json",
+      "sha256": "c91c776f3de55063b4579ce0092e2a21537c5445146ce3853fd06515f65268d0"
+    },
+    {
+      "id": "telegram_archive_2025_2026",
+      "path": ".local-data/telegram-archive-2025-09-06_2026-09-07/manifest.json",
+      "sha256": "caeb5200757372799e2b10f59dddf9d241c23d6deb7961898b9066d32815fb30"
+    },
+    {
+      "id": "telegram_refresh_2026",
+      "path": ".local-data/telegram-structured-refresh-2026-20260908/complete.json",
+      "sha256": "80b5a2c494b308f54b322d63a6051235ffbfcae69d34ac0039969a0e5aad42fa"
+    },
+    {
+      "id": "structured_candidates_2026",
+      "path": ".local-data/telegram-structured-factual-v1-candidates-20260908/complete.json",
+      "sha256": "4958593d5af72f863698e60a43b77999c1b1fcbabe0b90f795a0fcaf433546d8"
+    },
+    {
+      "id": "structured_labels_2026",
+      "path": ".local-data/telegram-structured-factual-v1-immediate-1m-20260908/complete.json",
+      "sha256": "fa1e40dc1eb2b7d80c79ac96a6f0ee01ffac5cb43dcdaa9037e771fcac7d91e7"
+    },
+    {
+      "id": "issuer_opens_2026",
+      "path": ".local-data/telegram-minute-opens-2026/complete.json",
+      "sha256": "0abe1b905f6e773f4efe3b5203e12a0031e147c98ec12154a80ae822c561a410"
+    }
+  ],
+  "checkpoint_seals": [
+    {
+      "id": "review_ledger_09",
+      "path": ".local-artifacts/telegram-full-review-ledger09-20260908/complete.json",
+      "sha256": "da10e6179a4d363224babe3748e98e28b01cc6241213c0a8063318f07693abc7"
+    },
+    {
+      "id": "relation_audit_04",
+      "path": ".local-artifacts/telegram-relation-audit04-20260908/complete.json",
+      "sha256": "dc2206bddd63b37f6bdc361a86afda4b14daf9c02124186a9b24e13355f93a6b"
+    },
+    {
+      "id": "semantic_relations_reviewed_01",
+      "path": ".local-artifacts/telegram-semantic-relations-reviewed01-20260908/complete.json",
+      "sha256": "ff4a9592c1004bba1004722e755316e6c30f38e5fef4d94136e976d45ddc59e5"
+    },
+    {
+      "id": "history_refresh",
+      "path": ".local-data/telegram-history-expansion-refresh-20260910-v1/complete.json",
+      "sha256": "60fdf48198fe43e0d396fc2f522ae11afb15c14e2f65d118b42e8ad9876ce8d2"
+    },
+    {
+      "id": "accepted_history_relations",
+      "path": ".local-artifacts/telegram-accepted-history-relation-final-20260910-v1/complete.json",
+      "sha256": "b8bc7e2ab99ddfd13f6ed54e9eec468d0f18fdb200c0df443f180d779b221e1d"
+    },
+    {
+      "id": "recovery_history_relations",
+      "path": ".local-artifacts/telegram-history-recovery-relation-final-20260910-v2/complete.json",
+      "sha256": "dcb2ec0b4ffddd25a9bbf7831e9dd4fe3f5c30d4ecb6dfec5d5c67d4f233f58d"
+    },
+    {
+      "id": "accepted_history_candidates",
+      "path": ".local-artifacts/telegram-accepted-history-candidates-20260910-v1/complete.json",
+      "sha256": "dbbbaf1b0a3359b2b02b9b838c9087fdd8e7378f08be02b98309ccdca48ff17a"
+    },
+    {
+      "id": "recovery_history_candidates",
+      "path": ".local-artifacts/telegram-history-recovery-candidates-20260910-v2/complete.json",
+      "sha256": "834424d078a534a82a398c0904e154fa6382f391e428ac9f0af739d7b7a7b33c"
+    },
+    {
+      "id": "accepted_history_security",
+      "path": ".local-artifacts/telegram-accepted-history-security-audit-20260910-v1/complete.json",
+      "sha256": "c0fe4f46ce6aea3f1c560a2c7ff5799620ad33685a2649ad30b7edd1f09285b4"
+    },
+    {
+      "id": "recovery_history_security",
+      "path": ".local-artifacts/telegram-history-recovery-security-audit-20260910-v2/complete.json",
+      "sha256": "2139745a7787a86187d58e0c01db42d2992b97463553491cefd11efa18a13a95"
+    },
+    {
+      "id": "history_security_references",
+      "path": ".local-data/telegram-history-expansion-security-references-20260910-v1/complete.json",
+      "sha256": "430e6fe23ab3065b89e35379b488c626e93bb48bf709710c2ef18488b5ee6085"
+    },
+    {
+      "id": "successor_security_references",
+      "path": ".local-data/telegram-history-expansion-successor-security-references-20260910-v1/complete.json",
+      "sha256": "bdc7f934de3ab059be17847a402c996bbb0f78820e097e0a06d6856b4b8cc90d"
+    },
+    {
+      "id": "history_issuer_opens",
+      "path": ".local-data/telegram-history-expansion-minute-opens-20260910-v1/complete.json",
+      "sha256": "95abc20f38d654ec2f75e19e28c557be045e8ced7ca109747aa51cdd0158a533"
+    },
+    {
+      "id": "history_imoex2_opens",
+      "path": ".local-data/telegram-history-expansion-imoex2-1m-checkpoints-20260910-v1/complete.json",
+      "sha256": "bccfc759ff7a2c37f4f4db38a65c5a7ec33cd68b025c49cf9c1c2e9b22c08e44"
+    },
+    {
+      "id": "imoex2_opens_2026",
+      "path": ".local-data/imoex2-minute-opens-2026-cohort-20260910-v1/complete.json",
+      "sha256": "0b161ad49edc59dfacb440155af672c3f0afa4dc46b90b611bd6df2a99ea9db3"
+    },
+    {
+      "id": "gap_candidates",
+      "path": ".local-data/telegram-gap-2025-candidates-20260910-v1/complete.json",
+      "sha256": "8a851e517b5065407e041ce684159b6f4125ed9b50a1ddca0ebcec13f75779cb"
+    },
+    {
+      "id": "gap_relations",
+      "path": ".local-artifacts/telegram-gap-2025-relation-final-20260910-v1/complete.json",
+      "sha256": "19dbdd772e5d3bf84a9433533b01f09d5444aa44e3827fe936797d0d1f813d00"
+    },
+    {
+      "id": "gap_reviewed_candidates",
+      "path": ".local-artifacts/telegram-gap-2025-reviewed-candidates-20260910-v1/complete.json",
+      "sha256": "75bfb3f71de74f4b99b015ee911da185aea33f92638229af9c1b527c07535391"
+    },
+    {
+      "id": "gap_security",
+      "path": ".local-artifacts/telegram-gap-2025-reviewed-security-audit-20260910-v1/complete.json",
+      "sha256": "7c065a8e6dbb00af6d974a9faf890a7e5179c140ae22dda8d62ea240cbc0efd5"
+    },
+    {
+      "id": "gap_issuer_opens",
+      "path": ".local-data/telegram-gap-2025-reviewed-minute-opens-20260910-v1/complete.json",
+      "sha256": "ece4726907b01b77a94e937980026c9b007815ae7af9ea120a4af1588c9d7808"
+    },
+    {
+      "id": "gap_imoex2_opens",
+      "path": ".local-data/telegram-gap-2025-imoex2-minute-opens-20260910-v1/complete.json",
+      "sha256": "286f596c9466b6ea715ab0bd8ad29cbe78403ef586c9e740763792544ded774a"
+    }
+  ],
+  "datasets": [
+    {
+      "id": "repaired_592",
+      "path": ".local-artifacts/telegram-repaired-dataset-gate12-20260908/dataset.jsonl",
+      "sha256": "ce869ac139832d0596e61d8ee315cdc16ca69fe9b9d998280ac08d29f1e81e3c",
+      "rows": 592,
+      "inputs": ["review_ledger_09", "relation_audit_04", "semantic_relations_reviewed_01"]
+    },
+    {
+      "id": "accepted_history_385",
+      "path": ".local-artifacts/telegram-accepted-history-routed-dataset-imoex2-20260910-v1/dataset.jsonl",
+      "sha256": "351df1afa04379f4b768fab86a2b1cb9d97115953d69746be30d71e63fecd453",
+      "rows": 385,
+      "inputs": ["accepted_history_relations", "accepted_history_candidates", "accepted_history_security", "history_issuer_opens", "history_imoex2_opens"]
+    },
+    {
+      "id": "recovery_history_148",
+      "path": ".local-artifacts/telegram-history-recovery-routed-dataset-imoex2-20260910-v3/dataset.jsonl",
+      "sha256": "4516b0458e1a7b685d5e8bf9fb1a5629dc45006e57da4381fe69fe10b1a1ef1c",
+      "rows": 148,
+      "inputs": ["recovery_history_relations", "recovery_history_candidates", "recovery_history_security", "history_issuer_opens", "history_imoex2_opens"]
+    },
+    {
+      "id": "expanded_v1_1125",
+      "path": ".local-artifacts/telegram-expanded-research-v1-20260910/dataset.jsonl",
+      "sha256": "f6acfd305155ed7c8aa731a739334d36ce2743252b4fe811a6a95a53f9bd258a",
+      "rows": 1125,
+      "inputs": ["repaired_592", "accepted_history_385", "recovery_history_148"]
+    },
+    {
+      "id": "expanded_v2_imoex2_1125",
+      "path": ".local-artifacts/telegram-expanded-research-v2-imoex2-2026-20260910/dataset.jsonl",
+      "sha256": "8584830b9c3dc9e67c9a7c8e13684763f852ef16cde874a250bdc74edb69dc7b",
+      "rows": 1125,
+      "inputs": ["expanded_v1_1125", "imoex2_opens_2026"]
+    },
+    {
+      "id": "gap_113",
+      "path": ".local-artifacts/telegram-gap-2025-reviewed-dataset-20260910-v1/dataset.jsonl",
+      "sha256": "4010f69c0811b157fd4c00d5e8eacd1df604c7eddaf2a5b9e94be7d1bb98d16d",
+      "rows": 113,
+      "inputs": ["gap_candidates", "gap_relations", "gap_reviewed_candidates", "gap_security", "gap_issuer_opens", "gap_imoex2_opens"]
+    },
+    {
+      "id": "canonical_v3_1238",
+      "path": ".local-artifacts/telegram-expanded-research-v3-gap-augmented-20260910/dataset.jsonl",
+      "sha256": "ac639e944a100c83b91275bbf627d3e9af9c654e5a0ce726dc484c0e2c0b81b6",
+      "rows": 1238,
+      "inputs": ["expanded_v2_imoex2_1125", "gap_113"]
+    },
+    {
+      "id": "expanded_v2_point_in_time_1125",
+      "path": ".local-artifacts/telegram-expanded-research-v4-imoex2-2026-point-in-time-20260913/dataset.jsonl",
+      "sha256": "a27c8eba80a59f3cffe39952e8a29c071414c4f515d1a234e06509f12ff1e36a",
+      "rows": 1125,
+      "inputs": ["expanded_v1_1125", "imoex2_opens_2026"]
+    },
+    {
+      "id": "canonical_v3_point_in_time_2026_1238",
+      "path": ".local-artifacts/telegram-expanded-research-v4-gap-merged-20260913/dataset.jsonl",
+      "sha256": "14589dfa3ea01870d1af59a38775c6168a66e53d2053cce7c50086abba6bca23",
+      "rows": 1238,
+      "inputs": ["expanded_v2_point_in_time_1125", "gap_113"]
+    },
+    {
+      "id": "canonical_v4_history_point_in_time_1238",
+      "path": ".local-artifacts/telegram-expanded-research-v4-history-point-in-time-20260913/dataset.jsonl",
+      "sha256": "0bb581da42933c7ba718de5aeb18eaf4c8a8caaaf1aa68453d6bf62eb625fee1",
+      "rows": 1238,
+      "inputs": ["canonical_v3_point_in_time_2026_1238", "history_imoex2_opens"]
+    },
+    {
+      "id": "canonical_v4_point_in_time_1238",
+      "path": ".local-artifacts/telegram-expanded-research-v4-point-in-time-20260913/dataset.jsonl",
+      "sha256": "ee47437edd61f2f444f32e1d85e7562fb0a07c47750651217ffc898c55ca632c",
+      "rows": 1238,
+      "inputs": ["canonical_v4_history_point_in_time_1238", "gap_imoex2_opens"]
+    }
+  ],
+  "rebuild": {
+    "schema_version": "eventedge-canonical-dataset-rebuild-1.0",
+    "steps": [
+      {
+        "dataset_id": "expanded_v1_1125",
+        "operation": "merge"
+      },
+      {
+        "dataset_id": "expanded_v2_point_in_time_1125",
+        "operation": "rebenchmark",
+        "benchmark_input_id": "imoex2_opens_2026",
+        "parameters": {
+          "artifact_version": "telegram-expanded-research-v4-imoex2-2026-point-in-time-20260913",
+          "decision_before": "2027-01-01T00:00:00+00:00",
+          "decision_from": "2026-01-01T00:00:00+00:00",
+          "expected_cohort_rows": 592,
+          "maximum_stock_entry_lag_seconds": 60,
+          "require_complete_cohort": true
+        }
+      },
+      {
+        "dataset_id": "canonical_v3_point_in_time_2026_1238",
+        "operation": "merge"
+      },
+      {
+        "dataset_id": "canonical_v4_history_point_in_time_1238",
+        "operation": "rebenchmark",
+        "benchmark_input_id": "history_imoex2_opens",
+        "parameters": {
+          "artifact_version": "telegram-expanded-research-v4-history-point-in-time-20260913",
+          "decision_before": "2025-09-07T00:00:00+00:00",
+          "decision_from": "2024-01-01T00:00:00+00:00",
+          "expected_cohort_rows": 533,
+          "maximum_stock_entry_lag_seconds": 60,
+          "require_complete_cohort": true
+        }
+      },
+      {
+        "dataset_id": "canonical_v4_point_in_time_1238",
+        "operation": "rebenchmark",
+        "benchmark_input_id": "gap_imoex2_opens",
+        "parameters": {
+          "artifact_version": "telegram-expanded-research-v4-point-in-time-20260913",
+          "decision_before": "2026-01-01T00:00:00+00:00",
+          "decision_from": "2025-09-07T00:00:00+00:00",
+          "expected_cohort_rows": 113,
+          "maximum_stock_entry_lag_seconds": 60,
+          "require_complete_cohort": true
+        }
+      }
+    ]
+  },
+  "final_dataset_id": "canonical_v4_point_in_time_1238"
+}

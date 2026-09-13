@@ -1,0 +1,160 @@
+{
+  "schema_version": "news-model-benchmark-contract-3.0",
+  "status": "historical_research_proxy",
+  "locked_at": "2026-09-13T00:00:00+03:00",
+  "purpose": "Reproduce the retained materiality and direction benchmarks without production, remote YDB, or network access.",
+  "dataset": {
+    "path": ".local-artifacts/telegram-expanded-research-v4-point-in-time-20260913/dataset.jsonl",
+    "sha256": "ee47437edd61f2f444f32e1d85e7562fb0a07c47750651217ffc898c55ca632c",
+    "rows": 1238,
+    "information_groups": 1108,
+    "feature_projection": "All rows are projected through the same retained model-input contract; stored extractor provenance remains mixed."
+  },
+  "dependencies": {
+    "feature_inputs": {
+      "accepted_immutable_checkpoint": true,
+      "ordered_example_ids_sha256": "e87d505255fb866b8a6a28014ca863911ed5ebc4fcff9cee112263532dfdee5a",
+      "path": ".local-artifacts/corrected-followups-20260911-v3-fold-stability/model-inputs.jsonl",
+      "rows": 1238,
+      "schema_version": "direction-research-input-1.0",
+      "sha256": "06982e753a20cbb99bdf8d9252f268a72afe930771992c6aabcc96c5c471851d",
+      "use": "Accepted immutable outcome-free checkpoint with causal market and corrected semantic inputs"
+    }
+  },
+  "folds": [
+    {
+      "evaluation_from": "2026-03-01T00:00:00+03:00",
+      "evaluation_ids_sha256": "20ec37a310c34b14015539f00c89155bc543102f51e90b2305436110b53be44e",
+      "evaluation_rows": 84,
+      "evaluation_until": "2026-04-01T00:00:00+03:00",
+      "name": "2026_03",
+      "validation_from": "2026-01-01T00:00:00+03:00"
+    },
+    {
+      "evaluation_from": "2026-04-01T00:00:00+03:00",
+      "evaluation_ids_sha256": "1b3e7734381cad69799170db23bf99ca23d41dbfa0e0818662f57889ed1929e0",
+      "evaluation_rows": 88,
+      "evaluation_until": "2026-05-01T00:00:00+03:00",
+      "name": "2026_04",
+      "validation_from": "2026-02-01T00:00:00+03:00"
+    },
+    {
+      "evaluation_from": "2026-05-01T00:00:00+03:00",
+      "evaluation_ids_sha256": "a135f7e8600880cdc59e4cdc9a7083631b82646dde2207bd5c1cab34068c325f",
+      "evaluation_rows": 74,
+      "evaluation_until": "2026-06-01T00:00:00+03:00",
+      "name": "2026_05",
+      "validation_from": "2026-03-01T00:00:00+03:00"
+    },
+    {
+      "evaluation_from": "2026-06-01T00:00:00+03:00",
+      "evaluation_ids_sha256": "d428745ca67c113a7e2bdc6f6bb0f04899bb0045156c5ccb9589dd1b50137b61",
+      "evaluation_rows": 114,
+      "evaluation_until": "2026-07-01T00:00:00+03:00",
+      "name": "2026_06",
+      "validation_from": "2026-04-01T00:00:00+03:00"
+    },
+    {
+      "evaluation_from": "2026-07-01T00:00:00+03:00",
+      "evaluation_ids_sha256": "a4dff92edad45157f196d913956073710cb365ac8fb16a62c7de489c21391497",
+      "evaluation_rows": 62,
+      "evaluation_until": "2026-08-01T00:00:00+03:00",
+      "name": "2026_07",
+      "validation_from": "2026-05-01T00:00:00+03:00"
+    },
+    {
+      "evaluation_from": "2026-08-01T00:00:00+03:00",
+      "evaluation_ids_sha256": "0857c16df6e8dfcfe58481d05da63f57be777df87fac3e95a806cafe8142acc8",
+      "evaluation_rows": 46,
+      "evaluation_until": "2026-09-01T00:00:00+03:00",
+      "name": "2026_08",
+      "validation_from": "2026-06-01T00:00:00+03:00"
+    },
+    {
+      "evaluation_from": "2026-09-01T00:00:00+03:00",
+      "evaluation_ids_sha256": "ae3368d5e9b3394ecede4d2555361e6744a2f2b5c8189fd5bb9f1a59b0e06bdf",
+      "evaluation_rows": 12,
+      "evaluation_until": "2026-10-01T00:00:00+03:00",
+      "name": "2026_09",
+      "validation_from": "2026-07-01T00:00:00+03:00"
+    }
+  ],
+  "market_data": {
+    "benchmark_id": "IMOEX2",
+    "manifests": [
+      {
+        "role": "issuer_2024_2025",
+        "path": ".local-data/telegram-history-expansion-minute-opens-20260910-v1/complete.json",
+        "sha256": "95abc20f38d654ec2f75e19e28c557be045e8ced7ca109747aa51cdd0158a533",
+        "data_glob": "*.jsonl.gz",
+        "data_sha256": "35ea62f6ccccd8dce5dcece4d6c01ad05a7ee815cea0d71c03857eb96d3e9728"
+      },
+      {
+        "role": "issuer_gap_2025",
+        "path": ".local-data/telegram-gap-2025-reviewed-minute-opens-20260910-v1/complete.json",
+        "sha256": "ece4726907b01b77a94e937980026c9b007815ae7af9ea120a4af1588c9d7808",
+        "data_glob": "*.jsonl.gz",
+        "data_sha256": "55016c62e2099394e0df85d89360bcd2248e161d8d1af832bf3e2b20027eabfe"
+      },
+      {
+        "role": "issuer_2026",
+        "path": ".local-data/telegram-minute-opens-2026/complete.json",
+        "sha256": "0abe1b905f6e773f4efe3b5203e12a0031e147c98ec12154a80ae822c561a410",
+        "data_glob": "*.jsonl.gz",
+        "data_sha256": "4b3fb68d8505d6fa6690b170f671abc01d2724ab35e7a4af0ba1a1f84c253eff"
+      },
+      {
+        "role": "benchmark_2024_2025",
+        "path": ".local-data/telegram-history-expansion-imoex2-1m-checkpoints-20260910-v1/complete.json",
+        "sha256": "bccfc759ff7a2c37f4f4db38a65c5a7ec33cd68b025c49cf9c1c2e9b22c08e44",
+        "data_glob": "IMOEX2.jsonl",
+        "data_sha256": "329cfb96e66e9d114185fa8873713c3db54f03b28902bdc1f5f12eb75384d4ea"
+      },
+      {
+        "role": "benchmark_gap_2025",
+        "path": ".local-data/telegram-gap-2025-imoex2-minute-opens-20260910-v1/complete.json",
+        "sha256": "286f596c9466b6ea715ab0bd8ad29cbe78403ef586c9e740763792544ded774a",
+        "data_glob": "IMOEX2.jsonl",
+        "data_sha256": "7b8214398769689df831106c5e2327b3d3485358cd5a6a4bd74afa1ebdc56700"
+      },
+      {
+        "role": "benchmark_2026",
+        "path": ".local-data/imoex2-minute-opens-2026-cohort-20260910-v1/complete.json",
+        "sha256": "0b161ad49edc59dfacb440155af672c3f0afa4dc46b90b611bd6df2a99ea9db3",
+        "data_glob": "IMOEX2.jsonl",
+        "data_sha256": "5845527686ee1f824721a4932efd5b242ff62101c1c8be3e2f53221951b4a11c"
+      }
+    ]
+  },
+  "guards": {
+    "production_access_allowed": false,
+    "remote_ydb_access_allowed": false,
+    "network_market_data_fetch_allowed": false,
+    "information_groups_kept_whole": true,
+    "embargo_hours": 72,
+    "evaluation_windows_are_reused_development_data": true,
+    "evaluation_outcomes_for_feature_or_sample_selection_allowed": false
+  },
+  "expected_output": {
+    "evaluation_rows": 480,
+    "formula_comparison": {
+      "config_version": 6,
+      "formula_confidence_roc_auc": 0.5236464448793215,
+      "formula_hit_rate_pct": 50.955414012738856,
+      "model_hit_rate_pct": 51.59235668789809,
+      "model_id": "update_5m_corrected_reaction_interactions",
+      "model_roc_auc": 0.4969015003261578,
+      "paired_hit_rate_difference_95_pct": [
+        -12.101910828025474,
+        12.41594827586204
+      ],
+      "rows": 157,
+      "scope": "historical_stored_config_6_rows_only",
+      "target": "remaining_abnormal_4h"
+    },
+    "model_fits": 35,
+    "prediction_rows": 2400,
+    "frozen_probabilities_sha256": "263d99881c29a871dedf79eb170af22ae6fc3ac3f98052a6aefd9080daa26039",
+    "outcomes_sha256": "68b61a45933fbc7a7d05491d5a200eb624ad402c3f4cb61e3ff8378d9574f415"
+  }
+}
