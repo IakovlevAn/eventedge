@@ -33,7 +33,7 @@ where = ["src"]
 exclude = ["eventedge_research*"]
 
 [tool.setuptools.package-data]
-eventedge = ["static/*", "static/assets/*", "static/brands/*"]
+eventedge = ["models/*.json", "static/*", "static/assets/*", "static/brands/*"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
