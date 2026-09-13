@@ -2451,7 +2451,10 @@ SCHEMA_STATEMENTS = (
         `payload` Json NOT NULL,
         `created_at` Timestamp NOT NULL,
         `updated_at` Timestamp NOT NULL,
-        PRIMARY KEY (`news_id`, `model_version`, `ticker`, `decision_at`)
+        PRIMARY KEY (
+            `news_id`, `model_version`, `artifact_payload_sha256`,
+            `ticker`, `decision_at`
+        )
     );
     """,
     """

@@ -144,10 +144,8 @@ def test_materiality_prediction_ydb_serialization_round_trip() -> None:
         for statement in SCHEMA_STATEMENTS
         if "CREATE TABLE IF NOT EXISTS `materiality_predictions`" in statement
     )
-    assert (
-        "PRIMARY KEY (`news_id`, `model_version`, `ticker`, `decision_at`)"
-        in materiality_schema
-    )
+    assert "`news_id`, `model_version`, `artifact_payload_sha256`" in materiality_schema
+    assert "`ticker`, `decision_at`" in materiality_schema
 
 
 def test_ydb_news_reads_materiality_ledger_only_when_enabled() -> None:

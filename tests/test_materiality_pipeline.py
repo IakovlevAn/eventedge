@@ -103,6 +103,25 @@ class UnavailableMarketData:
         raise MarketDataUnavailableError(f"No candles for {ticker}")
 
 
+class MissingReactionMarketData(FakeMarketData):
+    async def candles(
+        self,
+        ticker: str,
+        *,
+        interval: int = 10,
+        lookback_days: int = 14,
+    ) -> dict[str, object]:
+        if interval == 24:
+            return await super().candles(
+                ticker,
+                interval=interval,
+                lookback_days=lookback_days,
+            )
+        return _market_payload(
+            [(self.published_at - timedelta(hours=1), 100.0)]
+        )
+
+
 def _news(
     news_id: str,
     published_at: datetime,
@@ -182,16 +201,28 @@ def test_candidate_selection_waits_five_minutes_and_respects_retry_state() -> No
             ),
         ),
     )
+    stale_artifact = _news("news_stale_artifact", now - timedelta(minutes=20))
+    stale_artifact = replace(
+        stale_artifact,
+        materiality_predictions=(
+            replace(
+                _prediction(stale_artifact, probability=0.7),
+                artifact_payload_sha256="b" * 64,
+            ),
+        ),
+    )
 
     candidates = select_materiality_candidates(
-        [future, ready_news, deferred_news, expired, due],
+        [future, ready_news, deferred_news, stale_artifact, expired, due],
         [],
         model_version=runtime.model.model_version,
+        artifact_payload_sha256=runtime.model.artifact_payload_sha256,
         now=now,
     )
 
     assert [(candidate.news.id, candidate.ticker) for candidate in candidates] == [
-        ("news_due", "SBER")
+        ("news_stale_artifact", "SBER"),
+        ("news_due", "SBER"),
     ]
 
 
@@ -265,6 +296,26 @@ def test_unseen_source_is_scored_but_not_admitted_to_ranking() -> None:
     assert not prediction.eligible_for_ranking
 
 
+def test_missing_five_minute_reaction_is_not_admitted_to_ranking() -> None:
+    runtime = runtime_from_environment({"NEWS_MATERIALITY_MODE": "shadow"})
+    assert runtime.model is not None
+    published_at = datetime(2026, 9, 10, 9, tzinfo=UTC)
+    news = _news("news_missing_reaction", published_at)
+
+    prediction = asyncio.run(
+        infer_materiality_prediction(
+            MaterialityCandidate(news=news, ticker="SBER", existing=None),
+            MissingReactionMarketData(published_at),
+            runtime.model,
+            now=published_at + timedelta(minutes=10),
+        )
+    )
+
+    assert prediction.status == "ready"
+    assert "reaction_abnormal_pct" in prediction.missing_features
+    assert not prediction.eligible_for_ranking
+
+
 def test_refresh_is_idempotent_after_ready_prediction() -> None:
     async def scenario() -> tuple[dict[str, object], dict[str, object], NewsRecord]:
         published_at = datetime(2026, 9, 10, 9, tzinfo=UTC)
@@ -313,7 +364,17 @@ def test_rank_mode_uses_probability_only_within_publication_day() -> None:
     runtime = runtime_from_environment({"NEWS_MATERIALITY_MODE": "rank"})
     day_one = datetime(2026, 9, 10, 8, tzinfo=UTC)
     low = _news("news_low", day_one + timedelta(hours=3))
-    low = replace(low, materiality_predictions=(_prediction(low, probability=0.2),))
+    low = replace(
+        low,
+        materiality_predictions=(
+            _prediction(low, probability=0.2),
+            replace(
+                _prediction(low, probability=0.99),
+                id="mat_stale_artifact",
+                artifact_payload_sha256="b" * 64,
+            ),
+        ),
+    )
     high = _news("news_high", day_one + timedelta(hours=1))
     high = replace(high, materiality_predictions=(_prediction(high, probability=0.9),))
     next_day = _news("news_next_day", day_one + timedelta(days=1))
@@ -321,10 +382,11 @@ def test_rank_mode_uses_probability_only_within_publication_day() -> None:
     ranked = rank_news_by_materiality([low, next_day, high], runtime=runtime)
 
     assert [item.id for item in ranked] == ["news_next_day", "news_high", "news_low"]
-    payload = materiality_api_payload(high, runtime=runtime)
+    payload = materiality_api_payload(low, runtime=runtime)
     assert payload is not None
     assert payload["status"] == "ready"
-    assert payload["max_probability"] == 0.9
+    assert payload["max_probability"] == 0.2
+    assert len(payload["predictions"]) == 1
 
 
 def test_disabled_mode_returns_no_api_materiality() -> None:

@@ -1453,6 +1453,9 @@ components:
               maximum: 100
         eligible_for_ranking:
           type: boolean
+          description: >-
+            True only for the retained model domain with an available
+            five-minute abnormal-reaction feature.
         missing_features:
           type: array
           items:

@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Protocol
 
 from eventedge.analysis import DEFAULT_MOEX_ALIASES
@@ -67,6 +67,7 @@ def select_materiality_candidates(
     signals: Sequence[SignalRecord],
     *,
     model_version: str,
+    artifact_payload_sha256: str,
     now: datetime,
 ) -> list[MaterialityCandidate]:
     """Select bounded-age, due pairs while preserving retry idempotency."""
@@ -88,7 +89,12 @@ def select_materiality_candidates(
             item, signals_by_news.get(item.id, set())
         )
         for ticker in tickers:
-            existing = _current_prediction(item, ticker, model_version)
+            existing = _current_prediction(
+                item,
+                ticker,
+                model_version,
+                artifact_payload_sha256,
+            )
             if existing is not None and existing.status == "ready":
                 continue
             if (
@@ -142,6 +148,7 @@ async def refresh_materiality_predictions(
         news,
         signals,
         model_version=runtime.model.model_version,
+        artifact_payload_sha256=runtime.model.artifact_payload_sha256,
         now=evaluated_at,
     )
     selected = candidates[: runtime.batch_limit]
@@ -238,7 +245,7 @@ async def infer_materiality_prediction(
         return _deferred_prediction(candidate, model, now, "invalid_market_data")
 
     return MaterialityPredictionRecord(
-        id=_prediction_id(candidate, model.model_version),
+        id=_prediction_id(candidate, model),
         news_id=candidate.news.id,
         ticker=candidate.ticker,
         decision_at=row.decision_at,
@@ -251,6 +258,7 @@ async def infer_materiality_prediction(
         eligible_for_ranking=(
             model.category_was_seen("ticker", candidate.ticker)
             and model.category_was_seen("source_id", candidate.news.source_id)
+            and row.numeric["reaction_abnormal_pct"] is not None
         ),
         missing_features=missing_materiality_features(row),
         model_id=score.model_id,
@@ -276,6 +284,8 @@ def materiality_api_payload(
         prediction
         for prediction in item.materiality_predictions
         if prediction.model_version == runtime.model.model_version
+        and prediction.artifact_payload_sha256
+        == runtime.model.artifact_payload_sha256
     ]
     ready = [
         prediction
@@ -325,7 +335,7 @@ def rank_news_by_materiality(
         key=lambda item: (item.published_at.astimezone(UTC), item.id),
         reverse=True,
     )
-    positions_by_day: dict[object, list[int]] = {}
+    positions_by_day: dict[date, list[int]] = {}
     for index, item in enumerate(ranked):
         day = item.published_at.astimezone(UTC).date()
         positions_by_day.setdefault(day, []).append(index)
@@ -334,13 +344,12 @@ def rank_news_by_materiality(
         scored_positions = [
             index
             for index in positions
-            if _ranking_probability(ranked[index], runtime.model.model_version)
-            is not None
+            if _ranking_probability(ranked[index], runtime.model) is not None
         ]
         scored_news = sorted(
             (ranked[index] for index in scored_positions),
             key=lambda item: (
-                _ranking_probability(item, runtime.model.model_version),
+                _ranking_probability(item, runtime.model),
                 item.published_at.astimezone(UTC),
                 item.id,
             ),
@@ -351,11 +360,15 @@ def rank_news_by_materiality(
     return ranked
 
 
-def _ranking_probability(item: NewsRecord, model_version: str) -> float | None:
+def _ranking_probability(
+    item: NewsRecord,
+    model: PortableMaterialityModel,
+) -> float | None:
     probabilities = [
         float(prediction.calibrated_probability)
         for prediction in item.materiality_predictions
-        if prediction.model_version == model_version
+        if prediction.model_version == model.model_version
+        and prediction.artifact_payload_sha256 == model.artifact_payload_sha256
         and prediction.status == "ready"
         and prediction.eligible_for_ranking
         and prediction.calibrated_probability is not None
@@ -370,7 +383,7 @@ def _deferred_prediction(
     reason: str,
 ) -> MaterialityPredictionRecord:
     return MaterialityPredictionRecord(
-        id=_prediction_id(candidate, model.model_version),
+        id=_prediction_id(candidate, model),
         news_id=candidate.news.id,
         ticker=candidate.ticker,
         decision_at=candidate.decision_at,
@@ -393,14 +406,18 @@ def _deferred_prediction(
     )
 
 
-def _prediction_id(candidate: MaterialityCandidate, model_version: str) -> str:
+def _prediction_id(
+    candidate: MaterialityCandidate,
+    model: PortableMaterialityModel,
+) -> str:
     return stable_id(
         "mat_",
         "\x00".join(
             (
                 candidate.news.id,
                 candidate.ticker,
-                model_version,
+                model.model_version,
+                model.artifact_payload_sha256,
                 candidate.decision_at.isoformat(),
             )
         ),
@@ -433,11 +450,14 @@ def _current_prediction(
     item: NewsRecord,
     ticker: str,
     model_version: str,
+    artifact_payload_sha256: str,
 ) -> MaterialityPredictionRecord | None:
     candidates = [
         prediction
         for prediction in item.materiality_predictions
-        if prediction.ticker == ticker and prediction.model_version == model_version
+        if prediction.ticker == ticker
+        and prediction.model_version == model_version
+        and prediction.artifact_payload_sha256 == artifact_payload_sha256
     ]
     return max(candidates, key=lambda value: (value.updated_at, value.id), default=None)
 
