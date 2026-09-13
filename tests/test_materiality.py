@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import UTC, datetime
+import math
+import statistics
+from datetime import UTC, date, datetime, timedelta
 from importlib import resources
 from pathlib import Path
 
@@ -16,8 +18,10 @@ from eventedge.materiality import (
     MaterialityFeatureRow,
     MaterialityMode,
     artifact_payload_sha256,
+    build_materiality_feature_row,
     load_materiality_payload,
     load_packaged_materiality_model,
+    missing_materiality_features,
     runtime_from_environment,
 )
 from eventedge_research.news_model_artifact import load_portable_materiality_model
@@ -63,6 +67,41 @@ def _artifact_payload() -> dict[str, object]:
     value = json.loads(artifact.read_text(encoding="utf-8"))
     assert isinstance(value, dict)
     return value
+
+
+def _market_payload(
+    observations: list[tuple[datetime, float]],
+) -> dict[str, object]:
+    return {
+        "candles": [
+            {
+                "begin": timestamp.isoformat().replace("+00:00", "Z"),
+                "open": price,
+            }
+            for timestamp, price in observations
+        ]
+    }
+
+
+def _daily_payload(
+    first_day: date,
+    daily_returns_pct: list[float],
+    *,
+    initial_price: float = 100.0,
+) -> tuple[dict[str, object], list[float]]:
+    observations = []
+    prices = [initial_price]
+    for index, return_pct in enumerate(daily_returns_pct):
+        prices.append(prices[-1] * (1 + return_pct / 100))
+        day = first_day + timedelta(days=index + 1)
+        observations.append(
+            (
+                datetime(day.year, day.month, day.day, 21, tzinfo=UTC)
+                - timedelta(days=1),
+                prices[-1],
+            )
+        )
+    return _market_payload(observations), prices
 
 
 def test_packaged_runtime_prediction_matches_research_reference() -> None:
@@ -151,3 +190,98 @@ def test_loader_rejects_resigned_incompatible_artifact() -> None:
 
     with pytest.raises(ValueError, match="feature spec is incompatible"):
         load_materiality_payload(payload, str(payload["artifact_payload_sha256"]))
+
+
+def test_feature_builder_matches_five_minute_causal_contract() -> None:
+    published_at = datetime(2026, 9, 10, 9, tzinfo=UTC)
+    stock_intraday = _market_payload(
+        [
+            (datetime(2026, 9, 5, 9, 4, tzinfo=UTC), 90.0),
+            (datetime(2026, 9, 9, 9, 4, tzinfo=UTC), 95.0),
+            (datetime(2026, 9, 10, 8, 4, tzinfo=UTC), 98.0),
+            (published_at, 100.0),
+            (datetime(2026, 9, 10, 9, 4, tzinfo=UTC), 101.0),
+            (datetime(2026, 9, 10, 9, 5, tzinfo=UTC), 102.0),
+            (datetime(2026, 9, 10, 9, 6, tzinfo=UTC), 500.0),
+        ]
+    )
+    benchmark_intraday = _market_payload(
+        [
+            (datetime(2026, 9, 10, 8, 4, tzinfo=UTC), 198.0),
+            (published_at, 200.0),
+            (datetime(2026, 9, 10, 9, 4, tzinfo=UTC), 201.0),
+            (datetime(2026, 9, 10, 9, 5, tzinfo=UTC), 202.0),
+        ]
+    )
+    benchmark_returns = [0.1 + (index % 7) * 0.05 for index in range(65)]
+    stock_returns = [value * 2 for value in benchmark_returns]
+    stock_daily, _ = _daily_payload(date(2026, 6, 1), stock_returns)
+    benchmark_daily, _ = _daily_payload(date(2026, 6, 1), benchmark_returns)
+
+    row = build_materiality_feature_row(
+        news_id="news_causal",
+        ticker="SBER",
+        source_id="telegram_markettwits",
+        published_at=published_at,
+        stock_intraday=stock_intraday,
+        benchmark_intraday=benchmark_intraday,
+        stock_daily=stock_daily,
+        benchmark_daily=benchmark_daily,
+    )
+
+    numeric = row.numeric
+    assert row.decision_at == published_at + timedelta(minutes=5)
+    assert numeric["market_pre_event_return_1h_pct"] == pytest.approx(
+        (101 / 98 - 1) * 100
+    )
+    assert numeric["market_pre_event_return_1d_pct"] == pytest.approx(
+        (101 / 95 - 1) * 100
+    )
+    assert numeric["market_pre_event_return_5d_pct"] == pytest.approx(
+        (101 / 90 - 1) * 100
+    )
+    assert numeric["reaction_stock_pct"] == pytest.approx(2.0)
+    assert numeric["reaction_benchmark_pct"] == pytest.approx(1.0)
+    assert numeric["reaction_abnormal_pct"] == pytest.approx(1.0)
+    assert numeric["derived_abs_reaction_abnormal_pct"] == pytest.approx(1.0)
+    expected_volatility = statistics.stdev(stock_returns[-20:])
+    assert numeric["risk_volatility_20d_pct"] == pytest.approx(expected_volatility)
+    assert numeric["risk_beta_60d"] == pytest.approx(2.0)
+    assert numeric["derived_abs_reaction_abnormal_to_volatility"] == pytest.approx(
+        1.0 / expected_volatility
+    )
+    assert row.categorical["publication_session"] == "main_session"
+    assert not missing_materiality_features(row)
+    assert math.isfinite(load_packaged_materiality_model().probability_material(row))
+
+
+def test_feature_builder_ignores_prices_after_decision_boundary() -> None:
+    published_at = datetime(2026, 9, 10, 9, tzinfo=UTC)
+    base = [
+        (datetime(2026, 9, 10, 8, 4, tzinfo=UTC), 99.0),
+        (published_at, 100.0),
+        (datetime(2026, 9, 10, 9, 5, tzinfo=UTC), 101.0),
+    ]
+    daily, _ = _daily_payload(date(2026, 6, 1), [0.1] * 30)
+    common = {
+        "news_id": "news_causal",
+        "ticker": "SBER",
+        "source_id": "telegram_markettwits",
+        "published_at": published_at,
+        "benchmark_intraday": _market_payload(base),
+        "stock_daily": daily,
+        "benchmark_daily": daily,
+    }
+
+    original = build_materiality_feature_row(
+        **common,
+        stock_intraday=_market_payload(base),
+    )
+    with_future = build_materiality_feature_row(
+        **common,
+        stock_intraday=_market_payload(
+            [*base, (datetime(2026, 9, 10, 9, 6, tzinfo=UTC), 1_000.0)]
+        ),
+    )
+
+    assert original.numeric == with_future.numeric

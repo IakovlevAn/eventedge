@@ -16,9 +16,9 @@ MOEX_ISS_BASE_URL = "https://iss.moex.com/iss"
 MOSCOW_TIMEZONE = ZoneInfo("Europe/Moscow")
 DEFAULT_TIMEOUT_SECONDS = 10.0
 MAX_DAILY_CANDLES = 66
-# Sixty calendar days can contain more than 4,000 ten-minute trading candles.
-# Evals needs the complete window around old evidence, not only its first pages.
-MAX_INTRADAY_CANDLES = 6_000
+# Fourteen calendar days can contain more than 6,000 one-minute trading candles.
+# Materiality inference and evals need the tail around the decision boundary.
+MAX_INTRADAY_CANDLES = 12_000
 
 # Context signals use product codes rather than exchange tickers. Evals measure
 # them against explicit MOEX index proxies instead of silently dropping them.
@@ -35,6 +35,7 @@ EVALUATION_INDEX_BENCHMARKS: dict[str, str] = {
     "RUTRANS": "MOEXTN",
     "RUPOWER": "MOEXEU",
 }
+MOEX_INDEX_TICKERS = frozenset({"IMOEX2", *EVALUATION_INDEX_BENCHMARKS.values()})
 
 # Product history keeps the canonical ticker used when a signal was created.
 # Resolve renamed/redomiciled securities only at the MOEX boundary so old
@@ -191,7 +192,7 @@ class MoexMarketDataClient:
         )
         encoded_ticker = quote(benchmark_ticker, safe="")
         from_date = (datetime.now(UTC) - timedelta(days=lookback_days)).date().isoformat()
-        if ticker in EVALUATION_INDEX_BENCHMARKS:
+        if benchmark_ticker in MOEX_INDEX_TICKERS:
             candles_url = (
                 f"{MOEX_ISS_BASE_URL}/engines/stock/markets/index/boards/SNDX/"
                 f"securities/{encoded_ticker}/candles.json"

@@ -7,14 +7,17 @@ import json
 import math
 import os
 import re
+import statistics
+from bisect import bisect_left, bisect_right
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from importlib import resources
 from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
 ARTIFACT_SCHEMA_VERSION = "news-materiality-model-artifact-1.0"
 MODEL_ID = "update_5m_symmetric_materiality_logistic"
@@ -34,6 +37,16 @@ PACKAGED_ARTIFACT_PAYLOAD_SHA256 = (
 MAXIMUM_ARTIFACT_BYTES = 5_000_000
 MAXIMUM_MODEL_FEATURES = 10_000
 MAXIMUM_STRING_LENGTH = 10_000
+DECISION_DELAY = timedelta(minutes=5)
+MAXIMUM_BOUNDARY_LAG = timedelta(minutes=20)
+PRE_EVENT_MOMENTUM_HORIZON = timedelta(hours=1)
+PRE_EVENT_RETURN_1D_HORIZON = timedelta(days=1)
+PRE_EVENT_RETURN_5D_HORIZON = timedelta(days=5)
+MAXIMUM_LONG_PRE_EVENT_LAG = timedelta(days=4)
+MARKET_TIMEZONE = ZoneInfo("Europe/Moscow")
+MATERIALITY_BENCHMARK_TICKER = "IMOEX2"
+INTRADAY_LOOKBACK_DAYS = 14
+DAILY_LOOKBACK_DAYS = 120
 _DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 NUMERIC_FEATURE_NAMES = (
@@ -220,6 +233,155 @@ class MaterialityRuntime:
         return self.model is not None
 
 
+@dataclass(frozen=True)
+class _OpenSeries:
+    """Sorted candle opens used only up to an explicit decision boundary."""
+
+    times: tuple[datetime, ...]
+    prices: tuple[float, ...]
+
+    @classmethod
+    def from_market_payload(cls, value: Mapping[str, object]) -> _OpenSeries:
+        candles = value.get("candles")
+        if not isinstance(candles, list):
+            raise ValueError("market candle payload must contain a candle list")
+        observations: dict[datetime, float] = {}
+        for candle in candles:
+            if not isinstance(candle, dict):
+                raise ValueError("market candle must be an object")
+            timestamp = _market_timestamp(candle.get("begin"))
+            price = _positive_float(candle.get("open"), "market candle open")
+            current = observations.get(timestamp)
+            if current is not None and current != price:
+                raise ValueError("market payload contains conflicting candle opens")
+            observations[timestamp] = price
+        if not observations:
+            raise ValueError("market candle payload is empty")
+        ordered = sorted(observations.items())
+        return cls(
+            times=tuple(item[0] for item in ordered),
+            prices=tuple(item[1] for item in ordered),
+        )
+
+    def first_at_or_after(
+        self,
+        requested: datetime,
+        *,
+        maximum_lag: timedelta = MAXIMUM_BOUNDARY_LAG,
+    ) -> tuple[datetime, float] | None:
+        index = bisect_left(self.times, requested)
+        if index >= len(self.times) or self.times[index] - requested > maximum_lag:
+            return None
+        return self.times[index], self.prices[index]
+
+    def last_at_or_before(
+        self,
+        requested: datetime,
+        *,
+        maximum_lag: timedelta = MAXIMUM_BOUNDARY_LAG,
+    ) -> tuple[datetime, float] | None:
+        index = bisect_right(self.times, requested) - 1
+        if index < 0 or requested - self.times[index] > maximum_lag:
+            return None
+        return self.times[index], self.prices[index]
+
+
+def build_materiality_feature_row(
+    *,
+    news_id: str,
+    ticker: str,
+    source_id: str,
+    published_at: datetime,
+    stock_intraday: Mapping[str, object],
+    benchmark_intraday: Mapping[str, object],
+    stock_daily: Mapping[str, object],
+    benchmark_daily: Mapping[str, object],
+) -> MaterialityFeatureRow:
+    """Build the retained model's causal feature contract at publication +5m."""
+    _require_aware(published_at, "published_at")
+    published_at = published_at.astimezone(UTC)
+    decision_at = published_at + DECISION_DELAY
+    stock_series = _OpenSeries.from_market_payload(stock_intraday)
+    benchmark_series = _OpenSeries.from_market_payload(benchmark_intraday)
+    stock_return_1h = _pre_event_return(
+        stock_series,
+        decision_at,
+        horizon=PRE_EVENT_MOMENTUM_HORIZON,
+        maximum_past_lag=MAXIMUM_BOUNDARY_LAG,
+        require_same_market_date=True,
+    )
+    benchmark_return_1h = _pre_event_return(
+        benchmark_series,
+        decision_at,
+        horizon=PRE_EVENT_MOMENTUM_HORIZON,
+        maximum_past_lag=MAXIMUM_BOUNDARY_LAG,
+        require_same_market_date=True,
+    )
+    risk_volatility, risk_beta = _past_risk(
+        stock_daily,
+        benchmark_daily,
+        decision_at,
+    )
+    reaction_stock = _initial_return(stock_series, published_at, decision_at)
+    reaction_benchmark = _initial_return(
+        benchmark_series,
+        published_at,
+        decision_at,
+    )
+    reaction_abnormal = _subtract(reaction_stock, reaction_benchmark)
+    numeric = {
+        "market_pre_event_return_1h_pct": stock_return_1h,
+        "market_pre_event_return_1d_pct": _pre_event_return(
+            stock_series,
+            decision_at,
+            horizon=PRE_EVENT_RETURN_1D_HORIZON,
+            maximum_past_lag=MAXIMUM_LONG_PRE_EVENT_LAG,
+            require_same_market_date=False,
+        ),
+        "market_pre_event_return_5d_pct": _pre_event_return(
+            stock_series,
+            decision_at,
+            horizon=PRE_EVENT_RETURN_5D_HORIZON,
+            maximum_past_lag=MAXIMUM_LONG_PRE_EVENT_LAG,
+            require_same_market_date=False,
+        ),
+        "market_benchmark_pre_event_return_1h_pct": benchmark_return_1h,
+        "risk_volatility_20d_pct": risk_volatility,
+        "risk_beta_60d": risk_beta,
+        "risk_beta_adjusted_pre_event_1h_pct": (
+            stock_return_1h - risk_beta * benchmark_return_1h
+            if stock_return_1h is not None
+            and benchmark_return_1h is not None
+            and risk_beta is not None
+            else None
+        ),
+        **_time_features(decision_at),
+        "reaction_stock_pct": reaction_stock,
+        "reaction_benchmark_pct": reaction_benchmark,
+        "reaction_abnormal_pct": reaction_abnormal,
+    }
+    numeric.update(_symmetric_reaction_features(numeric))
+    return MaterialityFeatureRow(
+        news_id=news_id,
+        ticker=ticker,
+        source_id=source_id,
+        decision_at=decision_at,
+        numeric=MappingProxyType(numeric),
+        categorical=MappingProxyType(
+            {
+                "ticker": ticker,
+                "source_id": source_id,
+                "publication_session": _publication_session(published_at),
+            }
+        ),
+    )
+
+
+def missing_materiality_features(row: MaterialityFeatureRow) -> tuple[str, ...]:
+    """Return model features unavailable at the causal decision boundary."""
+    return tuple(name for name in NUMERIC_FEATURE_NAMES if row.numeric.get(name) is None)
+
+
 def runtime_from_environment(environment: Mapping[str, str] | None = None) -> MaterialityRuntime:
     """Load the pinned model only when materiality inference is enabled."""
     values = environment if environment is not None else os.environ
@@ -343,6 +505,172 @@ def artifact_payload_sha256(payload: Mapping[str, object]) -> str:
         sort_keys=True,
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _pre_event_return(
+    series: _OpenSeries,
+    decision_at: datetime,
+    *,
+    horizon: timedelta,
+    maximum_past_lag: timedelta,
+    require_same_market_date: bool,
+) -> float | None:
+    current_index = bisect_left(series.times, decision_at) - 1
+    if current_index < 0:
+        return None
+    current_at = series.times[current_index]
+    if decision_at - current_at > MAXIMUM_BOUNDARY_LAG:
+        return None
+    target_at = current_at - horizon
+    previous_index = bisect_right(series.times, target_at, hi=current_index) - 1
+    if previous_index < 0:
+        return None
+    previous_at = series.times[previous_index]
+    if target_at - previous_at > maximum_past_lag:
+        return None
+    if require_same_market_date and (
+        current_at.astimezone(MARKET_TIMEZONE).date()
+        != previous_at.astimezone(MARKET_TIMEZONE).date()
+    ):
+        return None
+    return _return_pct(series.prices[previous_index], series.prices[current_index])
+
+
+def _initial_return(
+    series: _OpenSeries,
+    start: datetime,
+    stop: datetime,
+) -> float | None:
+    first = series.first_at_or_after(start)
+    last = series.last_at_or_before(stop)
+    if first is None or last is None or first[0] > last[0]:
+        return None
+    return _return_pct(first[1], last[1])
+
+
+def _past_risk(
+    stock_daily: Mapping[str, object],
+    benchmark_daily: Mapping[str, object],
+    cutoff: datetime,
+) -> tuple[float | None, float | None]:
+    stock_returns = _daily_returns(stock_daily, cutoff)
+    benchmark_returns = _daily_returns(benchmark_daily, cutoff)
+    dates = sorted(set(stock_returns) & set(benchmark_returns))[-60:]
+    stock_values = [stock_returns[value] for value in dates]
+    benchmark_values = [benchmark_returns[value] for value in dates]
+    volatility = (
+        statistics.stdev(stock_values[-20:]) if len(stock_values) >= 20 else None
+    )
+    if len(stock_values) < 20 or statistics.pvariance(benchmark_values) == 0:
+        return volatility, None
+    beta = statistics.covariance(stock_values, benchmark_values) / statistics.variance(
+        benchmark_values
+    )
+    return volatility, max(-2.0, min(4.0, beta))
+
+
+def _daily_returns(
+    value: Mapping[str, object],
+    cutoff: datetime,
+) -> dict[date, float]:
+    candles = value.get("candles")
+    if not isinstance(candles, list):
+        raise ValueError("daily market payload must contain a candle list")
+    daily_opens: dict[date, float] = {}
+    for candle in candles:
+        if not isinstance(candle, dict):
+            raise ValueError("daily market candle must be an object")
+        timestamp = _market_timestamp(candle.get("begin"))
+        market_day = timestamp.astimezone(MARKET_TIMEZONE).date()
+        session_open = datetime.combine(
+            market_day,
+            datetime.min.time(),
+            MARKET_TIMEZONE,
+        ).replace(hour=10)
+        if session_open.astimezone(UTC) > cutoff:
+            continue
+        price = _positive_float(candle.get("open"), "daily market candle open")
+        current = daily_opens.get(market_day)
+        if current is not None and current != price:
+            raise ValueError("daily market payload contains conflicting opens")
+        daily_opens[market_day] = price
+    days = sorted(daily_opens)
+    return {
+        current: _return_pct(daily_opens[previous], daily_opens[current])
+        for previous, current in zip(days, days[1:], strict=False)
+    }
+
+
+def _time_features(value: datetime) -> dict[str, float]:
+    minute = value.hour * 60 + value.minute
+    angle = 2 * math.pi * minute / (24 * 60)
+    weekday_angle = 2 * math.pi * value.weekday() / 7
+    return {
+        "time_hour_sin": math.sin(angle),
+        "time_hour_cos": math.cos(angle),
+        "time_weekday_sin": math.sin(weekday_angle),
+        "time_weekday_cos": math.cos(weekday_angle),
+        "time_year": float(value.year),
+        "time_month": float(value.month),
+    }
+
+
+def _symmetric_reaction_features(
+    numeric: Mapping[str, float | None],
+) -> dict[str, float | None]:
+    stock = numeric.get("reaction_stock_pct")
+    abnormal = numeric.get("reaction_abnormal_pct")
+    volatility = numeric.get("risk_volatility_20d_pct")
+    ratio = None
+    if abnormal is not None and volatility is not None and volatility > 0:
+        ratio = abs(abnormal) / max(volatility, 0.05)
+    return {
+        "derived_abs_reaction_stock_pct": abs(stock) if stock is not None else None,
+        "derived_abs_reaction_abnormal_pct": (
+            abs(abnormal) if abnormal is not None else None
+        ),
+        "derived_abs_reaction_abnormal_to_volatility": ratio,
+    }
+
+
+def _publication_session(value: datetime) -> str:
+    minute = value.astimezone(UTC).hour * 60 + value.astimezone(UTC).minute
+    if minute < 7 * 60:
+        return "pre_open"
+    if minute < 15 * 60 + 50:
+        return "main_session"
+    return "post_close"
+
+
+def _return_pct(start: float, end: float) -> float:
+    return (end / start - 1) * 100
+
+
+def _subtract(left: float | None, right: float | None) -> float | None:
+    return left - right if left is not None and right is not None else None
+
+
+def _market_timestamp(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("market candle timestamp must be a string")
+    try:
+        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("market candle timestamp is invalid") from error
+    _require_aware(result, "market candle timestamp")
+    return result
+
+
+def _positive_float(value: object, name: str) -> float:
+    result = _finite_float(value, name)
+    if result <= 0:
+        raise ValueError(f"{name} must be positive")
+    return result
+
+
+def _require_aware(value: datetime, name: str) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware")
 
 
 def _validate_identity(payload: Mapping[str, object]) -> None:
