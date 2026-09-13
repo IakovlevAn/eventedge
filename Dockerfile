@@ -20,6 +20,7 @@ WORKDIR /app
 RUN groupadd --system eventedge && useradd --system --gid eventedge eventedge
 
 COPY pyproject.toml ./
+COPY PACKAGE.md ./
 COPY README.md ./
 COPY configs ./configs
 COPY src ./src

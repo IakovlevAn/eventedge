@@ -1,0 +1,5 @@
+prune EventEdge
+prune scripts
+prune src/eventedge_research
+prune tests
+exclude README.md

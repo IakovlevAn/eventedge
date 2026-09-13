@@ -5,8 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "eventedge"
 version = "0.1.0"
-description = "API-first stock signal platform for the Russian market"
-readme = "README.md"
+description = "API-first Russian-market news aggregator and signal service"
+readme = "PACKAGE.md"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.116,<1",
@@ -22,17 +22,22 @@ dev = [
     "openapi-spec-validator>=0.7.2,<1",
     "pytest>=8.4,<10",
     "ruff>=0.12,<1",
+    "scikit-learn>=1.7,<2",
+]
+export = [
+    "ydb[yc]>=3.30,<4",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+exclude = ["eventedge_research*"]
 
 [tool.setuptools.package-data]
 eventedge = ["static/*", "static/assets/*", "static/brands/*"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
-pythonpath = ["."]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 
 [tool.ruff]
