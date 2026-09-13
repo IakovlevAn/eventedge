@@ -267,6 +267,55 @@ absolute transforms первых пяти минут, а не текста/LLM. 
   корректировки не входят в эти метрики. Ни одна модель не является обещанием
   доходности или автоматической торговой рекомендацией.
 
+## Runtime inference и безопасный rollout
+
+Retained materiality artifact поставляется вместе с Python-пакетом как
+`src/eventedge/models/news-materiality-v1.json`. Runtime проверяет схему и
+закреплённый payload SHA-256 до первого предсказания и вычисляет logistic score
+без `pickle`, `sklearn` или исполнения кода из артефакта.
+
+Пятиминутный maintenance-контур выполняет следующую идемпотентную цепочку:
+
+1. выбирает company-news с поддерживаемым тикером не раньше
+   `published_at + 5m` и не старше семи дней;
+2. получает минутные opens акции и IMOEX2, а также causal daily history;
+3. строит тот же `update_5m_symmetric_materiality` feature contract, не читая
+   свечи после `data_cutoff_at`;
+4. сохраняет raw/calibrated probability, missing features, версии
+   model/features и SHA артефакта в YDB-таблицу `materiality_predictions`;
+5. повторяет временно отложенные market-data ошибки не чаще одного раза в
+   десять минут.
+
+Один запуск ограничен `NEWS_MATERIALITY_BATCH_LIMIT` (по умолчанию 8), а
+сетевой fan-out — двумя кандидатами. `market_materiality` появляется в
+`GET /v1/news` только для текущей версии модели. Поддерживаются три режима:
+
+- `NEWS_MATERIALITY_MODE=disabled` — модель не загружается и inference не
+  выполняется; это default;
+- `shadow` — scores сохраняются и показываются, но canonical API order не
+  меняется;
+- `rank` — готовые scores могут переставлять только in-domain записи в уже
+  занимаемых ими позициях одного UTC-дня. Свежие pending и out-of-domain
+  новости не опускаются ниже из-за отсутствующего score.
+
+Web UI сохраняет canonical order API, показывает вероятность заметной реакции
+для admitted scores и даёт явную сортировку «По ML-значимости». Вероятность
+означает `abs(abnormal 4h) >= 0,5 п.п.`, а не направление цены.
+
+Проверка runtime-контура локально:
+
+```bash
+uv run pytest tests/test_materiality.py \
+  tests/test_materiality_pipeline.py tests/test_storage.py tests/test_api.py
+uv run python scripts/validate_openapi.py
+cd web && npm test && npm run build
+```
+
+Deployment workflow требует явного выбора режима и по умолчанию передаёт
+`disabled`. Перед `shadow` migration создаёт prediction table; переход к
+`rank` делается только после оценки нового live shadow-окна. Само добавление
+кода и локальные команды production не меняют.
+
 ## Следующий продуктовый шаг
 
 В production пока остаётся rule-based `signal-engine-0.6.1`,
@@ -280,13 +329,11 @@ Live extraction сначала применяет causal candidate gate, зат�
 regression guarantees покрывают известные ошибки, но сами по себе не доказывают
 рост market hit rate.
 
-Materiality-кандидат подключается сначала только в shadow после первых пяти
-минут рынка. Рядом с неизменным config-7 output нужно сохранять probability,
-версию model/features/calibration, причины abstain и immutable prediction
-ledger. До показа ranking пользователю на новом live-окне измеряются coverage,
-calibration, ROC/PR-AUC, top-k precision, стабильность по источникам и ошибки
-доступности данных. Directional output остаётся выключенным до отдельного
-устойчивого преимущества над market controls и формулой.
+Следующий шаг — явно включить materiality в `shadow`, не меняя config-7 output,
+и измерить на новом live-окне coverage, calibration, ROC/PR-AUC, top-k
+precision, стабильность по источникам и ошибки доступности данных. Только после
+этого можно переключать `rank`. Directional output остаётся выключенным до
+отдельного устойчивого преимущества над market controls и формулой.
 
 Канонические числа, пути и SHA-256 зафиксированы в
 [`ML_ARTIFACT_MANIFEST.json`](ML_ARTIFACT_MANIFEST.json). Перенос локального
