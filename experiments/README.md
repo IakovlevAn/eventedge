@@ -104,3 +104,14 @@ PYTHONPATH=src:. uv run --locked python scripts/verify_direction_experiment_arch
 
 Ноутбуки являются обзором, а Python runners — источником вычислительной логики.
 Generated outputs и notebook outputs намеренно не входят в MR.
+
+## Канонический rerun
+
+Адаптер в `canonical_rerun/` повторяет этапы 1–5 на dataset SHA `ee4743…` и
+remaining-direction target из PR #148. Он byte-exact восстанавливает канонический
+датасет из frozen legacy dataset и MOEX-кэшей, проверяет hashes всех evaluation
+folds и контрольный результат config 6, затем запускает общую серию ablations.
+
+Краткий итог находится в
+`EventEdge/NEWS_DIRECTION_CANONICAL_RERUN.md`, а машиночитаемые headline-метрики —
+в `EventEdge/NEWS_DIRECTION_CANONICAL_RERUN_CONTRACT.json`.

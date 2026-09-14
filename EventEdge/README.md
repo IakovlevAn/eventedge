@@ -6,6 +6,8 @@
 [OpenAPI-контракт](openapi.yaml) · [подключение Yandex Cloud](CLOUD_SETUP.md) ·
 [ML pipeline, модели и результаты](ML_PIPELINE.md)
 
+[Канонический перезапуск пяти экспериментов направления](NEWS_DIRECTION_CANONICAL_RERUN.md)
+
 ## 1. Питч
 
 **EventEdge помогает инвестору не пропускать новости с вероятной заметной

@@ -154,9 +154,11 @@ benchmark.
 
 Дополнительная серия development-проверок RuBERT, альтернативных горизонтов,
 selective prediction, structured features и малых нелинейных моделей сохранена
-в [архиве этапов 1–5](NEWS_DIRECTION_EXPERIMENTS.md). Она использует предыдущую
-версию датасета и другое определение directional horizon, поэтому не подменяет
-метрики этого canonical benchmark без отдельного rerun.
+в [архиве этапов 1–5](NEWS_DIRECTION_EXPERIMENTS.md). Исходный архив использует
+предыдущую версию датасета и другое определение directional horizon. Отдельный
+[канонический rerun](NEWS_DIRECTION_CANONICAL_RERUN.md) повторяет все пять
+проверок на dataset SHA `ee4743…` и remaining-direction target: подтверждённого
+улучшения направления также не получено.
 
 ## Код и артефакты
 

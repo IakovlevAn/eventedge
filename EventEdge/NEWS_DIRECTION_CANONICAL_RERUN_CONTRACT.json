@@ -1,0 +1,136 @@
+{
+  "schema_version": "news-direction-canonical-rerun-contract-1.0",
+  "status": "completed_historical_development_rerun",
+  "production_effect": "none",
+  "dataset": {
+    "sha256": "ee47437edd61f2f444f32e1d85e7562fb0a07c47750651217ffc898c55ca632c",
+    "rows": 1238,
+    "evaluation_rows": 480,
+    "information_groups": 1108
+  },
+  "protocol": {
+    "target": "sign(abnormal return from publication+5m to publication+240m)",
+    "folds": 7,
+    "evaluation_months": [
+      "2026-03",
+      "2026-04",
+      "2026-05",
+      "2026-06",
+      "2026-07",
+      "2026-08",
+      "2026-09"
+    ],
+    "validation_months": 2,
+    "embargo_hours": 72,
+    "group_key": "event_group_id",
+    "bootstrap_iterations": 2000,
+    "evaluation_windows_are_reused_development_data": true,
+    "evaluation_outcomes_used_for_selection": false
+  },
+  "controls": {
+    "canonical_dataset_rebuilt_byte_exact": true,
+    "benchmark_only_label_availability_corrections": 23,
+    "evaluation_fold_hashes_match_canonical_contract": true,
+    "remaining_target_coverage": "480/480",
+    "config6_rows": 157,
+    "config6_hit_rate": 0.5095541401273885
+  },
+  "evidence": {
+    "report": "EventEdge/NEWS_DIRECTION_CANONICAL_RERUN.md",
+    "runner": "experiments/canonical_rerun/run_experiment.py",
+    "protocol": "experiments/canonical_rerun/protocol.py",
+    "notebook": "experiments/canonical_rerun/canonical_direction_rerun.ipynb"
+  },
+  "stages": [
+    {
+      "number": 1,
+      "id": "canonical-finbert",
+      "decision": "no_go",
+      "headline": {
+        "finbert_direct_full_population_roc_auc": 0.5330631808278867,
+        "finbert_direct_full_population_hit_rate": 0.5,
+        "config6_logistic_without_finbert_hit_rate": 0.5031847133757962,
+        "config6_logistic_with_finbert_hit_rate": 0.49044585987261147
+      },
+      "interpretation": "Frozen sentiment is weakly ranked but does not improve the selected direction classifier."
+    },
+    {
+      "number": 2,
+      "id": "canonical-causal-market",
+      "decision": "materiality_confirmed_direction_unconfirmed",
+      "headline": {
+        "materiality_legacy_pr_auc": 0.6418814286460572,
+        "materiality_reaction_core_pr_auc": 0.6855385776936966,
+        "materiality_pr_auc_delta_ci95": [
+          0.016126032412908338,
+          0.07208363313853991
+        ],
+        "post_hoc_best_direction_model": "reaction_microstructure_finbert",
+        "post_hoc_best_direction_roc_auc": 0.5434771241830065,
+        "post_hoc_best_direction_hit_rate": 0.5416666666666666,
+        "direction_roc_auc_delta_vs_reaction_core_ci95": [
+          -0.018079364719138687,
+          0.07364211560719268
+        ],
+        "direction_accuracy_delta_vs_reaction_core_ci95": [
+          -0.03743186463774699,
+          0.06526423200859292
+        ]
+      },
+      "interpretation": "The five-minute reaction remains useful for materiality. The best direction row is post hoc and both paired intervals include zero."
+    },
+    {
+      "number": 3,
+      "id": "canonical-horizons-abstention-neutral",
+      "decision": "no_go",
+      "headline": {
+        "best_selective_horizon_minutes": 60,
+        "best_selective_actual_coverage": 0.25,
+        "best_selective_hit_rate": 0.5666666666666667,
+        "best_selective_cluster_ci95": [
+          0.4728575352499542,
+          0.6574136636636637
+        ],
+        "passing_selective_configurations": 0,
+        "passing_ternary_configurations": 0,
+        "remaining_240m_full_coverage_hit_rate": 0.5270833333333333
+      },
+      "interpretation": "Abstention raises the point estimate only at low coverage; uncertainty still crosses 50%, and neutral-class models fail the gate."
+    },
+    {
+      "number": 4,
+      "id": "canonical-structured-news",
+      "decision": "no_go",
+      "headline": {
+        "reaction_core_roc_auc": 0.5142135076252723,
+        "reaction_core_hit_rate": 0.5270833333333333,
+        "structured_full_roc_auc": 0.5100130718954249,
+        "structured_full_hit_rate": 0.49583333333333335,
+        "structured_full_tfidf_roc_auc": 0.5017864923747276,
+        "structured_full_tfidf_hit_rate": 0.51875
+      },
+      "interpretation": "Structured text and TF-IDF do not improve the reaction-core control."
+    },
+    {
+      "number": 5,
+      "id": "canonical-small-nonlinear",
+      "decision": "no_go",
+      "headline": {
+        "reaction_core_roc_auc": 0.5142135076252723,
+        "reaction_core_hit_rate": 0.5270833333333333,
+        "hist_gradient_boosting_roc_auc": 0.5206100217864924,
+        "hist_gradient_boosting_hit_rate": 0.50625,
+        "extra_trees_roc_auc": 0.5101786492374728,
+        "extra_trees_hit_rate": 0.4708333333333333,
+        "nonlinear_blend_roc_auc": 0.5167407407407407,
+        "nonlinear_blend_hit_rate": 0.49166666666666664
+      },
+      "interpretation": "Small nonlinear models add no robust directional benefit and stay cheap enough for research only."
+    }
+  ],
+  "overall_decision": {
+    "direction": "no_go",
+    "materiality": "confirmed_development_signal",
+    "product_positioning": "prioritize important-event discovery and explanation; do not expose direction as a reliable forecast"
+  }
+}
