@@ -1730,18 +1730,18 @@ function EvalsScreen() {
         </div>
       </section>
 
-      <section className="eval-warning"><CircleGauge size={17} /><div><strong>Определяем ли важные новости</strong><span>В shadow‑режиме прогноз ни на что не влияет. Через четыре часа факт считается важным, если абсолютное движение акции относительно IMOEX2 достигло 0,5 п.п. Решение «важно» фиксируется по порогу 50% coverage из validation и после результата не меняется.</span></div></section>
+      <section className="eval-warning"><CircleGauge size={17} /><div><strong>Определяем ли важные новости</strong><span>В shadow‑режиме прогноз ни на что не влияет. Через четыре часа факт считается важным, если абсолютное движение акции относительно IMOEX2 достигло 0,5 п.п. Повторные публикации одного инфоповода объединяются; в оценку входит самая ранняя.</span></div></section>
 
       {materiality.status === "disabled" ? <div className="empty-state"><CircleGauge size={22} /><strong>Materiality shadow выключен</strong><span>Предсказания и их outcomes начнут накапливаться после включения NEWS_MATERIALITY_MODE=shadow.</span></div> : <>
         <section className="eval-kpis eval-kpis--materiality">
-          <article><span>Получили outcome</span><strong>{materialitySummary.evaluated || 0}/{materialitySummary.ready_predictions || 0}</strong><small>ещё {materialitySummary.pending || 0} ждут 4 часа · {materialitySummary.unavailable || 0} без точного окна</small></article>
+          <article><span>Получили outcome</span><strong>{materialitySummary.evaluated || 0}/{materialitySummary.ready_predictions || 0}</strong><small>ещё {materialitySummary.pending || 0} ждут 4 часа · {materialitySummary.unavailable || 0} без окна · {materialitySummary.deduplicated_publications || 0} повторов объединено</small></article>
           <article><span>Precision · отметили важной</span><strong>{metricPercent(materialitySummary.precision_pct)}</strong><small>{materialitySummary.confusion?.true_positive || 0} верных из {(materialitySummary.predicted_material || 0)} выбранных моделью</small></article>
           <article><span>Recall · нашли важных</span><strong>{metricPercent(materialitySummary.recall_pct)}</strong><small>найдено {materialitySummary.confusion?.true_positive || 0} из {materialitySummary.actual_material || 0} фактически важных</small></article>
           <article><span>Accuracy / ROC-AUC</span><strong>{metricPercent(materialitySummary.accuracy_pct)}</strong><small>majority {metricPercent(materialitySummary.majority_baseline_accuracy_pct)} · AUC {materialitySummary.roc_auc ?? "—"} · Brier {materialitySummary.brier_score ?? "—"}</small></article>
         </section>
 
         <section className="outcomes-card materiality-outcomes-card">
-          <div className="section-heading"><span><CircleGauge size={15} /> Реакция после оценённых новостей</span><small>текущая версия {materiality.model_version || "—"} · benchmark {materiality.benchmark_ticker || "IMOEX2"}</small></div>
+          <div className="section-heading"><span><CircleGauge size={15} /> Реакция после оценённых инфоповодов</span><small>текущая версия {materiality.model_version || "—"} · benchmark {materiality.benchmark_ticker || "IMOEX2"}</small></div>
           <div className="eval-table-wrap">
             <table className="eval-table materiality-outcomes-table">
               <thead><tr><th>Новость</th><th>Прогноз</th><th>Факт за 4 часа</th><th>Результат</th></tr></thead>
