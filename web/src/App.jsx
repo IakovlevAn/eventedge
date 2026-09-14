@@ -1682,6 +1682,10 @@ function EvalsScreen() {
   if (status !== "ready") return <DataState error={status === "error" ? error : ""} onRetry={() => window.location.reload()} />;
 
   const { summary, breakdowns, relationships, quality_series: qualitySeries, outcomes } = payload.data;
+  const materiality = payload.data.materiality || { status: "disabled", summary: {}, outcomes: [] };
+  const materialitySummary = materiality.summary || {};
+  const materialityOutcomes = materiality.outcomes || [];
+  const metricPercent = (value) => value === null || value === undefined ? "—" : `${value}%`;
   const liveSummary = summary.cohorts?.live || summary;
   const hitRate = liveSummary.hit_rate_pct === null ? "—" : `${liveSummary.hit_rate_pct}%`;
   const averageReturn = liveSummary.average_signed_return_pct === null ? "—" : formatPct(liveSummary.average_signed_return_pct);
@@ -1715,7 +1719,7 @@ function EvalsScreen() {
   return (
     <main className="screen section-screen evals-screen">
       <section className="page-hero evals-hero">
-        <div><span className="eyebrow"><Activity size={13} /> Проверка реальностью</span><h1>Evals: сигналы в цифрах</h1><p>Каждый сохранённый сигнал получает outcome и ценовой ряд. Hit rate считается только для live‑сигналов с направлением вверх или вниз; нейтральные решения хранятся, но в метрику направления не входят.</p></div>
+        <div><span className="eyebrow"><Activity size={13} /> Проверка реальностью</span><h1>Evals: модели в цифрах</h1><p>Здесь отдельно проверяются два вопроса: угадала ли формула направление и смогла ли ML‑модель заранее выделить новость с заметной реакцией цены.</p></div>
         <div className="eval-hero-actions">
           <div className={`eval-live${error ? " is-stale" : ""}`}><i /><span><strong>{error ? "Показываем последний snapshot" : "Snapshot каждые 10 минут"}</strong><small>{payload.meta.generated_at ? `${formatRelative(payload.meta.generated_at)} · ` : "Расчёт новой эпохи ожидается · "}основной горизонт 4 часа</small></span></div>
           <FilterSelect className="eval-model-filter" label="Эпоха модели" value={activeEpochKey} onChange={setSelectedEpochKey} options={orderedModelEpochs.map((epoch) => ({ value: `${epoch.model_version}::${epoch.config_version}`, label: `${epoch.model_version} · cfg ${epoch.config_version} · n=${epoch.signals}` }))} />
@@ -1725,6 +1729,38 @@ function EvalsScreen() {
           </div>
         </div>
       </section>
+
+      <section className="eval-warning"><CircleGauge size={17} /><div><strong>Определяем ли важные новости</strong><span>В shadow‑режиме прогноз ни на что не влияет. Через четыре часа факт считается важным, если абсолютное движение акции относительно IMOEX2 достигло 0,5 п.п. Решение «важно» фиксируется по порогу 50% coverage из validation и после результата не меняется.</span></div></section>
+
+      {materiality.status === "disabled" ? <div className="empty-state"><CircleGauge size={22} /><strong>Materiality shadow выключен</strong><span>Предсказания и их outcomes начнут накапливаться после включения NEWS_MATERIALITY_MODE=shadow.</span></div> : <>
+        <section className="eval-kpis eval-kpis--materiality">
+          <article><span>Получили outcome</span><strong>{materialitySummary.evaluated || 0}/{materialitySummary.ready_predictions || 0}</strong><small>ещё {materialitySummary.pending || 0} ждут 4 часа · {materialitySummary.unavailable || 0} без точного окна</small></article>
+          <article><span>Precision · отметили важной</span><strong>{metricPercent(materialitySummary.precision_pct)}</strong><small>{materialitySummary.confusion?.true_positive || 0} верных из {(materialitySummary.predicted_material || 0)} выбранных моделью</small></article>
+          <article><span>Recall · нашли важных</span><strong>{metricPercent(materialitySummary.recall_pct)}</strong><small>найдено {materialitySummary.confusion?.true_positive || 0} из {materialitySummary.actual_material || 0} фактически важных</small></article>
+          <article><span>Accuracy / ROC-AUC</span><strong>{metricPercent(materialitySummary.accuracy_pct)}</strong><small>majority {metricPercent(materialitySummary.majority_baseline_accuracy_pct)} · AUC {materialitySummary.roc_auc ?? "—"} · Brier {materialitySummary.brier_score ?? "—"}</small></article>
+        </section>
+
+        <section className="outcomes-card materiality-outcomes-card">
+          <div className="section-heading"><span><CircleGauge size={15} /> Реакция после оценённых новостей</span><small>текущая версия {materiality.model_version || "—"} · benchmark {materiality.benchmark_ticker || "IMOEX2"}</small></div>
+          <div className="eval-table-wrap">
+            <table className="eval-table materiality-outcomes-table">
+              <thead><tr><th>Новость</th><th>Прогноз</th><th>Факт за 4 часа</th><th>Результат</th></tr></thead>
+              <tbody>{materialityOutcomes.map((outcome) => {
+                const resolved = outcome.status === "evaluated";
+                const predictedMaterial = outcome.predicted_material;
+                const actualMaterial = outcome.actual_material;
+                return <tr key={outcome.prediction_id}>
+                  <td>{outcome.news ? <a href={outcome.news.url} target="_blank" rel="noreferrer"><span>{outcome.news.source_id} · {outcome.ticker}</span><strong>{outcome.news.title}</strong></a> : <strong>{outcome.ticker}</strong>}</td>
+                  <td><strong>{Math.round((outcome.probability || 0) * 100)}%</strong><small>{predictedMaterial ? "модель: важно" : "модель: обычно"}</small></td>
+                  <td className={Number(outcome.abnormal_return_pct) >= 0 ? "market-positive" : "market-negative"}>{resolved ? formatPct(outcome.abnormal_return_pct) : "—"}<small>{resolved ? `${actualMaterial ? "важная" : "обычная"} · акция минус IMOEX2` : "точное окно недоступно"}</small></td>
+                  <td><span className={`eval-verdict ${!resolved ? "is-unavailable" : outcome.verdict ? "is-hit" : "is-miss"}`}>{!resolved ? <><Clock3 size={11} /> Нет outcome</> : outcome.verdict ? <><Check size={11} /> Верно</> : <><X size={11} /> Ошибка</>}</span></td>
+                </tr>;
+              })}</tbody>
+            </table>
+          </div>
+          {!materialityOutcomes.length && <div className="empty-state"><Clock3 size={22} /><strong>Ждём первые outcomes</strong><span>Shadow уже считает прогнозы; проверка появляется после доступного четырёхчасового окна.</span></div>}
+        </section>
+      </>}
 
       <section className="eval-warning"><ShieldCheck size={17} /><div><strong>Это технический eval, а не доказательство доходности</strong><span>Общая статистика покрывает весь ledger. Hit rate включает только directional live‑сигналы; нейтральные и ретроспективные outcome остаются в выгрузке для исследования.</span></div></section>
 

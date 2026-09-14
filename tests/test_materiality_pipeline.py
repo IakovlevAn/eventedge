@@ -16,6 +16,7 @@ from eventedge.materiality_pipeline import (
     rank_news_by_materiality,
     refresh_materiality_predictions,
     select_materiality_candidates,
+    select_materiality_outcome_candidates,
 )
 from eventedge.storage import (
     MaterialityPredictionRecord,
@@ -375,6 +376,88 @@ def test_refresh_is_idempotent_after_ready_prediction() -> None:
     assert first["ready"] == 1
     assert second["attempted"] == 0
     assert len(stored.materiality_predictions) == 1
+
+
+def test_refresh_persists_due_materiality_outcome() -> None:
+    async def scenario() -> tuple[dict[str, object], MaterialityPredictionRecord]:
+        published_at = datetime(2026, 9, 10, 9, tzinfo=UTC)
+        news = _news("news_outcome", published_at)
+        prediction = _prediction(news, probability=0.8)
+        repository = MemoryNewsRepository()
+        await repository.ingest(
+            "materiality-outcome-ingest",
+            NewsDocument(
+                source_id=news.source_id,
+                external_id=news.external_id,
+                published_at=news.published_at,
+                received_at=news.received_at,
+                title=news.title,
+                url=news.url,
+                content=news.content,
+                language=news.language,
+                source_metadata=news.source_metadata,
+                payload_hash="materiality-outcome-payload",
+            ),
+            generate_signals=False,
+        )
+        stored_news = (await repository.list_news(source_id=None, limit=1))[0]
+        prediction = replace(prediction, news_id=stored_news.id)
+        await repository.upsert_materiality_prediction(prediction)
+        entry = prediction.decision_at + timedelta(minutes=1)
+        target = entry + timedelta(hours=4)
+
+        class OutcomeMarketData:
+            async def candles(
+                self,
+                ticker: str,
+                *,
+                interval: int = 10,
+                lookback_days: int = 14,
+            ) -> dict[str, object]:
+                assert interval == 1
+                start = 200.0 if ticker == "IMOEX2" else 100.0
+                finish = 200.2 if ticker == "IMOEX2" else 101.0
+                return _market_payload([(entry, start), (target, finish)])
+
+        runtime = runtime_from_environment({"NEWS_MATERIALITY_MODE": "shadow"})
+        result = await refresh_materiality_predictions(
+            repository,
+            OutcomeMarketData(),
+            runtime,
+            now=target + timedelta(minutes=1),
+        )
+        current = (await repository.list_news(source_id=None, limit=1))[0]
+        return result, current.materiality_predictions[0]
+
+    result, prediction = asyncio.run(scenario())
+
+    assert result["attempted"] == 0
+    assert result["outcomes_evaluated"] == 1
+    assert prediction.outcome_4h is not None
+    assert prediction.outcome_4h["actual_material"] is True
+    assert prediction.outcome_4h["verdict"] is False
+
+
+def test_outcome_candidate_selection_requires_due_current_ready_prediction() -> None:
+    runtime = runtime_from_environment({"NEWS_MATERIALITY_MODE": "shadow"})
+    assert runtime.model is not None
+    now = datetime(2026, 9, 10, 14, tzinfo=UTC)
+    due = _news("due_outcome", now - timedelta(hours=5))
+    due = replace(due, materiality_predictions=(_prediction(due, probability=0.7),))
+    pending = _news("pending_outcome", now - timedelta(hours=2))
+    pending = replace(
+        pending,
+        materiality_predictions=(_prediction(pending, probability=0.7),),
+    )
+
+    selected = select_materiality_outcome_candidates(
+        [pending, due],
+        model_version=runtime.model.model_version,
+        artifact_payload_sha256=runtime.model.artifact_payload_sha256,
+        now=now,
+    )
+
+    assert [candidate.prediction.news_id for candidate in selected] == ["due_outcome"]
 
 
 def test_rank_mode_uses_probability_only_within_publication_day() -> None:

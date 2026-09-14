@@ -5461,6 +5461,13 @@ button.chart-event-detail.is-active {
 .outcomes-table td:nth-child(2) a strong { display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; font-size: 9px; font-weight: 540; line-height: 1.4; white-space: normal; text-overflow: clip; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .outcomes-table td:nth-child(2) a:hover strong { color: #fff; }
 
+.materiality-outcomes-table { min-width: 760px; table-layout: fixed; }
+.materiality-outcomes-table th:first-child { width: 52%; }
+.materiality-outcomes-table td:first-child a { display: flex; min-width: 0; flex-direction: column; gap: 4px; color: inherit; text-decoration: none; }
+.materiality-outcomes-table td:first-child a span { color: #626a75; font-size: 7px; text-transform: uppercase; }
+.materiality-outcomes-table td:first-child a strong { display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; font-size: 9px; font-weight: 540; line-height: 1.4; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.materiality-outcomes-table td:first-child a:hover strong { color: #fff; }
+
 @media (max-width: 1040px) {
   .quant-factor-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .eval-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }

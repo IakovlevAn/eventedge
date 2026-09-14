@@ -8,9 +8,9 @@ on:
         required: true
         type: string
       news_materiality_mode:
-        description: Materiality inference rollout mode (disabled is the safe default)
+        description: Materiality inference rollout mode (shadow is the safe default)
         required: true
-        default: disabled
+        default: shadow
         type: choice
         options:
           - disabled

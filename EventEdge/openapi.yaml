@@ -58,7 +58,7 @@ paths:
   /v1/evals:
     get:
       tags: [Evals]
-      summary: Evaluate stored signals and expose analytical quality slices
+      summary: Evaluate stored signals and news-materiality predictions
       operationId: listEvals
       security: []
       parameters:
@@ -77,8 +77,9 @@ paths:
       responses:
         '200':
           description: >-
-            Outcomes for every stored signal, aggregate all-signal metrics and
-            separate live/retrospective point-in-time cohorts.
+            Outcomes for every stored signal, aggregate all-signal metrics,
+            separate live/retrospective cohorts and current news-materiality
+            quality against four-hour abnormal returns.
           content:
             application/json:
               schema:
@@ -1371,7 +1372,7 @@ components:
         data:
           type: object
           additionalProperties: true
-          required: [summary, breakdowns, relationships, quality_series, outcomes]
+          required: [summary, breakdowns, relationships, quality_series, outcomes, materiality]
         meta:
           type: object
           additionalProperties: true
@@ -1419,6 +1420,7 @@ components:
         - feature_schema_version
         - created_at
         - updated_at
+        - outcome_4h
       properties:
         id:
           type: string
@@ -1481,6 +1483,10 @@ components:
         updated_at:
           type: string
           format: date-time
+        outcome_4h:
+          type: object
+          additionalProperties: true
+          nullable: true
 
     NewsMateriality:
       type: object

@@ -117,7 +117,15 @@ def test_memory_repository_attaches_idempotent_materiality_predictions() -> None
 
 
 def test_materiality_prediction_ydb_serialization_round_trip() -> None:
-    prediction = _materiality_prediction()
+    prediction = replace(
+        _materiality_prediction(),
+        outcome_4h={
+            "status": "evaluated",
+            "actual_material": True,
+            "predicted_material": True,
+            "verdict": True,
+        },
+    )
     parameters = materiality_prediction_parameters(prediction)
     payload = json.loads(str(parameters["$payload"].value))
     row = SimpleNamespace(
@@ -136,6 +144,7 @@ def test_materiality_prediction_ydb_serialization_round_trip() -> None:
     )
 
     assert materiality_prediction_from_row(row) == prediction
+    assert payload["outcome_4h"]["verdict"] is True
     assert "UPSERT INTO `materiality_predictions`" in UPSERT_MATERIALITY_PREDICTION_QUERY
     assert "news_id IN $news_ids" in SELECT_MATERIALITY_PREDICTIONS_QUERY
     assert "model_version = $model_version" in SELECT_MATERIALITY_PREDICTIONS_BY_MODEL_QUERY
