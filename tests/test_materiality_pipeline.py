@@ -277,7 +277,7 @@ def test_inference_defers_unavailable_market_data_without_losing_provenance() ->
     assert prediction.model_version == runtime.model.model_version
 
 
-def test_unseen_source_is_scored_but_not_admitted_to_ranking() -> None:
+def test_unseen_source_is_scored_and_admitted_to_ranking() -> None:
     runtime = runtime_from_environment({"NEWS_MATERIALITY_MODE": "shadow"})
     assert runtime.model is not None
     published_at = datetime(2026, 9, 10, 9, tzinfo=UTC)
@@ -293,7 +293,24 @@ def test_unseen_source_is_scored_but_not_admitted_to_ranking() -> None:
     )
 
     assert prediction.status == "ready"
-    assert not prediction.eligible_for_ranking
+    assert prediction.eligible_for_ranking
+
+
+def test_current_policy_admits_stored_unseen_source_prediction() -> None:
+    runtime = runtime_from_environment({"NEWS_MATERIALITY_MODE": "shadow"})
+    published_at = datetime(2026, 9, 10, 9, tzinfo=UTC)
+    news = _news("news_stored_unseen_source", published_at, source_id="interfax")
+    news = replace(
+        news,
+        materiality_predictions=(
+            replace(_prediction(news, probability=0.7), eligible_for_ranking=False),
+        ),
+    )
+
+    payload = materiality_api_payload(news, runtime=runtime)
+
+    assert payload is not None
+    assert payload["predictions"][0]["eligible_for_ranking"] is True
 
 
 def test_missing_five_minute_reaction_is_not_admitted_to_ranking() -> None:

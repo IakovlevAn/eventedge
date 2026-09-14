@@ -257,7 +257,6 @@ async def infer_materiality_prediction(
         selected_at_coverage_pct=score.selected_at_coverage_pct,
         eligible_for_ranking=(
             model.category_was_seen("ticker", candidate.ticker)
-            and model.category_was_seen("source_id", candidate.news.source_id)
             and row.numeric["reaction_abnormal_pct"] is not None
         ),
         missing_features=missing_materiality_features(row),
@@ -312,7 +311,12 @@ def materiality_api_payload(
         ),
         "model_version": runtime.model.model_version,
         "predictions": [
-            prediction.as_api_dict()
+            {
+                **prediction.as_api_dict(),
+                "eligible_for_ranking": _prediction_is_rankable(
+                    prediction, runtime.model
+                ),
+            }
             for prediction in sorted(
                 predictions,
                 key=lambda value: (value.ticker, value.updated_at, value.id),
@@ -370,10 +374,23 @@ def _ranking_probability(
         if prediction.model_version == model.model_version
         and prediction.artifact_payload_sha256 == model.artifact_payload_sha256
         and prediction.status == "ready"
-        and prediction.eligible_for_ranking
+        and _prediction_is_rankable(prediction, model)
         and prediction.calibrated_probability is not None
     ]
     return max(probabilities, default=None)
+
+
+def _prediction_is_rankable(
+    prediction: MaterialityPredictionRecord,
+    model: PortableMaterialityModel,
+) -> bool:
+    """Apply the current rank policy to new and previously stored predictions."""
+    return (
+        prediction.status == "ready"
+        and prediction.calibrated_probability is not None
+        and model.category_was_seen("ticker", prediction.ticker)
+        and "reaction_abnormal_pct" not in prediction.missing_features
+    )
 
 
 def _deferred_prediction(
