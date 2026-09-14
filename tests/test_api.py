@@ -12,8 +12,10 @@ from fastapi.testclient import TestClient
 import eventedge.main as main_module
 from eventedge.evals import EVALUATION_METHODOLOGY_VERSION
 from eventedge.main import app
+from eventedge.materiality import runtime_from_environment as materiality_runtime
 from eventedge.storage import (
     EvaluationEpochRecord,
+    MaterialityPredictionRecord,
     MemoryNewsRepository,
     NewsDocument,
     NewsRecord,
@@ -1040,8 +1042,19 @@ def test_maintenance_timer_refreshes_models_and_persisted_evals(
     async def fake_load(*args: object, **kwargs: object) -> tuple[object, ...]:
         return ([{"signal_id": "sig_1"}], [], {}, {}, [])
 
+    async def fake_materiality(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "status": "ok",
+            "attempted": 1,
+            "ready": 1,
+            "deferred": 0,
+            "failed": 0,
+            "remaining": 0,
+        }
+
     monkeypatch.setattr(main_module, "reprocess_signal_candidates_batch", fake_reprocess)
     monkeypatch.setattr(main_module, "_load_evaluation_material", fake_load)
+    monkeypatch.setattr(main_module, "refresh_materiality_predictions", fake_materiality)
 
     response = client.post(
         "/",
@@ -1066,6 +1079,14 @@ def test_maintenance_timer_refreshes_models_and_persisted_evals(
         "rejection_reasons": {},
         "outcomes": 1,
         "epochs": 0,
+        "materiality": {
+            "status": "ok",
+            "attempted": 1,
+            "ready": 1,
+            "deferred": 0,
+            "failed": 0,
+            "remaining": 0,
+        },
     }
 
 
@@ -1108,6 +1129,14 @@ def test_maintenance_timer_defers_work_before_trigger_timeout(
         "status": "partial",
         "deferred": ["signal_reprocessing"],
         "deadline_seconds": 150.0,
+        "materiality": {
+            "status": "disabled",
+            "attempted": 0,
+            "ready": 0,
+            "deferred": 0,
+            "failed": 0,
+            "remaining": 0,
+        },
     }
     assert eval_refreshed is True
 
@@ -1153,6 +1182,14 @@ def test_maintenance_timer_reprocesses_when_eval_refresh_times_out(
         "status": "partial",
         "deferred": ["eval_refresh"],
         "deadline_seconds": 60.0,
+        "materiality": {
+            "status": "disabled",
+            "attempted": 0,
+            "ready": 0,
+            "deferred": 0,
+            "failed": 0,
+            "remaining": 0,
+        },
     }
 
 
@@ -1854,6 +1891,85 @@ def test_news_coverage_aggregates_bounded_signal_rejection_reasons() -> None:
     assert sber["relevant_news"] == 1
     assert sber["analysis_candidates"] == 1
     assert sber["signaled_news"] == 0
+
+
+def test_news_projection_exposes_materiality_and_ranks_only_ready_slots() -> None:
+    runtime = materiality_runtime({"NEWS_MATERIALITY_MODE": "rank"})
+    assert runtime.model is not None
+    day = datetime(2026, 9, 10, 8, tzinfo=UTC)
+
+    def news(
+        news_id: str,
+        published_at: datetime,
+        probability: float | None,
+    ) -> NewsRecord:
+        predictions: tuple[MaterialityPredictionRecord, ...] = ()
+        if probability is not None:
+            decision_at = published_at + timedelta(minutes=5)
+            predictions = (
+                MaterialityPredictionRecord(
+                    id=f"mat_{news_id}",
+                    news_id=news_id,
+                    ticker="SBER",
+                    decision_at=decision_at,
+                    data_cutoff_at=decision_at,
+                    status="ready",
+                    reason=None,
+                    raw_probability=probability,
+                    calibrated_probability=probability,
+                    selected_at_coverage_pct={"calibrated": (100,)},
+                    eligible_for_ranking=True,
+                    missing_features=(),
+                    model_id=runtime.model.model_id,
+                    model_version=runtime.model.model_version,
+                    artifact_payload_sha256=runtime.model.artifact_payload_sha256,
+                    feature_schema_version="news-materiality-runtime-features-1.0",
+                    created_at=decision_at,
+                    updated_at=decision_at,
+                ),
+            )
+        return NewsRecord(
+            id=news_id,
+            source_id="telegram_markettwits",
+            external_id=news_id,
+            published_at=published_at,
+            received_at=published_at,
+            title=f"Сбербанк сообщил о событии {news_id}",
+            url=f"https://example.com/{news_id}",
+            content="Сбербанк сообщил о существенном событии.",
+            language="ru",
+            source_metadata={
+                "event_candidate": True,
+                "analysis_candidate": True,
+                "tickers": ["SBER"],
+            },
+            created_at=published_at,
+            materiality_predictions=predictions,
+        )
+
+    pending = news("news_pending", day + timedelta(hours=3), None)
+    low = news("news_low", day + timedelta(hours=2), 0.2)
+    high = news("news_high", day + timedelta(hours=1), 0.9)
+
+    payload = main_module.build_news_response_payload(
+        [pending, low, high],
+        [],
+        source_id=None,
+        scope="company",
+        limit=100,
+        materiality_runtime=runtime,
+    )
+
+    assert [item["id"] for item in payload["data"]] == [
+        "news_pending",
+        "news_high",
+        "news_low",
+    ]
+    assert payload["data"][0]["market_materiality"]["status"] == "pending"
+    assert payload["data"][1]["market_materiality"]["max_probability"] == 0.9
+    prediction = payload["data"][1]["market_materiality"]["predictions"][0]
+    assert prediction["data_cutoff_at"] == "2026-09-10T09:05:00Z"
+    assert prediction["eligible_for_ranking"] is True
 
 
 def test_public_news_and_event_surfaces_hide_unrouted_storage_noise() -> None:

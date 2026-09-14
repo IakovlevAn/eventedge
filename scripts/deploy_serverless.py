@@ -21,6 +21,11 @@ def build_payload(
 ) -> dict[str, object]:
     if component not in {"api", "worker"}:
         raise ValueError(f"Unsupported EventEdge component: {component}")
+    materiality_mode = environment.get("NEWS_MATERIALITY_MODE", "disabled")
+    if materiality_mode not in {"disabled", "shadow", "rank"}:
+        raise ValueError(
+            "NEWS_MATERIALITY_MODE must be disabled, shadow or rank"
+        )
     is_worker = component == "worker"
     runtime_environment = {
         "APP_ENV": "prod",
@@ -39,6 +44,8 @@ def build_payload(
         # bounded below the revision's 180-second execution timeout.
         "BACKFILL_BATCH_LIMIT": "1",
         "BACKFILL_CONCURRENCY": "1",
+        "NEWS_MATERIALITY_MODE": materiality_mode,
+        "NEWS_MATERIALITY_BATCH_LIMIT": "8",
         "EVENTEDGE_MONTHLY_BUDGET_RUB": "15000",
     }
     if admin_key := environment.get("EVENTEDGE_ADMIN_KEY"):

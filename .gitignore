@@ -29,3 +29,7 @@ node_modules/
 .uv-cache/
 *.egg-info/
 src/eventedge/static/
+
+# Local research datasets and generated model artifacts
+.local-data/
+.local-artifacts/

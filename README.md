@@ -1,26 +1,34 @@
 # EventEdge
 
-EventEdge — API-first платформа краткосрочных сигналов по российским акциям.
+EventEdge — API-first агрегатор новостей и инструмент поддержки инвестора на
+российском рынке. Сервис объединяет публикации в события, извлекает проверяемые
+факты, рассчитывает сигналы и сохраняет последующую реакцию рынка.
 
-Текущий live-контур сочетает новостной сигнал с детерминированными рыночными
-факторами. `GET /v1/assessments` возвращает оценки всего списка наблюдения, а
-`GET /v1/evals` — фактическую реакцию цены, сводную статистику и аналитические разрезы.
-`GET /v1/evals/export` отдаёт outcomes и event-time временные ряды в CSV или JSON.
-Outcomes можно скачать одним небольшим файлом; большой raw-корпус читается
-server-side страницами по `next_cursor`, не упираясь в лимит ответа API Gateway.
-Каждая комбинация `model_version + config_version` хранится и выбирается отдельно. Evals
-сохраняет outcome и raw-свечи для каждого `signal_id`, включая neutral, market/sector
-и ретроспективные решения. Point-in-time валидность не удаляет строку, а
-помечает её cohort `live` или `retrospective`.
+Production использует rule-based `signal-engine-0.6.1`, `rules-0.3.0` и
+`config_version=7`. В репозитории ML-модель значимости упакована в переносимый
+JSON и подключена к live pipeline через выключенный по умолчанию
+`disabled/shadow/rank` rollout. ML-модель направления не прошла контроли и не
+внедряется; production этой веткой не изменён.
 
-- [Понятное описание продукта](EventEdge/README.md)
+## Документация
+
+- [Описание продукта](EventEdge/README.md)
+- [ML pipeline: данные, обучение, inference и результаты](EventEdge/ML_PIPELINE.md)
 - [Технический дизайн](EventEdge/TECHNICAL_DESIGN.md)
-- [Направление UX/UI](EventEdge/DESIGN_SYSTEM.md)
 - [OpenAPI-контракт](EventEdge/openapi.yaml)
 - [Подключение Yandex Cloud](EventEdge/CLOUD_SETUP.md)
+- [Направление UX/UI](EventEdge/DESIGN_SYSTEM.md)
 - [Бюджет и технические лимиты](BUDGET.md)
 
+Машиночитаемые ML-контракты:
+
+- [lineage датасета](EventEdge/DATASET_LINEAGE_CONTRACT.json);
+- [locked benchmark](EventEdge/NEWS_MODEL_BENCHMARK_CONTRACT.json);
+- [реестр артефактов и метрик](EventEdge/ML_ARTIFACT_MANIFEST.json).
+
 ## Локальная проверка
+
+Требуются Python 3.13 и `uv`:
 
 ```bash
 uv sync --locked --dev
@@ -29,129 +37,44 @@ uv run pytest
 uv run python scripts/validate_openapi.py
 ```
 
-## Offline-проверка качества маршрутизации
-
-Размеченные примеры хранятся в JSONL по схеме `quality-example-1.0`. По
-умолчанию evaluator принимает только `label_source=human`: ответы LLM и
-синтетические fixtures нельзя незаметно использовать как financial ground
-truth. Повторные публикации одного события должны иметь общий `event_id`, чтобы
-временное разбиение по `received_at` не разносило их между train, validation и
-test. События, пересекающие временную границу, попадают в `purged`, а не в
-соседние выборки. `published_at`, `received_at` и `labeled_at` всегда содержат
-timezone.
+Для SELECT-only экспорта YDB дополнительно установите export group:
 
 ```bash
-PYTHONPATH=src uv run python -m scripts.evaluate_quality_dataset \
-  --dataset path/to/human-quality-labels.jsonl \
-  --include-split
+uv sync --locked --dev --group export
 ```
 
-Команда только читает локальный файл, сравнивает метки с текущим deterministic
-router и печатает воспроизводимый JSON-отчёт. Она не вызывает LLM, не пишет в
-YDB и не изменяет production.
+Сетевые collectors и cloud-команды не запускаются тестами автоматически. Они
+работают только по явной команде; production не изменяется локальным ML
+pipeline.
 
-CI дополнительно защищает текущий signal-router синтетическим regression
-contract:
+## Ключевые локальные команды
+
+Проверка и byte-exact пересборка принятого ML checkpoint:
 
 ```bash
-PYTHONPATH=src uv run python -m scripts.check_signal_quality_gate \
+PYTHONPATH=src:. uv run --locked python scripts/verify_dataset_lineage.py \
+  --artifact-root .
+
+PYTHONPATH=src:. uv run --locked python -m scripts.rebuild_canonical_signal_dataset \
+  --contract EventEdge/DATASET_LINEAGE_CONTRACT.json \
+  --artifact-root . \
+  --output-root .local-artifacts/canonical-rebuild
+```
+
+Сбор нового Telegram/YDB датасета, MOEX labels, подготовка признаков и
+fit/inference обеих переносимых JSON-моделей описаны одной воспроизводимой
+цепочкой в [ML_PIPELINE.md](EventEdge/ML_PIPELINE.md). Raw корпуса, свечи,
+bundles, модели и predictions намеренно gitignored.
+
+Offline regression gate текущего deterministic signal-router:
+
+```bash
+PYTHONPATH=src:. uv run --locked python -m scripts.check_signal_quality_gate \
   --dataset tests/fixtures/retro_signal_audit.json
 ```
 
-Gate требует 32 примера и precision/recall `1.0`. Это контракт известных
-позитивных и негативных случаев, а не оценка качества на реальном рынке и не
-human ground truth. Для реальной оценки используется описанный выше JSONL с
-`label_source=human`.
-
-## Локальный ML-router перед LLM
-
-Опциональный `ml-router-nb-0.1.0` работает после deterministic signal-router и
-до LLM. Он использует только заголовок, первые 2500 символов текста и категории,
-доступные на момент обработки новости. Рыночные outcomes, результаты LLM и
-будущие данные не входят в признаки. Vocabulary и веса строятся только на
-chronological train partition; одинаковые `event_id` не могут попасть в разные
-partition.
-
-```bash
-PYTHONPATH=src uv run python -m scripts.train_ml_router \
-  --dataset path/to/human-quality-labels.jsonl \
-  --output path/to/ml-router.json
-```
-
-Команда полностью локальная: она не вызывает API, не запускает cloud job и не
-пишет в production. По умолчанию принимаются только human labels. Флаг
-`--allow-synthetic` предназначен для fixtures; полученный артефакт помечается
-`synthetic_test` и запрещён в production.
-
-Runtime по умолчанию выключен (`ML_ROUTER_MODE=disabled`). Для наблюдения без
-изменения маршрута задаются `ML_ROUTER_MODE=shadow` и
-`ML_ROUTER_ARTIFACT_PATH`. В `enforce` разрешено только уверенное отклонение
-нерелевантной новости; accept и abstain продолжают идти в LLM. Startup
-останавливается, если артефакт отсутствует, повреждён или не проходит minimum
-data/precision/recall/coverage gate. В этом PR production-артефакт и
-автоматический backfill не добавляются.
-
-## События и provenance
-
-`GET /v1/events` детерминированно объединяет подтверждающие публикации одного
-типа в событие и сохраняет все `news_ids`, источники, evidence и связанные
-сигналы. ID образуется от самой ранней известной публикации, поэтому позднее
-подтверждение его не меняет; backfill более раннего источника может изменить ID,
-пока события не вынесены в отдельное постоянное хранилище. Полная карточка
-доступна через `GET /v1/events/{event_id}`. `materiality` и `event_type` здесь —
-выход версионированного rule-based extractor, а не будущий market outcome.
-
-## Grounded LLM extraction
-
-`yandexgpt-lite-0.6.1` получает новость как недоверенный JSON-документ и обязан
-вернуть 1–3 короткие дословные `evidence_quotes`. Код принимает результат только
-тогда, когда каждая цитата найдена в реально переданном модели заголовке или
-тексте, а значение каждого структурированного факта присутствует в его
-`source_quote`.
-Цитаты сохраняются вместе с feature set. При неподтверждённой цитате, подмене
-значения, malformed response или сетевой ошибке весь LLM-результат отбрасывается
-и используется deterministic rules fallback. Повторного LLM-вызова нет, поэтому
-guard не увеличивает число платных запросов. Изменение поведения отделено как
-`signal-engine-0.6.1`, `config_version=2`; исторические сигналы не
-переписываются и автоматический backfill не запускается.
-
-## Causal event gate
-
-`candidate-gate-0.7.1` отделяет причинные корпоративные события от чужих
-торговых идей, авторской аналитики и многокомпанейских дайджестов. Такие
-публикации остаются в новостях как контекст, но не вызывают LLM и не создают
-сигналы. Смешанные новостно-аналитические источники не блокируются целиком, а
-совместное событие нескольких эмитентов не считается дайджестом. Новые сигналы
-с версии `config_version=6` отделены от старой истории; история не переписывается и backfill не
-запускается. Уже сохранённое невалидное evidence скрывается только из текущей
-ленты сигналов, оставаясь доступным в истории и фактических eval. Правила
-используют только источник и текст, доступные в момент
-публикации, без будущих цен и outcome-данных.
-
-Для финансовых результатов `rules-0.3.0` связывает изменение с конкретным
-показателем: сокращение убытка не считается ухудшением из-за слова «убыток».
-Отрицание, условность и противоречивые изменения оставляют нейтральную оценку.
-Нейтральный финансовый вывод LLM сохраняется; конфликт с явным изменением
-показателя не превращается в направленный сигнал. Новые решения получают
-`config_version=7`. Это семантика экономического факта, а не измеренная
-вероятность движения цены. Подробности исследования, ограничения Evals и
-план проверки качества — в [исследовании сигналов](EventEdge/SIGNAL_QUALITY_RESEARCH_2026-09-05.md).
-
-## Trustworthy evals
-
-Методология `market-outcome-0.3.0` сохраняет outcome и сырой временной ряд для
-каждого записанного сигнала, включая neutral, market/sector и ретроспективные
-решения. Point-in-time пригодность остаётся отдельным cohort: `live` использует
-фактическое время решения, `retrospective` воспроизводит реакцию от момента,
-когда evidence уже был доступен, и не подменяет live-метрики. `neutral` означает
-отсутствие направленного решения: его ценовая реакция хранится, но он не получает
-вердикт hit/miss и не входит в directional hit rate. Горизонт
-засчитывается только при наличии свечи не позднее 20 минут от целевого времени;
-пропущенное окно получает отдельный `missed_window`, а не вечное ожидание.
-Outcomes и выгрузки сохраняют cohort, decision time, фактическое время наблюдения
-и задержки.
-Комиссии, проскальзывание и поправки на корпоративные действия пока не учтены,
-поэтому eval не является доказательством доходности.
+Это синтетический regression contract известных случаев, а не оценка
+доходности или human ground truth.
 
 ## Локальный UI
 
@@ -163,14 +86,13 @@ npm run dev
 
 ## Конфигурация
 
-Безопасные значения по умолчанию описаны типизированными `dataclass` в
-`src/eventedge/configs/`. Опциональные переопределения находятся в корневом
-каталоге `configs/`:
+Типизированные defaults находятся в `src/eventedge/configs/`, а локальные
+переопределения — в `configs/`:
 
-- `sources.yaml` — параметры RSS-источников и публичных Telegram-каналов;
-- `collection.yaml` — интервалы, состав контуров и timer triggers;
+- `sources.yaml` — RSS и Telegram-источники;
+- `collection.yaml` — интервалы и контуры сбора;
 - `scoring.yaml` — коэффициенты качества источников.
 
-Поля, отсутствующие в YAML, сохраняют значения по умолчанию. Другой каталог
-можно указать через `EVENTEDGE_CONFIG_DIR`; некорректный YAML останавливает
-запуск приложения с ошибкой конфигурации.
+Другой каталог задаётся через `EVENTEDGE_CONFIG_DIR`. Некорректный YAML
+останавливает запуск. Service-account keys, endpoint credentials и локальные
+исходные данные нельзя коммитить.

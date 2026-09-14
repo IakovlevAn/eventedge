@@ -85,6 +85,16 @@ from eventedge.market import (
     scenario_range,
     volatility_scenario_range,
 )
+from eventedge.materiality import MaterialityRuntime
+from eventedge.materiality import (
+    runtime_from_environment as materiality_runtime_from_environment,
+)
+from eventedge.materiality_pipeline import (
+    materiality_api_payload,
+    materiality_candidate_tickers,
+    rank_news_by_materiality,
+    refresh_materiality_predictions,
+)
 from eventedge.ml_router import (
     MlRouterDecision,
     MlRouterMode,
@@ -137,6 +147,7 @@ BACKFILL_CONCURRENCY = min(4, max(1, int(os.environ.get("BACKFILL_CONCURRENCY", 
 # well below the 180-second serverless execution timeout.
 SIGNAL_REPROCESS_DEADLINE_SECONDS = 60.0
 EVALUATION_REFRESH_DEADLINE_SECONDS = 150.0
+MATERIALITY_REFRESH_DEADLINE_SECONDS = 60.0
 SIGNAL_READ_TIMEOUT_SECONDS = 12.0
 SIGNAL_FEED_TTL_SECONDS = (
     DASHBOARD_REFRESH_INTERVAL_SECONDS if os.environ.get("APP_ENV") == "prod" else 0
@@ -288,6 +299,10 @@ def repository_from_environment(environment: Mapping[str, str]) -> NewsRepositor
             database=database,
             analyzer=analyzer,
             pool_size=pool_size,
+            include_materiality_predictions=(
+                environment.get("NEWS_MATERIALITY_MODE", "disabled").casefold()
+                != "disabled"
+            ),
         )
     if endpoint or database:
         raise RuntimeError("YDB_ENDPOINT and YDB_DATABASE must be configured together")
@@ -356,6 +371,7 @@ class RequestIdMiddleware:
 
 app.state.news_repository = repository_from_environment(os.environ)
 app.state.ml_router_runtime = runtime_from_environment(os.environ)
+app.state.materiality_runtime = materiality_runtime_from_environment(os.environ)
 app.state.market_data_client = MoexMarketDataClient()
 app.state.evaluation_material_cache = None
 app.state.evaluation_material_inflight = None
@@ -494,6 +510,9 @@ async def refresh_content_snapshot_in_background(application: FastAPI) -> None:
             source_id=None,
             scope=None,
             limit=CANONICAL_NEWS_RESPONSE_LIMIT,
+            materiality_runtime=getattr(
+                application.state, "materiality_runtime", None
+            ),
         )
         store_news_response(
             application,
@@ -842,6 +861,7 @@ def build_news_response_payload(
     source_id: str | None,
     scope: Literal["market", "sector", "company"] | None,
     limit: int,
+    materiality_runtime: MaterialityRuntime | None = None,
 ) -> dict[str, object]:
     """Render the expensive news projection independently of the request loop."""
     if source_id is not None:
@@ -974,6 +994,11 @@ def build_news_response_payload(
         "with_signal": sum(bool(row["signaled_news"]) for row in company_items),
         "items": company_items,
     }
+    if materiality_runtime is not None:
+        scoped_news = rank_news_by_materiality(
+            scoped_news,
+            runtime=materiality_runtime,
+        )
     news = scoped_news[:limit]
     source_stats: dict[str, dict[str, object]] = {}
     for item in scoped_news:
@@ -993,6 +1018,20 @@ def build_news_response_payload(
         record = item.as_api_dict()
         record["related_signals"] = signals_by_news.get(item.id, [])
         record["event"] = event_by_news[item.id]
+        if materiality_runtime is not None and materiality_candidate_tickers(
+            item,
+            {
+                str(signal["ticker"])
+                for signal in signals_by_news.get(item.id, [])
+                if signal.get("ticker") is not None
+            },
+        ):
+            materiality = materiality_api_payload(
+                item,
+                runtime=materiality_runtime,
+            )
+            if materiality is not None:
+                record["market_materiality"] = materiality
         data.append(record)
     scope_counts = {"market": 0, "sector": 0, "company": 0}
     for item in visible_news:
@@ -1065,6 +1104,9 @@ async def get_or_build_news_response(
                 source_id=source_id,
                 scope=scope,
                 limit=limit,
+                materiality_runtime=getattr(
+                    application.state, "materiality_runtime", None
+                ),
             )
         )
         application.state.news_response_inflight[task_key] = task
@@ -1358,9 +1400,25 @@ async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONRespons
                     )
                     return None
 
-            reprocess, evaluation = await asyncio.gather(
+            async def bounded_materiality_refresh() -> dict[str, object] | None:
+                try:
+                    async with asyncio.timeout(MATERIALITY_REFRESH_DEADLINE_SECONDS):
+                        return await refresh_materiality_predictions(
+                            repository,
+                            request.app.state.market_data_client,
+                            request.app.state.materiality_runtime,
+                        )
+                except TimeoutError:
+                    logger.warning(
+                        "Maintenance materiality inference deadline exceeded; "
+                        "unfinished idempotent work was deferred"
+                    )
+                    return None
+
+            reprocess, evaluation, materiality = await asyncio.gather(
                 bounded_reprocess(),
                 bounded_eval_refresh(),
+                bounded_materiality_refresh(),
             )
             maintenance_result: dict[str, object] = {}
             deferred: list[str] = []
@@ -1390,14 +1448,19 @@ async def handle_timer(request: Request, envelope: TimerEnvelope) -> JSONRespons
                         "epochs": len(epochs),
                     }
                 )
+            if materiality is None:
+                deferred.append("materiality_inference")
+            else:
+                maintenance_result["materiality"] = materiality
             if deferred:
                 maintenance_result.update(
                     {
-                        "status": "deferred" if len(deferred) == 2 else "partial",
+                        "status": "deferred" if len(deferred) == 3 else "partial",
                         "deferred": deferred,
                         "deadline_seconds": max(
                             SIGNAL_REPROCESS_DEADLINE_SECONDS,
                             EVALUATION_REFRESH_DEADLINE_SECONDS,
+                            MATERIALITY_REFRESH_DEADLINE_SECONDS,
                         ),
                     }
                 )

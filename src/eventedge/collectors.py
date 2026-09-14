@@ -91,6 +91,7 @@ class RssItem:
     url: str
     content: str
     categories: tuple[str, ...]
+    is_edited: bool = False
 
 
 class _HtmlTextExtractor(HTMLParser):
@@ -197,6 +198,7 @@ class _TelegramChannelParser(HTMLParser):
         self._published_at: datetime | None = None
         self._url: str | None = None
         self._text_parts: list[str] = []
+        self._is_edited = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attributes = dict(attrs)
@@ -211,6 +213,7 @@ class _TelegramChannelParser(HTMLParser):
                 self._published_at = None
                 self._url = f"https://t.me/{external_id}"
                 self._text_parts = []
+                self._is_edited = False
             return
 
         if not is_void:
@@ -256,6 +259,8 @@ class _TelegramChannelParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self._text_depth:
             self._text_parts.append(data)
+        elif self._message_depth and data.strip().casefold() == "edited":
+            self._is_edited = True
 
     def _finish_message(self) -> None:
         content = "\n".join(
@@ -271,12 +276,14 @@ class _TelegramChannelParser(HTMLParser):
                     url=self._url,
                     content=content[:MAX_CONTENT_LENGTH],
                     categories=(),
+                    is_edited=self._is_edited,
                 )
             )
         self._external_id = None
         self._published_at = None
         self._url = None
         self._text_parts = []
+        self._is_edited = False
 
 
 def parse_telegram_channel(page: bytes, *, max_items: int) -> list[RssItem]:

@@ -40,6 +40,10 @@ import {
   dashboardRefreshDue,
   newsCoverageView,
 } from "./newsCoverage.js";
+import {
+  compareNewsMateriality,
+  readyMaterialityProbability,
+} from "./newsMateriality.js";
 import { resolveSignalEvidence } from "./provenance.js";
 import { shouldAcceptSnapshot } from "./snapshot.js";
 import { sourceFreshnessView, sourceScheduleLabel } from "./sourceHealth.js";
@@ -577,6 +581,7 @@ function newsFromApi(item, signalsById, sourceNames = new Map()) {
     ...(item.source_metadata?.tickers || []),
     ...instrumentSignalTickers,
   ])];
+  const materialityProbability = readyMaterialityProbability(item.market_materiality);
   return {
     id: item.id,
     source: sourceNames.get(item.source_id) || sourceLabels[item.source_id] || item.source_id,
@@ -593,6 +598,8 @@ function newsFromApi(item, signalsById, sourceNames = new Map()) {
     signal: related || null,
     signals: relatedSignals,
     processing: item.processing || null,
+    marketMateriality: item.market_materiality || null,
+    materialityProbability,
     tickers,
     event: item.event || {
       scope: tickers.length ? "company" : "market",
@@ -1519,10 +1526,14 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
       return matchesTicker && matchesScope && matchesSource && matchesSignal && matchesDirection && matchesPeriod && (!normalized || haystack.includes(normalized));
     }).sort((left, right) => {
       if (sortMode === "impact") {
+        const materialityOrder = compareNewsMateriality(left, right);
+        if (materialityOrder) return materialityOrder;
         const impact = Math.max(0, ...(right.signals || []).map((signal) => Math.abs(signal.score || 0))) - Math.max(0, ...(left.signals || []).map((signal) => Math.abs(signal.score || 0)));
         if (impact) return impact;
       }
-      return new Date(right.publishedAt) - new Date(left.publishedAt);
+      // The API owns the canonical freshness order and optionally applies safe
+      // within-day materiality ranking. Stable filtering must preserve it.
+      return 0;
     });
   }, [allNews, ticker, query, scope, sourceId, signalState, direction, period, sortMode]);
 
@@ -1587,7 +1598,7 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
           <FilterSelect label="Период" value={period} onChange={setPeriod} options={[{ value: "1d", label: "24 часа" }, { value: "3d", label: "3 дня" }, { value: "7d", label: "7 дней" }, { value: "30d", label: "30 дней" }, { value: "all", label: "Всё время" }]} />
           <FilterSelect label="Сигнал" value={signalState} onChange={setSignalState} options={[{ value: "all", label: "Все" }, { value: "signal", label: "Есть сигнал" }, { value: "context", label: "Только контекст" }]} />
           <FilterSelect label="Направление" value={direction} onChange={setDirection} options={[{ value: "all", label: "Любое" }, { value: "up", label: "Вверх" }, { value: "neutral", label: "Нейтрально" }, { value: "down", label: "Вниз" }]} />
-          <FilterSelect label="Сортировка" value={sortMode} onChange={setSortMode} options={[{ value: "newest", label: "Сначала новые" }, { value: "impact", label: "Сначала весомые" }]} />
+          <FilterSelect label="Сортировка" value={sortMode} onChange={setSortMode} options={[{ value: "newest", label: "Порядок EventEdge" }, { value: "impact", label: "По ML-значимости" }]} />
           {activeFilterCount > 0 && <button type="button" className="signal-filter is-active" onClick={resetFilters}><X size={13} /> Сбросить · {activeFilterCount}</button>}
         </div>
       </section>
@@ -1611,7 +1622,7 @@ function NewsScreen({ signals, allNews, newsMeta, initialTicker, onReadNews }) {
           return (
           <button type="button" className={`feed-item event-feed-item event-feed-item--${item.event?.scope || "market"}`} key={item.id} onClick={() => onReadNews(item)}>
             {item.signal?.target?.type === "instrument" || item.companySignal ? <CompanyMark signal={item.signal?.target?.type === "instrument" ? item.signal : item.companySignal} /> : <span className={`company-mark company-mark--${item.event?.scope || "market"}`}><ScopeIcon size={17} /></span>}
-            <div className="feed-copy"><div><span className={`event-scope event-scope--${item.event?.scope || "market"}`}><ScopeIcon size={10} /> {scopeMeta.label}</span><span>{item.source}</span>{item.sourceCount > 1 && <i className="source-count">{item.sourceCount} источника</i>}<time>Опубликовано {formatPublicationTime(item.publishedAt)}</time></div><h2>{item.title}</h2><p>{item.content}</p><footer>{item.event?.sectors?.map((sector) => <span className="event-sector" key={sector}>{sector}</span>)}{item.signals?.length ? <span className="event-signal-list">{item.signals.map((signal) => <span className={`event-signal-chip event-signal-chip--${signal.direction}`} key={signal.id}><strong>{signal.target?.label || signal.ticker}</strong><Direction direction={signal.direction} /><span>{formatScore(signal.score)} п.</span></span>)}</span> : <span className="context-only">Сохранено · сигнал не рассчитан</span>}</footer></div>
+            <div className="feed-copy"><div><span className={`event-scope event-scope--${item.event?.scope || "market"}`}><ScopeIcon size={10} /> {scopeMeta.label}</span><span>{item.source}</span>{item.sourceCount > 1 && <i className="source-count">{item.sourceCount} источника</i>}{item.materialityProbability !== null && <i className="news-materiality-chip" title="Вероятность движения акции относительно IMOEX2 не менее чем на 0,5 п.п. за четыре часа">Заметная реакция {Math.round(item.materialityProbability * 100)}%</i>}<time>Опубликовано {formatPublicationTime(item.publishedAt)}</time></div><h2>{item.title}</h2><p>{item.content}</p><footer>{item.event?.sectors?.map((sector) => <span className="event-sector" key={sector}>{sector}</span>)}{item.signals?.length ? <span className="event-signal-list">{item.signals.map((signal) => <span className={`event-signal-chip event-signal-chip--${signal.direction}`} key={signal.id}><strong>{signal.target?.label || signal.ticker}</strong><Direction direction={signal.direction} /><span>{formatScore(signal.score)} п.</span></span>)}</span> : <span className="context-only">Сохранено · сигнал не рассчитан</span>}</footer></div>
             <BookOpen size={17} />
           </button>
         );})}
@@ -2226,7 +2237,7 @@ function NewsReader({ item, onClose }) {
       <button className="overlay-dismiss" type="button" aria-label="Закрыть новость" onClick={onClose} />
       <article className="reader-dialog" role="dialog" aria-modal="true" aria-label="Просмотр новости">
         <header><div>{companySignal ? <CompanyMark signal={companySignal} /> : <span className={`company-mark company-mark--${item.event?.scope || "market"}`}><ScopeIcon size={17} /></span>}<span><strong>{companySignal?.ticker || relatedSignals[0]?.target?.label || "Новость"}</strong><small>{companySignal ? `${companySignal.company} · ` : ""}{item.source}</small></span></div><button type="button" onClick={onClose} aria-label="Закрыть"><X size={18} /></button></header>
-        <div className="reader-meta"><span>{scopeMeta.label}{item.event?.sectors?.length ? ` · ${item.event.sectors.join(", ")}` : ""}</span><time><Clock3 size={12} /> Опубликовано источником {formatPublicationTime(item.publishedAt)}</time>{item.receivedAt && <time>EventEdge получил {formatPublicationTime(item.receivedAt)}{item.deliveryLagMinutes === null ? "" : ` · лаг ${item.deliveryLagMinutes} мин`}</time>}</div>
+        <div className="reader-meta"><span>{scopeMeta.label}{item.event?.sectors?.length ? ` · ${item.event.sectors.join(", ")}` : ""}</span>{item.materialityProbability !== null && <span className="reader-materiality">Вероятность заметной реакции {Math.round(item.materialityProbability * 100)}%</span>}<time><Clock3 size={12} /> Опубликовано источником {formatPublicationTime(item.publishedAt)}</time>{item.receivedAt && <time>EventEdge получил {formatPublicationTime(item.receivedAt)}{item.deliveryLagMinutes === null ? "" : ` · лаг ${item.deliveryLagMinutes} мин`}</time>}</div>
         <h1>{item.title}</h1>
         <div className="reader-body">{item.content ? <p>{item.content}</p> : <p>Полный текст не входит в компактный evidence-ответ. Проверьте первичную публикацию по ссылке ниже.</p>}{relatedSignals.length ? <p>EventEdge рассчитал {signalCountText} влияния события. Это оценка силы события, а не обещанная доходность акции.</p> : <p>Событие сохранено как <strong>{scopeMeta.label.toLocaleLowerCase("ru-RU")}</strong>-контекст. Сигнал из него пока не рассчитан.</p>}</div>
         {relatedSignals.length > 0 && <section className="reader-signal-list"><span>Связанные сигналы</span>{relatedSignals.map((signal) => <article key={signal.id}><div><strong>{signal.target?.label || signal.company || signal.ticker}</strong><small>{signal.target?.type === "sector" ? "Отрасль" : signal.target?.type === "market" ? "Рынок" : "Компания"}</small></div><Direction direction={signal.direction} /><b>{formatScore(signal.score)} п.</b><p>{signal.summary}</p></article>)}</section>}

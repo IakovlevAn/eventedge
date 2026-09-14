@@ -197,7 +197,11 @@ paths:
             default: 20
       responses:
         '200':
-          description: Routed or signal-backed news ordered by `published_at DESC, id DESC`; excluded raw items remain stored for future reclassification.
+          description: >-
+            Routed or signal-backed news. The default order is `published_at DESC,
+            id DESC`; when materiality rank mode is enabled, completed in-domain
+            predictions rerank only comparable slots within one UTC publication day.
+            Fresh, pending and out-of-domain rows keep their freshness positions.
           content:
             application/json:
               schema:
@@ -1394,6 +1398,123 @@ components:
           minimum: 0
           maximum: 1
 
+    MaterialityPrediction:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - ticker
+        - status
+        - reason
+        - raw_probability
+        - probability
+        - selected_at_coverage_pct
+        - eligible_for_ranking
+        - missing_features
+        - decision_at
+        - data_cutoff_at
+        - model_id
+        - model_version
+        - artifact_payload_sha256
+        - feature_schema_version
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        ticker:
+          type: string
+        status:
+          type: string
+          enum: [ready, deferred]
+        reason:
+          type: string
+          nullable: true
+          enum: [instrument_not_found, market_data_unavailable, invalid_market_data]
+        raw_probability:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          nullable: true
+        probability:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          nullable: true
+        selected_at_coverage_pct:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: integer
+              minimum: 1
+              maximum: 100
+        eligible_for_ranking:
+          type: boolean
+          description: >-
+            True only for the retained model domain with an available
+            five-minute abnormal-reaction feature.
+        missing_features:
+          type: array
+          items:
+            type: string
+        decision_at:
+          type: string
+          format: date-time
+        data_cutoff_at:
+          type: string
+          format: date-time
+        model_id:
+          type: string
+        model_version:
+          type: string
+        artifact_payload_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        feature_schema_version:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    NewsMateriality:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - mode
+        - available_after
+        - max_probability
+        - model_version
+        - predictions
+      properties:
+        status:
+          type: string
+          enum: [pending, deferred, ready]
+        mode:
+          type: string
+          enum: [shadow, rank]
+        available_after:
+          type: string
+          format: date-time
+        max_probability:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          nullable: true
+        model_version:
+          type: string
+        predictions:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaterialityPrediction'
+
     News:
       type: object
       additionalProperties: false
@@ -1445,6 +1566,8 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RelatedSignal'
+        market_materiality:
+          $ref: '#/components/schemas/NewsMateriality'
 
     SignalDirection:
       type: string

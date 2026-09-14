@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import yaml
 
 from scripts.deploy_serverless import build_payload, masked
@@ -44,6 +45,8 @@ def test_deployment_payload_has_budget_caps() -> None:
         "YANDEX_GPT_MODEL": "yandexgpt-lite",
         "BACKFILL_BATCH_LIMIT": "1",
         "BACKFILL_CONCURRENCY": "1",
+        "NEWS_MATERIALITY_MODE": "disabled",
+        "NEWS_MATERIALITY_BATCH_LIMIT": "8",
         "EVENTEDGE_MONTHLY_BUDGET_RUB": "15000",
     }
 
@@ -68,6 +71,41 @@ def test_admin_key_is_forwarded_only_when_configured() -> None:
     payload = build_payload(environment)
 
     assert payload["imageSpec"]["environment"]["EVENTEDGE_ADMIN_KEY"] == "example-test-key"
+
+
+def test_materiality_rollout_mode_is_forwarded_explicitly() -> None:
+    environment = {
+        "YC_CONTAINER_ID": "container-id",
+        "YC_WORKER_CONTAINER_ID": "worker-container-id",
+        "YC_RUNTIME_SERVICE_ACCOUNT_ID": "runtime-sa-id",
+        "YC_FOLDER_ID": "folder-id",
+        "IMAGE_URL": "cr.yandex/registry/eventedge-api:sha",
+        "DEPLOY_SHA": "abc123",
+        "YDB_ENDPOINT": "grpcs://ydb.example:2135",
+        "YDB_DATABASE": "/region/cloud/database",
+        "NEWS_MATERIALITY_MODE": "shadow",
+    }
+
+    payload = build_payload(environment)
+
+    assert payload["imageSpec"]["environment"]["NEWS_MATERIALITY_MODE"] == "shadow"
+
+
+def test_materiality_rollout_mode_rejects_unknown_value() -> None:
+    environment = {
+        "YC_CONTAINER_ID": "container-id",
+        "YC_WORKER_CONTAINER_ID": "worker-container-id",
+        "YC_RUNTIME_SERVICE_ACCOUNT_ID": "runtime-sa-id",
+        "YC_FOLDER_ID": "folder-id",
+        "IMAGE_URL": "cr.yandex/registry/eventedge-api:sha",
+        "DEPLOY_SHA": "abc123",
+        "YDB_ENDPOINT": "grpcs://ydb.example:2135",
+        "YDB_DATABASE": "/region/cloud/database",
+        "NEWS_MATERIALITY_MODE": "trade",
+    }
+
+    with pytest.raises(ValueError, match="must be disabled, shadow or rank"):
+        build_payload(environment)
 
 
 def test_worker_payload_has_no_provisioned_instances() -> None:

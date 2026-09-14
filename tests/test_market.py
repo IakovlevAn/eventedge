@@ -152,6 +152,29 @@ def test_context_signal_candles_use_moex_index_benchmark() -> None:
     assert result["benchmark_ticker"] == "MOEXOG"
 
 
+def test_materiality_candles_use_direct_imoex2_index() -> None:
+    captured: dict[str, object] = {}
+
+    def index_request(url: str, params: dict[str, object]) -> dict[str, Any]:
+        captured["url"] = url
+        return {
+            "candles": {
+                "columns": ["begin", "open", "close", "high", "low", "value", "volume"],
+                "data": [["2026-09-10 10:00:00", 3000, 3001, 3002, 2999, 0, 0]],
+            }
+        }
+
+    client = MoexMarketDataClient(requester=index_request)
+    result = asyncio.run(client.candles("IMOEX2", interval=1, lookback_days=14))
+
+    assert captured["url"] == (
+        "https://iss.moex.com/iss/engines/stock/markets/index/boards/SNDX/"
+        "securities/IMOEX2/candles.json"
+    )
+    assert result["ticker"] == "IMOEX2"
+    assert result["benchmark_ticker"] == "IMOEX2"
+
+
 def test_legacy_fix_price_ticker_uses_current_moex_security() -> None:
     requested_urls: list[str] = []
 

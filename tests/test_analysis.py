@@ -225,6 +225,36 @@ def test_company_remains_direct_when_it_evaluates_its_own_results() -> None:
     ]
 
 
+def test_rule_extractor_bounds_large_instrument_lists() -> None:
+    aliases = {f"T{index:02d}": (f"issuer{index}",) for index in range(25)}
+    features = RuleBasedNewsExtractor(aliases=aliases).extract(
+        NewsAnalysisInput(
+            source_id="archive_test",
+            title=" ".join(alias[0] for alias in aliases.values()),
+            content="Сводка по множеству эмитентов.",
+        )
+    )
+
+    assert len(features.instruments) == 20
+    assert [item.ticker for item in features.instruments[:2]] == ["T00", "T01"]
+
+
+def test_rule_extractor_keeps_direct_title_match_when_bounding_list() -> None:
+    aliases = {f"T{index:02d}": (f"issuer{index}",) for index in range(21)}
+    features = RuleBasedNewsExtractor(aliases=aliases).extract(
+        NewsAnalysisInput(
+            source_id="archive_test",
+            title="issuer20",
+            content=" ".join(f"issuer{index}" for index in range(20)),
+        )
+    )
+
+    relevance = {item.ticker: item.relevance for item in features.instruments}
+    assert len(relevance) == 20
+    assert relevance["T20"] == 0.96
+    assert "T19" not in relevance
+
+
 def test_platform_is_context_when_another_issuer_acts_for_its_sellers() -> None:
     features = RuleBasedNewsExtractor().extract(
         NewsAnalysisInput(
