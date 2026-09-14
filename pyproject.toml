@@ -27,6 +27,19 @@ dev = [
 export = [
     "ydb[yc]>=3.30,<4",
 ]
+research = [
+    "ipykernel>=7.3,<8",
+    "matplotlib>=3.11,<4",
+    "nbclient>=0.11,<1",
+    "nbformat>=5.11,<6",
+    "numpy>=2.5,<3",
+    "pandas>=3.0,<4",
+    "scikit-learn>=1.9,<2",
+]
+research-nlp = [
+    "torch>=2.14,<3",
+    "transformers>=5.17,<6",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -43,6 +56,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+extend-exclude = ["experiments/**/*.ipynb"]
 
 [tool.ruff.lint]
 select = ["B", "E", "F", "I", "UP"]

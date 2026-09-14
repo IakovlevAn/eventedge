@@ -33,3 +33,8 @@ src/eventedge/static/
 # Local research datasets and generated model artifacts
 .local-data/
 .local-artifacts/
+
+# Reproducible experiment sources are tracked; bulky generated outputs stay local.
+experiments/**/artifacts/
+experiments/**/cache/
+experiments/**/.ipynb_checkpoints/
