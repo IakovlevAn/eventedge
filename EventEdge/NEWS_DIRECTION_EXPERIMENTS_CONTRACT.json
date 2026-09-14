@@ -1,0 +1,114 @@
+{
+  "schema_version": "news-direction-experiment-archive-1.0",
+  "status": "legacy_historical_development_archive",
+  "production_effect": "none",
+  "source_digest_semantics": "original_generated_files_before_portable_path_normalization",
+  "source_dataset": {
+    "rows": 1238,
+    "events": 1226,
+    "information_groups": 1108,
+    "sha256": "ac639e944a100c83b91275bbf627d3e9af9c654e5a0ce726dc484c0e2c0b81b6"
+  },
+  "canonical_dataset": {
+    "sha256": "ee47437edd61f2f444f32e1d85e7562fb0a07c47750651217ffc898c55ca632c",
+    "compatibility": "rerun_required_before_canonical_comparison"
+  },
+  "protocol": {
+    "seed": 20260913,
+    "evaluation_rows": 480,
+    "evaluation_months": [
+      "2026-03",
+      "2026-04",
+      "2026-05",
+      "2026-06",
+      "2026-07",
+      "2026-08",
+      "2026-09"
+    ],
+    "validation_months": 2,
+    "embargo_hours": 72,
+    "group_key": "event_group_id",
+    "legacy_direction_target": "sign(abnormal_return from entry_at to entry_at_plus_horizon)",
+    "canonical_direction_target": "sign(remaining_abnormal_return from publication_plus_5m to publication_plus_240m)",
+    "target_compatibility": "not_identical"
+  },
+  "stages": [
+    {
+      "number": 1,
+      "id": "finbert-stage1-1.0",
+      "report": "experiments/finbert_stage1/REPORT.md",
+      "decision": "no_go",
+      "scope": "frozen_rubert_sentiment_ablation",
+      "source_metrics_sha256": "22ec32c3162cc32034b516d970270ce10f2dd5ce92afbc5513244e6e5ce926f1",
+      "headline": {
+        "materiality_pr_auc_baseline": 0.6418814286460572,
+        "materiality_pr_auc_with_finbert": 0.6437932207814651,
+        "paired_pr_auc_delta": 0.0019117921354078193,
+        "paired_pr_auc_delta_ci95": [-0.01611815112338525, 0.020588574210474955]
+      },
+      "external_model": {
+        "id": "mxlcw/rubert-tiny2-russian-financial-sentiment",
+        "revision": "a02913e44597582218db7821d52dc15c331bf427"
+      }
+    },
+    {
+      "number": 2,
+      "id": "market-stage2-1.0",
+      "report": "experiments/market_stage2/REPORT.md",
+      "decision": "development_positive_materiality_only",
+      "scope": "causal_market_feature_ablation",
+      "source_metrics_sha256": "5bf4ced5188ed40ae769d5938e9c55f61363c31246297eb8faaeabde603b1e80",
+      "source_market_cache_sha256": "3e3f0ae2f296f747d6ff8cf00a4cd2115e8b133549948f2d48272fdac8b4fb6e",
+      "headline": {
+        "materiality_pr_auc_legacy": 0.6418814286460572,
+        "materiality_pr_auc_reaction_core": 0.6855385776936966,
+        "paired_pr_auc_delta": 0.0436571490476394,
+        "paired_pr_auc_delta_ci95": [0.016126032412908338, 0.07208363313853991]
+      },
+      "production_mapping": "superseded_by_canonical_update_5m_symmetric_materiality_logistic"
+    },
+    {
+      "number": 3,
+      "id": "direction-stage3-1.0",
+      "report": "experiments/direction_stage3/REPORT.md",
+      "decision": "no_go",
+      "scope": "horizons_selective_prediction_and_neutral",
+      "source_metrics_sha256": "c8a01e4e868e564c5217c3f6ae0f4b710bf5aca53dfeeeba0dc5f80a5765340b",
+      "source_outcome_cache_sha256": "4956ceb5ade19baaac61dd27178fba944a949842a8e915a844a074f8236d5dc6",
+      "headline": {
+        "best_practical_horizon_minutes": 30,
+        "best_practical_coverage": 0.4270833333333333,
+        "best_practical_hit_rate": 0.526829268292683,
+        "four_hour_full_coverage_hit_rate": 0.5270833333333333
+      }
+    },
+    {
+      "number": 4,
+      "id": "direction-stage4-1.0",
+      "report": "experiments/direction_stage4/REPORT.md",
+      "decision": "no_go",
+      "scope": "structured_news_and_tfidf_features",
+      "source_metrics_sha256": "66adb95c4e792a0a15cd55e7aa29069da71b0fb85b1ba824973b8b1156426cf4",
+      "headline": {
+        "reaction_core_roc_auc": 0.5052664620535714,
+        "structured_full_roc_auc": 0.5118059430803571,
+        "structured_full_hit_rate": 0.5145833333333333,
+        "structured_full_tfidf_roc_auc": 0.49276297433035715
+      }
+    },
+    {
+      "number": 5,
+      "id": "direction-stage5-1.0",
+      "report": "experiments/direction_stage5/REPORT.md",
+      "decision": "no_go",
+      "scope": "small_nonlinear_models",
+      "source_metrics_sha256": "591a41e8c43208a0d38836f0013cc3c28debea8fd7c61eff0adac9acb2789741",
+      "headline": {
+        "hist_gradient_boosting_roc_auc": 0.5155203683035714,
+        "extra_trees_roc_auc": 0.5369437081473214,
+        "nonlinear_blend_hit_rate": 0.5333333333333333,
+        "majority_class_hit_rate": 0.5333333333333333
+      }
+    }
+  ]
+}

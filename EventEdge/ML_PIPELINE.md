@@ -152,6 +152,12 @@ Directional-модель сохранена как воспроизводимы�
 но не используется для определения направления сигнала из-за результатов
 benchmark.
 
+Дополнительная серия development-проверок RuBERT, альтернативных горизонтов,
+selective prediction, structured features и малых нелинейных моделей сохранена
+в [архиве этапов 1–5](NEWS_DIRECTION_EXPERIMENTS.md). Она использует предыдущую
+версию датасета и другое определение directional horizon, поэтому не подменяет
+метрики этого canonical benchmark без отдельного rerun.
+
 ## Код и артефакты
 
 - Сбор кандидатов: `download_telegram_archive.py`,

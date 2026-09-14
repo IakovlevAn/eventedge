@@ -14,6 +14,7 @@ JSON и подключена к live pipeline через выключенный 
 
 - [Описание продукта](EventEdge/README.md)
 - [ML pipeline: данные, обучение, inference и результаты](EventEdge/ML_PIPELINE.md)
+- [Дополнительные эксперименты направления, этапы 1–5](EventEdge/NEWS_DIRECTION_EXPERIMENTS.md)
 - [Технический дизайн](EventEdge/TECHNICAL_DESIGN.md)
 - [OpenAPI-контракт](EventEdge/openapi.yaml)
 - [Подключение Yandex Cloud](EventEdge/CLOUD_SETUP.md)
