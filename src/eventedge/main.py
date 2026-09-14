@@ -3444,7 +3444,7 @@ async def list_evals(
 ) -> JSONResponse:
     (epochs, observation_counts), (stored_news, _) = await asyncio.gather(
         evaluation_epoch_index(request.app),
-        load_signal_feed(request),
+        load_content_snapshot(request),
     )
     selected_model_version = model_version or CURRENT_NEWS_MODEL_VERSION
     selected_epoch = latest_model_evaluation_epoch(
