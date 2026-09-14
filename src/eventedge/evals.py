@@ -670,7 +670,8 @@ def _eval_title_tokens(title: str) -> set[str]:
     }
 
 
-def _same_eval_event(left: NewsRecord, right: NewsRecord) -> bool:
+def same_eval_event(left: NewsRecord, right: NewsRecord) -> bool:
+    """Return whether two publications describe the same evaluation event."""
     left_tokens = _eval_title_tokens(left.title)
     right_tokens = _eval_title_tokens(right.title)
     if not left_tokens or not right_tokens:
@@ -708,7 +709,7 @@ def deduplicate_eval_events(
                     )
                 )
                 and (representative_news := news_by_id.get(candidate[0].news_id)) is not None
-                and _same_eval_event(representative_news, news)
+                and same_eval_event(representative_news, news)
             ),
             None,
         )

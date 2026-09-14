@@ -6,6 +6,7 @@ import math
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 
+from eventedge.evals import same_eval_event
 from eventedge.materiality import (
     MATERIALITY_BENCHMARK_TICKER,
     TARGET_DEFINITION,
@@ -128,7 +129,9 @@ def materiality_eval_report(
         }
 
     predictions = _current_predictions(news, runtime)
-    ready = [prediction for prediction in predictions if prediction.status == "ready"]
+    raw_ready = [prediction for prediction in predictions if prediction.status == "ready"]
+    news_by_id = {item.id: item for item in news}
+    ready = _deduplicate_materiality_events(raw_ready, news_by_id)
     terminal = [prediction for prediction in ready if prediction.outcome_4h is not None]
     evaluated = [
         prediction
@@ -147,7 +150,10 @@ def materiality_eval_report(
         if prediction.outcome_4h is not None and prediction.calibrated_probability is not None
     ]
     summary = {
-        "scored_news": len({prediction.news_id for prediction in ready}),
+        "scored_news": len({prediction.news_id for prediction in raw_ready}),
+        "raw_ready_predictions": len(raw_ready),
+        "unique_events": len(ready),
+        "deduplicated_publications": len(raw_ready) - len(ready),
         "ready_predictions": len(ready),
         "evaluated": len(evaluated),
         "pending": len(ready) - len(terminal),
@@ -190,7 +196,6 @@ def materiality_eval_report(
     else:
         summary["accuracy_lift_pct_points"] = None
 
-    news_by_id = {item.id: item for item in news}
     outcomes = [
         _api_outcome(prediction, news_by_id.get(prediction.news_id))
         for prediction in sorted(
@@ -298,6 +303,55 @@ def _current_predictions(
     return list(selected.values())
 
 
+def _deduplicate_materiality_events(
+    predictions: Sequence[MaterialityPredictionRecord],
+    news_by_id: Mapping[str, NewsRecord],
+) -> list[MaterialityPredictionRecord]:
+    """Select the earliest prediction for each ticker-level news event."""
+    groups: list[list[MaterialityPredictionRecord]] = []
+    for prediction in sorted(predictions, key=lambda item: (item.decision_at, item.id)):
+        news = news_by_id.get(prediction.news_id)
+        if news is None:
+            groups.append([prediction])
+            continue
+        group = next(
+            (
+                candidate
+                for candidate in groups
+                if candidate[0].ticker == prediction.ticker
+                and (
+                    representative_news := news_by_id.get(candidate[0].news_id)
+                )
+                is not None
+                and same_eval_event(representative_news, news)
+            ),
+            None,
+        )
+        if group is None:
+            groups.append([prediction])
+        else:
+            group.append(prediction)
+
+    representatives = [
+        min(
+            group,
+            key=lambda prediction: (
+                news_by_id[prediction.news_id].published_at
+                if prediction.news_id in news_by_id
+                else prediction.decision_at,
+                prediction.decision_at,
+                prediction.id,
+            ),
+        )
+        for group in groups
+    ]
+    return sorted(
+        representatives,
+        key=lambda prediction: (prediction.decision_at, prediction.id),
+        reverse=True,
+    )
+
+
 def _api_outcome(
     prediction: MaterialityPredictionRecord,
     news: NewsRecord | None,
@@ -400,6 +454,9 @@ def _brier_score(
 def _empty_summary() -> dict[str, object]:
     return {
         "scored_news": 0,
+        "raw_ready_predictions": 0,
+        "unique_events": 0,
+        "deduplicated_publications": 0,
         "ready_predictions": 0,
         "evaluated": 0,
         "pending": 0,

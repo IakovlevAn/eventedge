@@ -157,3 +157,73 @@ def test_materiality_report_exposes_classification_and_calibration_metrics() -> 
     assert summary["roc_auc"] == 1.0
     assert summary["brier_score"] == pytest.approx(0.04)
     assert len(report["outcomes"]) == 2
+
+
+def test_materiality_report_evaluates_repeated_publications_once() -> None:
+    first = replace(
+        _prediction("first", probability=0.4, selected=False),
+        outcome_4h={
+            "status": "evaluated",
+            "actual_material": False,
+            "predicted_material": False,
+            "verdict": True,
+        },
+    )
+    duplicate = replace(
+        _prediction("duplicate", probability=0.8, selected=True),
+        decision_at=first.decision_at + timedelta(minutes=10),
+        outcome_4h={
+            "status": "evaluated",
+            "actual_material": True,
+            "predicted_material": True,
+            "verdict": True,
+        },
+    )
+    corroboration = replace(
+        _prediction("corroboration", probability=0.7, selected=True),
+        decision_at=first.decision_at + timedelta(minutes=20),
+        outcome_4h={
+            "status": "evaluated",
+            "actual_material": True,
+            "predicted_material": True,
+            "verdict": True,
+        },
+    )
+    unrelated = replace(
+        _prediction("unrelated", probability=0.2, selected=False),
+        decision_at=first.decision_at + timedelta(minutes=30),
+        outcome_4h={
+            "status": "evaluated",
+            "actual_material": False,
+            "predicted_material": False,
+            "verdict": True,
+        },
+    )
+    repeated_title = "Сбербанк повысил прогноз прибыли после сильной отчётности"
+    news = [
+        replace(_news("first", first), title=repeated_title),
+        replace(_news("duplicate", duplicate), title=repeated_title),
+        replace(
+            _news("corroboration", corroboration),
+            title="Сбербанк повысил прогноз прибыли на фоне сильной отчётности",
+        ),
+        replace(
+            _news("unrelated", unrelated),
+            title="Сбербанк открыл новый офис в Казани",
+        ),
+    ]
+    runtime = runtime_from_environment({"NEWS_MATERIALITY_MODE": "shadow"})
+
+    report = materiality_eval_report(news, runtime=runtime)
+
+    summary = report["summary"]
+    assert summary["scored_news"] == 4
+    assert summary["raw_ready_predictions"] == 4
+    assert summary["unique_events"] == 2
+    assert summary["deduplicated_publications"] == 2
+    assert summary["ready_predictions"] == 2
+    assert summary["evaluated"] == 2
+    assert {outcome["news_id"] for outcome in report["outcomes"]} == {
+        "first",
+        "unrelated",
+    }
