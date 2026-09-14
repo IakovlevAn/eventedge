@@ -89,6 +89,7 @@ from eventedge.materiality import MaterialityRuntime
 from eventedge.materiality import (
     runtime_from_environment as materiality_runtime_from_environment,
 )
+from eventedge.materiality_evals import materiality_eval_report
 from eventedge.materiality_pipeline import (
     materiality_api_payload,
     materiality_candidate_tickers,
@@ -3441,7 +3442,10 @@ async def list_evals(
     ] = None,
     config_version: Annotated[int | None, Query(ge=1)] = None,
 ) -> JSONResponse:
-    epochs, observation_counts = await evaluation_epoch_index(request.app)
+    (epochs, observation_counts), (stored_news, _) = await asyncio.gather(
+        evaluation_epoch_index(request.app),
+        load_signal_feed(request),
+    )
     selected_model_version = model_version or CURRENT_NEWS_MODEL_VERSION
     selected_epoch = latest_model_evaluation_epoch(
         epochs,
@@ -3469,6 +3473,10 @@ async def list_evals(
                 "relationships": eval_relationships(selected_outcomes),
                 "quality_series": eval_quality_series(selected_outcomes),
                 "outcomes": selected_outcomes,
+                "materiality": materiality_eval_report(
+                    stored_news,
+                    runtime=request.app.state.materiality_runtime,
+                ),
             },
             "meta": {
                 "generated_at": (

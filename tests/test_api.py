@@ -2408,7 +2408,9 @@ def test_evals_endpoint_exposes_analysis_and_downloads() -> None:
         "relationships",
         "quality_series",
         "outcomes",
+        "materiality",
     }
+    assert response.json()["data"]["materiality"]["status"] == "disabled"
     assert len(response.json()["data"]["breakdowns"]["by_horizon"]) == 4
     assert response.json()["meta"]["primary_horizon"] == "4h"
     assert (

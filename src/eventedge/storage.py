@@ -121,6 +121,7 @@ class MaterialityPredictionRecord:
     feature_schema_version: str
     created_at: datetime
     updated_at: datetime
+    outcome_4h: Mapping[str, object] | None = None
 
     def as_api_dict(self) -> dict[str, object | None]:
         return {
@@ -144,6 +145,9 @@ class MaterialityPredictionRecord:
             "feature_schema_version": self.feature_schema_version,
             "created_at": to_rfc3339(self.created_at),
             "updated_at": to_rfc3339(self.updated_at),
+            "outcome_4h": (
+                dict(self.outcome_4h) if self.outcome_4h is not None else None
+            ),
         }
 
 
@@ -1746,6 +1750,11 @@ def materiality_prediction_parameters(
         "eligible_for_ranking": prediction.eligible_for_ranking,
         "missing_features": list(prediction.missing_features),
         "feature_schema_version": prediction.feature_schema_version,
+        "outcome_4h": (
+            dict(prediction.outcome_4h)
+            if prediction.outcome_4h is not None
+            else None
+        ),
     }
     return {
         "$prediction_id": prediction.id,
@@ -1820,6 +1829,9 @@ def materiality_prediction_from_row(row: object) -> MaterialityPredictionRecord:
     missing = payload.get("missing_features")
     if not isinstance(missing, list):
         raise ValueError("stored materiality missing features must be a list")
+    stored_outcome = payload.get("outcome_4h")
+    if stored_outcome is not None and not isinstance(stored_outcome, dict):
+        raise ValueError("stored materiality outcome must be an object")
     return MaterialityPredictionRecord(
         id=row.prediction_id,
         news_id=row.news_id,
@@ -1845,6 +1857,11 @@ def materiality_prediction_from_row(row: object) -> MaterialityPredictionRecord:
         feature_schema_version=str(payload["feature_schema_version"]),
         created_at=ensure_utc(row.created_at),
         updated_at=ensure_utc(row.updated_at),
+        outcome_4h=(
+            {str(name): value for name, value in stored_outcome.items()}
+            if stored_outcome is not None
+            else None
+        ),
     )
 
 

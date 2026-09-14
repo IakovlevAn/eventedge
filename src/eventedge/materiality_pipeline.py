@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Protocol
 
@@ -22,6 +22,10 @@ from eventedge.materiality import (
     PortableMaterialityModel,
     build_materiality_feature_row,
     missing_materiality_features,
+)
+from eventedge.materiality_evals import (
+    MATERIALITY_HORIZON,
+    evaluate_materiality_outcome,
 )
 from eventedge.storage import (
     MaterialityPredictionRecord,
@@ -60,6 +64,13 @@ class MaterialityCandidate:
     @property
     def decision_at(self) -> datetime:
         return self.news.published_at.astimezone(UTC) + DECISION_DELAY
+
+
+@dataclass(frozen=True)
+class MaterialityOutcomeCandidate:
+    """A completed decision whose four-hour market outcome is due."""
+
+    prediction: MaterialityPredictionRecord
 
 
 def select_materiality_candidates(
@@ -152,6 +163,13 @@ async def refresh_materiality_predictions(
         now=evaluated_at,
     )
     selected = candidates[: runtime.batch_limit]
+    all_outcome_candidates = select_materiality_outcome_candidates(
+        news,
+        model_version=runtime.model.model_version,
+        artifact_payload_sha256=runtime.model.artifact_payload_sha256,
+        now=evaluated_at,
+    )
+    outcome_candidates = all_outcome_candidates[: runtime.batch_limit]
     semaphore = asyncio.Semaphore(MATERIALITY_CONCURRENCY)
 
     async def process(candidate: MaterialityCandidate) -> str:
@@ -174,8 +192,61 @@ async def refresh_materiality_predictions(
                 return "failed"
 
     statuses = await asyncio.gather(*(process(candidate) for candidate in selected))
+
+    async def settle(candidate: MaterialityOutcomeCandidate) -> str:
+        async with semaphore:
+            try:
+                stock, benchmark = await asyncio.gather(
+                    market_data.candles(
+                        candidate.prediction.ticker,
+                        interval=1,
+                        lookback_days=INTRADAY_LOOKBACK_DAYS,
+                    ),
+                    market_data.candles(
+                        MATERIALITY_BENCHMARK_TICKER,
+                        interval=1,
+                        lookback_days=INTRADAY_LOOKBACK_DAYS,
+                    ),
+                )
+                outcome = evaluate_materiality_outcome(
+                    candidate.prediction,
+                    stock,
+                    benchmark,
+                    now=evaluated_at,
+                )
+                if outcome is None:
+                    return "pending"
+                await repository.upsert_materiality_prediction(
+                    replace(
+                        candidate.prediction,
+                        outcome_4h=outcome,
+                        updated_at=evaluated_at,
+                    )
+                )
+                return str(outcome["status"])
+            except (InstrumentNotFoundError, MarketDataUnavailableError, ValueError):
+                LOGGER.warning(
+                    "Materiality outcome unavailable for %s/%s",
+                    candidate.prediction.news_id,
+                    candidate.prediction.ticker,
+                    exc_info=True,
+                )
+                return "failed"
+            except Exception:
+                LOGGER.exception(
+                    "Unexpected materiality outcome failure for %s/%s",
+                    candidate.prediction.news_id,
+                    candidate.prediction.ticker,
+                )
+                return "failed"
+
+    outcome_statuses = await asyncio.gather(
+        *(settle(candidate) for candidate in outcome_candidates)
+    )
     return {
-        "status": "ok" if "failed" not in statuses else "partial",
+        "status": (
+            "ok" if "failed" not in (*statuses, *outcome_statuses) else "partial"
+        ),
         "mode": runtime.mode.value,
         "model_version": runtime.model.model_version,
         "attempted": len(selected),
@@ -183,7 +254,49 @@ async def refresh_materiality_predictions(
         "deferred": statuses.count("deferred"),
         "failed": statuses.count("failed"),
         "remaining": max(0, len(candidates) - len(selected)),
+        "outcomes_attempted": len(outcome_candidates),
+        "outcomes_evaluated": outcome_statuses.count("evaluated"),
+        "outcomes_unavailable": outcome_statuses.count("unavailable"),
+        "outcomes_pending": outcome_statuses.count("pending"),
+        "outcomes_failed": outcome_statuses.count("failed"),
+        "outcomes_remaining": max(
+            0, len(all_outcome_candidates) - len(outcome_candidates)
+        ),
     }
+
+
+def select_materiality_outcome_candidates(
+    news: Sequence[NewsRecord],
+    *,
+    model_version: str,
+    artifact_payload_sha256: str,
+    now: datetime,
+) -> list[MaterialityOutcomeCandidate]:
+    """Select current ready predictions whose outcomes can start resolving."""
+    _require_aware(now, "now")
+    current_time = now.astimezone(UTC)
+    candidates = []
+    seen: set[str] = set()
+    for item in news:
+        for prediction in item.materiality_predictions:
+            if (
+                prediction.id in seen
+                or prediction.model_version != model_version
+                or prediction.artifact_payload_sha256 != artifact_payload_sha256
+                or prediction.status != "ready"
+                or prediction.outcome_4h is not None
+                or prediction.decision_at + MATERIALITY_HORIZON > current_time
+            ):
+                continue
+            seen.add(prediction.id)
+            candidates.append(MaterialityOutcomeCandidate(prediction=prediction))
+    return sorted(
+        candidates,
+        key=lambda candidate: (
+            candidate.prediction.decision_at,
+            candidate.prediction.id,
+        ),
+    )
 
 
 async def infer_materiality_prediction(
