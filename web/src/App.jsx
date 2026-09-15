@@ -1722,7 +1722,7 @@ function EvalsScreen() {
         <div><span className="eyebrow"><Activity size={13} /> Проверка реальностью</span><h1>Evals: модели в цифрах</h1><p>Здесь отдельно проверяются два вопроса: угадала ли формула направление и смогла ли ML‑модель заранее выделить новость с заметной реакцией цены.</p></div>
         <div className="eval-hero-actions">
           <div className={`eval-live${error ? " is-stale" : ""}`}><i /><span><strong>{error ? "Показываем последний snapshot" : "Snapshot каждые 10 минут"}</strong><small>{payload.meta.generated_at ? `${formatRelative(payload.meta.generated_at)} · ` : "Расчёт новой эпохи ожидается · "}основной горизонт 4 часа</small></span></div>
-          <FilterSelect className="eval-model-filter" label="Эпоха модели" value={activeEpochKey} onChange={setSelectedEpochKey} options={orderedModelEpochs.map((epoch) => ({ value: `${epoch.model_version}::${epoch.config_version}`, label: `${epoch.model_version} · cfg ${epoch.config_version} · n=${epoch.signals}` }))} />
+          <FilterSelect className="eval-model-filter" label="Эпоха модели" value={activeEpochKey} onChange={setSelectedEpochKey} options={orderedModelEpochs.map((epoch) => ({ value: `${epoch.model_version}::${epoch.config_version}`, label: `${epoch.model_version} · cfg ${epoch.config_version} · ledger n=${epoch.signals}` }))} />
           <div className="eval-exports">
             <a href={apiUrl("/v1/evals/export?format=csv&dataset=outcomes&model_version=all&download=true")} download><Download size={13} /> Все эпохи · outcomes</a>
             <a href={apiUrl("/v1/evals/export?format=json&dataset=timeseries&model_version=all&limit=2000")} target="_blank" rel="noreferrer"><Download size={13} /> Raw · API-страницы</a>
@@ -1762,10 +1762,10 @@ function EvalsScreen() {
         </section>
       </>}
 
-      <section className="eval-warning"><ShieldCheck size={17} /><div><strong>Это технический eval, а не доказательство доходности</strong><span>Общая статистика покрывает весь ledger. Hit rate включает только directional live‑сигналы; нейтральные и ретроспективные outcome остаются в выгрузке для исследования.</span></div></section>
+      <section className="eval-warning"><ShieldCheck size={17} /><div><strong>Это технический eval, а не доказательство доходности</strong><span>Метрики считают каждый инфоповод один раз по самому раннему сигналу. Hit rate включает только directional live‑события; все исходные сигналы, нейтральные и ретроспективные outcome остаются в audit‑выгрузке.</span></div></section>
 
       <section className="eval-kpis">
-        <article><span>Сигналов в ledger</span><strong>{summary.signals_total}</strong><small>directional {summary.directional_signals ?? summary.evaluated} · без направления {summary.neutral_signals ?? 0}</small></article>
+        <article><span>Инфоповодов в оценке</span><strong>{summary.unique_events ?? summary.signals_total}</strong><small>сырой ledger {summary.raw_signals_total ?? summary.signals_total} · объединено повторов {summary.deduplicated_publications ?? 0}</small></article>
         <article><span>Hit rate · directional live</span><strong>{hitRate}</strong><small>только вверх/вниз · 4 часа, fallback на 1 час</small></article>
         <article><span>Средняя реакция</span><strong className={Number(liveSummary.average_signed_return_pct) >= 0 ? "market-positive" : "market-negative"}>{averageReturn}</strong><small>live · медиана {medianReturn} · signed return за 4 часа</small></article>
         <article><span>Покрытие directional live</span><strong>{liveSummary.coverage_pct}%</strong><small>{liveSummary.pending} ждут · {liveSummary.missed_window || 0} без окна 1–4 ч · {liveSummary.unavailable} без истории</small></article>
@@ -1833,12 +1833,12 @@ function EvalsScreen() {
 
       <section className="eval-export-note">
         <FileText size={17} />
-        <div><strong>Данные по эпохам не затираются</strong><span>UI считает качество на 1–4 часах. В БД и выгрузке хранятся model/config version и сырые 10‑минутные свечи до +3 дней для временных рядов.</span></div>
+        <div><strong>Данные по эпохам не затираются</strong><span>UI считает качество уникальных инфоповодов на 1–4 часах. В БД и выгрузке остаются каждый исходный сигнал, model/config version и сырые 10‑минутные свечи до +3 дней.</span></div>
         <a href={apiUrl("/v1/evals/export?format=json&dataset=outcomes&model_version=all&download=true")} target="_blank" rel="noreferrer">Все эпохи JSON <ArrowUpRight size={12} /></a>
       </section>
 
       <section className="outcomes-card">
-        <div className="section-heading"><span><BarChart3 size={15} /> Реакция после каждого сигнала</span><small>{visibleOutcomes.length} самых свежих · цена от первой торгуемой свечи</small></div>
+        <div className="section-heading"><span><BarChart3 size={15} /> Реакция после каждого инфоповода</span><small>{visibleOutcomes.length} самых свежих · самый ранний сигнал · цена от первой торгуемой свечи</small></div>
         <div className="eval-table-wrap">
           <table className="eval-table outcomes-table">
             <colgroup><col className="outcome-col-signal" /><col className="outcome-col-news" /><col span="4" className="outcome-col-return" /><col className="outcome-col-verdict" /></colgroup>
@@ -1846,6 +1846,11 @@ function EvalsScreen() {
             <tbody>
               {visibleOutcomes.map((outcome) => {
                 const outcomeView = evalOutcomeView(outcome);
+                const eventPublicationCount = Number(outcome.event_publication_count || 0);
+                const eventSourceCount = Number(outcome.event_source_count || 0);
+                const eventSourcesTitle = (outcome.event_publications || [])
+                  .map((publication) => `${publication.publisher || publication.source_id}: ${publication.title}`)
+                  .join("\n");
                 const verdictIcon = outcomeView.verdictStatus === "non_directional"
                   ? <Minus size={11} />
                   : outcomeView.verdictStatus === "evaluated"
@@ -1857,7 +1862,7 @@ function EvalsScreen() {
                       : null;
                 return <tr key={outcome.signal_id}>
                   <td><div className="outcome-signal-cell"><div className="outcome-signal"><strong>{outcome.ticker}</strong><Direction direction={outcome.direction} /><small>{formatScore(outcome.score)} п.</small></div><span className={`outcome-cohort is-${outcomeView.cohort}`}>{outcomeView.cohortLabel}</span></div></td>
-                  <td>{outcome.news ? <a href={outcome.news.url} target="_blank" rel="noreferrer" title={outcome.news.title}><span>{outcome.news.source_id}</span><strong>{outcome.news.title}</strong></a> : <span>Источник недоступен</span>}</td>
+                  <td>{outcome.news ? <a href={outcome.news.url} target="_blank" rel="noreferrer" title={outcome.news.title}><span>{outcome.news.source_id}{eventPublicationCount > 1 && <i className="outcome-source-count" title={eventSourcesTitle}>{eventSourceCount} источников · {eventPublicationCount} публикаций</i>}</span><strong>{outcome.news.title}</strong></a> : <span>Источник недоступен</span>}</td>
                   {["1h", "4h", "1d", "3d"].map((period) => {
                     const value = outcome.returns?.[period];
                     return <td key={period} className={value === null || value === undefined ? "" : Number(value) >= 0 ? "market-positive" : "market-negative"}>{formatPct(value)}</td>;

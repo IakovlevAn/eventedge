@@ -2415,8 +2415,9 @@ def test_evals_endpoint_exposes_analysis_and_downloads() -> None:
     assert response.json()["meta"]["primary_horizon"] == "4h"
     assert (
         response.json()["meta"]["evaluation_scope"]
-        == "all_stored_signals"
+        == "unique_ticker_events_earliest_signal"
     )
+    assert response.json()["meta"]["raw_ledger_scope"] == "all_stored_signals"
     assert response.json()["meta"]["model_epochs"]
     assert all(
         outcome["direction"] in {"up", "down", "neutral"}
@@ -2431,6 +2432,114 @@ def test_evals_endpoint_exposes_analysis_and_downloads() -> None:
     assert timeseries_export.json()["meta"]["dataset"] == "timeseries"
     assert timeseries_export.json()["meta"]["truncated"] is False
     assert fake_market.calls == 0
+
+
+def test_directional_evals_are_event_level_while_export_keeps_raw_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = MemoryNewsRepository()
+    published = datetime(2026, 9, 15, 8, tzinfo=UTC)
+
+    def outcome(signal_id: str, title: str, minute: int) -> dict[str, object]:
+        at = published + timedelta(minutes=minute)
+        timestamp = to_rfc3339(at)
+        return {
+            "signal_id": signal_id,
+            "ticker": "VTBR",
+            "direction": "down",
+            "as_of": timestamp,
+            "data_cutoff_at": timestamp,
+            "signal_created_at": timestamp,
+            "evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
+            "eligibility": {
+                "eligible": True,
+                "reason": None,
+                "cohort": "live",
+                "decision_at": timestamp,
+                "live_decision_at": timestamp,
+                "evaluation_anchor": "live_decision",
+                "processing_lag_seconds": 0,
+            },
+            "status": "partial",
+            "score": -48.8,
+            "confidence": 0.8,
+            "returns": {"1h": -0.32, "4h": None, "1d": None, "3d": None},
+            "horizon_observations": {},
+            "verdict": True,
+            "verdict_status": "evaluated",
+            "model_version": "signal-engine-0.6.1",
+            "config_version": 7,
+            "news": {
+                "id": f"news_{signal_id}",
+                "title": title,
+                "source_id": "google_news",
+                "url": f"https://example.com/{signal_id}",
+                "published_at": timestamp,
+                "received_at": timestamp,
+                "delivery_lag_seconds": 0,
+            },
+        }
+
+    raw_outcomes = (
+        outcome(
+            "sig_vtbr_first",
+            "США ввели новые санкции против ВТБ за помощь Ирану - Голос Америки",
+            0,
+        ),
+        outcome(
+            "sig_vtbr_second",
+            "США внесли ВТБ в санкционный список по Ирану - meduza.io",
+            5,
+        ),
+    )
+    asyncio.run(
+        repository.upsert_evaluation_epoch(
+            EvaluationEpochRecord(
+                epoch_id="eval_directional_dedup",
+                model_version="signal-engine-0.6.1",
+                config_version=7,
+                evaluated_at=published + timedelta(hours=1),
+                outcomes=raw_outcomes,
+                observations=(),
+            )
+        )
+    )
+    monkeypatch.setattr(app.state, "news_repository", repository)
+    monkeypatch.setattr(app.state, "content_snapshot_cache", None)
+    monkeypatch.setattr(app.state, "evaluation_epoch_index_cache", None)
+
+    response = client.get(
+        "/v1/evals",
+        params={"model_version": "signal-engine-0.6.1", "config_version": 7},
+    )
+    raw_export = client.get(
+        "/v1/evals/export",
+        params={
+            "format": "json",
+            "dataset": "outcomes",
+            "model_version": "signal-engine-0.6.1",
+            "config_version": 7,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["data"]["summary"]["signals_total"] == 1
+    assert payload["data"]["summary"]["raw_signals_total"] == 2
+    assert payload["data"]["summary"]["deduplicated_publications"] == 1
+    assert [item["signal_id"] for item in payload["data"]["outcomes"]] == [
+        "sig_vtbr_first"
+    ]
+    assert payload["data"]["outcomes"][0]["event_signal_ids"] == [
+        "sig_vtbr_first",
+        "sig_vtbr_second",
+    ]
+    assert raw_export.status_code == 200
+    assert raw_export.json()["meta"]["total_rows"] == 2
+    assert {item["signal_id"] for item in raw_export.json()["data"]} == {
+        "sig_vtbr_first",
+        "sig_vtbr_second",
+    }
 
 
 def test_evals_export_paginates_filters_config_and_compresses_full_download(

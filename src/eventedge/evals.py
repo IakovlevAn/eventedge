@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import re
 import statistics
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 
 from eventedge.analysis import DEFAULT_MOEX_ALIASES
@@ -661,27 +661,316 @@ EVAL_TITLE_STOP_WORDS = frozenset(
     }
 )
 
+EVAL_EVENT_WINDOW = timedelta(hours=72)
+EVAL_PUBLISHER_SUFFIXES = frozenset(
+    {
+        "bfm",
+        "dw",
+        "frank media",
+        "голос америки",
+        "интерфакс",
+        "коммерсантъ",
+        "медуза",
+        "рбк",
+        "тасс",
+        "the moscow times",
+        "ведомости",
+    }
+)
+EVAL_TOKEN_PREFIXES = (
+    ("санкц", "санкция"),
+    ("росси", "россия"),
+    ("американ", "сша"),
+    ("иран", "иран"),
+    ("кита", "китай"),
+    ("украин", "украина"),
+    ("беларус", "беларусь"),
+    ("белорус", "беларусь"),
+    ("сири", "сирия"),
+    ("израил", "израиль"),
+    ("турц", "турция"),
+    ("индий", "индия"),
+    ("индие", "индия"),
+    ("евросоюз", "евросоюз"),
+)
+EVAL_GEO_TOKENS = frozenset(
+    {
+        "сша",
+        "россия",
+        "иран",
+        "китай",
+        "украина",
+        "беларусь",
+        "сирия",
+        "израиль",
+        "турция",
+        "индия",
+        "евросоюз",
+    }
+)
+_PUBLISHER_DOMAIN = re.compile(
+    r"(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/.*)?$",
+    re.IGNORECASE,
+)
+
+
+def _canonical_eval_token(token: str) -> str:
+    for prefix, canonical in EVAL_TOKEN_PREFIXES:
+        if token.startswith(prefix):
+            return canonical
+    return token
+
+
+def _title_without_publisher(title: str) -> tuple[str, str | None]:
+    """Remove a discovery-feed publisher suffix without truncating normal dashes."""
+    parts = re.split(r"\s+[—–-]\s+", title.strip())
+    if len(parts) < 2:
+        return title, None
+    suffix = parts[-1].strip()
+    normalized_suffix = re.sub(r"[^a-zа-яё0-9]+", " ", suffix.casefold()).strip()
+    if not (
+        _PUBLISHER_DOMAIN.fullmatch(suffix.casefold())
+        or normalized_suffix in EVAL_PUBLISHER_SUFFIXES
+    ):
+        return title, None
+    return " — ".join(parts[:-1]).strip(), suffix
+
 
 def _eval_title_tokens(title: str) -> set[str]:
+    headline, _ = _title_without_publisher(title)
     return {
-        token
-        for token in re.sub(r"[^a-zа-яё0-9]+", " ", title.casefold()).split()
+        _canonical_eval_token(token)
+        for token in re.sub(r"[^a-zа-яё0-9]+", " ", headline.casefold()).split()
         if len(token) > 2 and token not in EVAL_TITLE_STOP_WORDS
     }
 
 
-def same_eval_event(left: NewsRecord, right: NewsRecord) -> bool:
-    """Return whether two publications describe the same evaluation event."""
-    left_tokens = _eval_title_tokens(left.title)
-    right_tokens = _eval_title_tokens(right.title)
+def _same_eval_title_event(
+    left_title: str,
+    left_published_at: datetime,
+    right_title: str,
+    right_published_at: datetime,
+) -> bool:
+    left_tokens = _eval_title_tokens(left_title)
+    right_tokens = _eval_title_tokens(right_title)
     if not left_tokens or not right_tokens:
+        return False
+    if abs((left_published_at - right_published_at).total_seconds()) > int(
+        EVAL_EVENT_WINDOW.total_seconds()
+    ):
         return False
     if left_tokens == right_tokens:
         return True
-    if abs((left.published_at - right.published_at).total_seconds()) > 72 * 60 * 60:
+
+    # Shared actors such as the US must not hide a conflicting country-level
+    # context (for example, two separate sanctions decisions involving Iran
+    # and China). A headline may omit the context, so only a two-sided conflict
+    # blocks a match.
+    if _eval_geo_context_conflicts(left_tokens, right_tokens):
         return False
+
     overlap = len(left_tokens & right_tokens)
     return overlap / min(len(left_tokens), len(right_tokens)) >= 0.6
+
+
+def _eval_geo_context_conflicts(left_tokens: set[str], right_tokens: set[str]) -> bool:
+    left_geo = left_tokens & EVAL_GEO_TOKENS
+    right_geo = right_tokens & EVAL_GEO_TOKENS
+    return bool((left_geo - right_geo) and (right_geo - left_geo))
+
+
+def same_eval_event(left: NewsRecord, right: NewsRecord) -> bool:
+    """Return whether two publications describe the same evaluation event."""
+    return _same_eval_title_event(
+        left.title,
+        left.published_at,
+        right.title,
+        right.published_at,
+    )
+
+
+def _parse_eval_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=parsed.tzinfo or UTC).astimezone(UTC)
+
+
+def _outcome_timestamp(outcome: Mapping[str, object]) -> datetime | None:
+    news = outcome.get("news")
+    for value in (
+        news.get("published_at") if isinstance(news, Mapping) else None,
+        outcome.get("as_of"),
+        outcome.get("signal_created_at"),
+    ):
+        if (parsed := _parse_eval_timestamp(value)) is not None:
+            return parsed
+    return None
+
+
+def _outcome_decision_timestamp(outcome: Mapping[str, object]) -> datetime | None:
+    eligibility = outcome.get("eligibility")
+    for value in (
+        eligibility.get("decision_at") if isinstance(eligibility, Mapping) else None,
+        outcome.get("as_of"),
+        outcome.get("signal_created_at"),
+    ):
+        if (parsed := _parse_eval_timestamp(value)) is not None:
+            return parsed
+    return None
+
+
+def _outcome_order_key(outcome: Mapping[str, object]) -> tuple[datetime, datetime, str]:
+    missing = datetime.min.replace(tzinfo=UTC)
+    return (
+        _outcome_timestamp(outcome) or missing,
+        _outcome_decision_timestamp(outcome) or missing,
+        str(outcome.get("signal_id", "")),
+    )
+
+
+def _outcome_representative_key(
+    outcome: Mapping[str, object],
+) -> tuple[datetime, datetime, str]:
+    missing = datetime.max.replace(tzinfo=UTC)
+    return (
+        _outcome_decision_timestamp(outcome) or missing,
+        _outcome_timestamp(outcome) or missing,
+        str(outcome.get("signal_id", "")),
+    )
+
+
+def _same_eval_outcome_event(
+    left: Mapping[str, object],
+    right: Mapping[str, object],
+) -> bool:
+    if not left.get("ticker") or left.get("ticker") != right.get("ticker"):
+        return False
+    left_news = left.get("news")
+    right_news = right.get("news")
+    if not isinstance(left_news, Mapping) or not isinstance(right_news, Mapping):
+        return False
+    if left_news.get("id") and left_news.get("id") == right_news.get("id"):
+        return True
+    left_title = left_news.get("title")
+    right_title = right_news.get("title")
+    left_time = _outcome_timestamp(left)
+    right_time = _outcome_timestamp(right)
+    if not isinstance(left_title, str) or not isinstance(right_title, str):
+        return False
+    if left_time is None or right_time is None:
+        return False
+    return _same_eval_title_event(left_title, left_time, right_title, right_time)
+
+
+def _eval_outcome_geo_tokens(outcome: Mapping[str, object]) -> set[str]:
+    news = outcome.get("news")
+    title = news.get("title") if isinstance(news, Mapping) else None
+    return _eval_title_tokens(title) & EVAL_GEO_TOKENS if isinstance(title, str) else set()
+
+
+def _compatible_eval_context(outcomes: Iterable[Mapping[str, object]]) -> bool:
+    geo_sets = [_eval_outcome_geo_tokens(outcome) for outcome in outcomes]
+    return not any(
+        _eval_geo_context_conflicts(left, right)
+        for index, left in enumerate(geo_sets)
+        for right in geo_sets[index + 1 :]
+    )
+
+
+def _eval_outcome_groups(
+    outcomes: Iterable[Mapping[str, object]],
+) -> list[list[dict[str, object]]]:
+    """Build deterministic connected components without semantic-context drift."""
+    ordered = sorted(
+        (dict(outcome) for outcome in outcomes),
+        key=_outcome_order_key,
+    )
+    groups: list[list[dict[str, object]]] = []
+    for outcome in ordered:
+        matching_indexes = []
+        merged = [outcome]
+        for index, group in enumerate(groups):
+            if not any(_same_eval_outcome_event(member, outcome) for member in group):
+                continue
+            if not _compatible_eval_context([*merged, *group]):
+                continue
+            matching_indexes.append(index)
+            merged.extend(group)
+        if not matching_indexes:
+            groups.append([outcome])
+            continue
+        first_index = matching_indexes[0]
+        for index in reversed(matching_indexes[1:]):
+            groups.pop(index)
+        groups[first_index] = sorted(
+            merged,
+            key=_outcome_order_key,
+        )
+    return groups
+
+
+def _event_publications(group: Iterable[Mapping[str, object]]) -> list[dict[str, object]]:
+    publications = []
+    for outcome in group:
+        news = outcome.get("news")
+        if not isinstance(news, Mapping):
+            continue
+        publication = dict(news)
+        title = str(publication.get("title", ""))
+        _, publisher = _title_without_publisher(title)
+        publication["publisher"] = publisher or str(publication.get("source_id", ""))
+        publications.append(publication)
+    return sorted(
+        publications,
+        key=lambda item: (
+            str(item.get("published_at", "")),
+            str(item.get("id", "")),
+            str(item.get("url", "")),
+        ),
+    )
+
+
+def deduplicate_eval_outcomes(
+    outcomes: Iterable[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Expose one earliest point-in-time decision per ticker-level news event.
+
+    The stored outcome ledger remains immutable. Representatives retain the
+    complete signal/source provenance needed by the UI and audit links.
+    """
+    representatives = []
+    for group in _eval_outcome_groups(outcomes):
+        representative = dict(min(group, key=_outcome_representative_key))
+        publications = _event_publications(group)
+        source_labels = sorted(
+            {
+                str(item.get("publisher", "")).strip()
+                for item in publications
+                if str(item.get("publisher", "")).strip()
+            },
+            key=str.casefold,
+        )
+        representative.update(
+            {
+                "event_signal_ids": [str(item.get("signal_id", "")) for item in group],
+                "event_signal_count": len(group),
+                "event_publication_count": len(publications),
+                "event_source_count": len(source_labels),
+                "event_sources": source_labels,
+            }
+        )
+        if len(group) > 1:
+            representative["event_publications"] = publications
+        representatives.append(representative)
+    return sorted(
+        representatives,
+        key=_outcome_order_key,
+        reverse=True,
+    )
 
 
 def deduplicate_eval_events(
