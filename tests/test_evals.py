@@ -5,6 +5,7 @@ from eventedge.evals import (
     EVALUATION_METHODOLOGY_VERSION,
     build_assessment,
     deduplicate_eval_events,
+    deduplicate_eval_outcomes,
     deduplicate_eval_signals,
     eval_breakdowns,
     eval_quality_series,
@@ -15,6 +16,7 @@ from eventedge.evals import (
     normalize_neutral_eval_outcome,
     outcome_export_rows,
     quant_factors,
+    same_eval_event,
 )
 from eventedge.storage import NewsRecord, SignalRecord
 
@@ -736,3 +738,213 @@ def test_eval_counts_one_market_event_and_prefers_latest_model() -> None:
     )
 
     assert {signal.id for signal in epoch_result} == {"sig_old", "sig_current_first"}
+
+
+def test_eval_event_matcher_normalizes_sanctions_wave_without_merging_other_context() -> None:
+    published = datetime(2026, 9, 15, 8, tzinfo=UTC)
+    first = replace(
+        reporting_news(),
+        id="news_vtbr_iran_first",
+        published_at=published,
+        received_at=published + timedelta(minutes=1),
+        title="США ввели новые санкции против ВТБ за помощь Ирану - Голос Америки",
+    )
+    corroboration = replace(
+        first,
+        id="news_vtbr_iran_second",
+        published_at=published + timedelta(minutes=8),
+        received_at=published + timedelta(minutes=9),
+        title="США внесли ВТБ в санкционный список по Ирану - meduza.io",
+    )
+    different_context = replace(
+        first,
+        id="news_vtbr_china",
+        published_at=published + timedelta(minutes=10),
+        received_at=published + timedelta(minutes=11),
+        title="США ввели санкции против ВТБ за операции с Китаем - example.com",
+    )
+    late_repeat = replace(
+        corroboration,
+        id="news_vtbr_iran_late",
+        published_at=published + timedelta(hours=73),
+        received_at=published + timedelta(hours=73, minutes=1),
+    )
+
+    assert same_eval_event(first, corroboration) is True
+    assert same_eval_event(first, different_context) is False
+    assert same_eval_event(first, late_repeat) is False
+
+
+def test_directional_eval_outcomes_collapse_screenshot_wave_and_keep_provenance() -> None:
+    published = datetime(2026, 9, 15, 8, tzinfo=UTC)
+    publications = [
+        ("США внесли ВТБ в санкционный список по Ирану", "tass"),
+        ("США внесли ВТБ в санкционный список по Ирану", "rbc"),
+        ("США включили банк ВТБ в антииранский санкционный список - finam.ru", "google_news"),
+        ("Минфин США внес ВТБ в иранские санкционные списки - interfax.ru", "google_news"),
+        ("Минфин США внес ВТБ в иранские санкционные списки", "interfax"),
+        ("🇺🇸🇷🇺Минфин США внес ВТБ в иранские санкционные списки", "telegram_interfaxonline"),
+        ("⚡️Минфин США внес ВТБ в санкционный список по Ирану — ТАСС", "telegram_bbbreaking"),
+        ("США внесли ВТБ в санкционный список по Ирану - meduza.io", "google_news"),
+        ("США внесли ВТБ в санкционный список по Ирану - business-gazeta.ru", "google_news"),
+        ("⚡️Минфин США внёс ВТБ в санкционный список по Ирану — ТАСС", "telegram_ru2ch"),
+        ("США расширили санкции против ВТБ из-за операций с Ираном - bfm.ru", "google_news"),
+        (
+            "США ввели новые санкции против ВТБ за помощь в обходе санкций "
+            "против Ирана - ru.themoscowtimes.com",
+            "google_news",
+        ),
+        ("США внесли российский ВТБ в иранский санкционный список - DW.com", "google_news"),
+        ("США внесли ВТБ в санкционный список по Ирану - meduza.io", "google_news"),
+        ("США расширили санкции против ВТБ за помощь Ирану - frankmedia.ru", "google_news"),
+        ("США ввели новые санкции против ВТБ за помощь Ирану - Голос Америки", "google_news"),
+    ]
+    outcomes = []
+    for index, (title, source_id) in enumerate(publications):
+        at = published + timedelta(minutes=index)
+        outcomes.append(
+            {
+                "signal_id": f"sig_vtbr_{index}",
+                "ticker": "VTBR",
+                "as_of": at.isoformat().replace("+00:00", "Z"),
+                "direction": "down",
+                "score": -48.8,
+                "news": {
+                    "id": f"news_vtbr_{index}",
+                    "title": title,
+                    "source_id": source_id,
+                    "url": f"https://example.com/news/{index}",
+                    "published_at": at.isoformat().replace("+00:00", "Z"),
+                },
+            }
+        )
+    unrelated = {
+        **outcomes[-1],
+        "signal_id": "sig_vtbr_china",
+        "as_of": (published + timedelta(minutes=9)).isoformat().replace("+00:00", "Z"),
+        "news": {
+            **outcomes[-1]["news"],
+            "id": "news_vtbr_china",
+            "title": "США ввели санкции против ВТБ за операции с Китаем - example.com",
+            "published_at": (published + timedelta(minutes=9))
+            .isoformat()
+            .replace("+00:00", "Z"),
+        },
+    }
+
+    result = deduplicate_eval_outcomes([*reversed(outcomes), unrelated])
+
+    assert len(result) == 2
+    iran_event = next(item for item in result if item["signal_id"] == "sig_vtbr_0")
+    assert iran_event["event_signal_count"] == 16
+    assert iran_event["event_publication_count"] == 16
+    assert iran_event["event_source_count"] == 14
+    assert iran_event["event_signal_ids"] == [f"sig_vtbr_{index}" for index in range(16)]
+    assert len(iran_event["event_publications"]) == 16
+    assert outcomes[0].get("event_signal_count") is None
+
+
+def test_directional_eval_outcome_bridge_cannot_merge_conflicting_contexts() -> None:
+    published = datetime(2026, 9, 15, 8, tzinfo=UTC)
+
+    def outcome(signal_id: str, title: str, minute: int) -> dict[str, object]:
+        at = published + timedelta(minutes=minute)
+        return {
+            "signal_id": signal_id,
+            "ticker": "VTBR",
+            "as_of": at.isoformat().replace("+00:00", "Z"),
+            "news": {
+                "id": f"news_{signal_id}",
+                "title": title,
+                "source_id": "google_news",
+                "url": f"https://example.com/{signal_id}",
+                "published_at": at.isoformat().replace("+00:00", "Z"),
+            },
+        }
+
+    iran = outcome(
+        "iran",
+        "США ввели санкции против ВТБ за операции с Ираном - iran.example.com",
+        0,
+    )
+    unspecified = outcome(
+        "unspecified",
+        "США ввели санкции против ВТБ - wire.example.com",
+        1,
+    )
+    china = outcome(
+        "china",
+        "США ввели санкции против ВТБ за операции с Китаем - china.example.com",
+        2,
+    )
+
+    result = deduplicate_eval_outcomes([china, unspecified, iran])
+
+    assert len(result) == 2
+    assert {tuple(item["event_signal_ids"]) for item in result} == {
+        ("iran", "unspecified"),
+        ("china",),
+    }
+
+
+def test_directional_eval_event_prefers_earliest_decision_for_same_publication() -> None:
+    published = "2026-09-15T08:00:00Z"
+    later = {
+        "signal_id": "sig_a_later",
+        "ticker": "VTBR",
+        "as_of": "2026-09-15T08:10:00Z",
+        "eligibility": {"decision_at": "2026-09-15T08:10:00Z"},
+        "news": {
+            "id": "news_shared",
+            "title": "США внесли ВТБ в санкционный список по Ирану",
+            "source_id": "tass",
+            "url": "https://example.com/shared",
+            "published_at": published,
+        },
+    }
+    earlier = {
+        **later,
+        "signal_id": "sig_z_earlier",
+        "as_of": "2026-09-15T08:05:00Z",
+        "eligibility": {"decision_at": "2026-09-15T08:05:00Z"},
+    }
+
+    result = deduplicate_eval_outcomes([later, earlier])
+
+    assert len(result) == 1
+    assert result[0]["signal_id"] == "sig_z_earlier"
+    assert result[0]["event_signal_ids"] == ["sig_z_earlier", "sig_a_later"]
+
+
+def test_directional_eval_event_does_not_prefer_an_older_late_backfill() -> None:
+    backfill = {
+        "signal_id": "sig_backfill",
+        "ticker": "VTBR",
+        "as_of": "2026-09-15T10:00:00Z",
+        "eligibility": {"decision_at": "2026-09-15T10:00:00Z"},
+        "news": {
+            "id": "news_backfill",
+            "title": "США внесли ВТБ в санкционный список по Ирану",
+            "source_id": "archive",
+            "url": "https://example.com/backfill",
+            "published_at": "2026-09-15T07:00:00Z",
+        },
+    }
+    live = {
+        **backfill,
+        "signal_id": "sig_live",
+        "as_of": "2026-09-15T08:01:00Z",
+        "eligibility": {"decision_at": "2026-09-15T08:01:00Z"},
+        "news": {
+            **backfill["news"],
+            "id": "news_live",
+            "source_id": "tass",
+            "url": "https://example.com/live",
+            "published_at": "2026-09-15T08:00:00Z",
+        },
+    }
+
+    result = deduplicate_eval_outcomes([backfill, live])
+
+    assert len(result) == 1
+    assert result[0]["signal_id"] == "sig_live"

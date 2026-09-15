@@ -60,6 +60,7 @@ from eventedge.evals import (
     MAX_LIVE_PROCESSING_LAG,
     build_assessment,
     deduplicate_eval_events,
+    deduplicate_eval_outcomes,
     eval_breakdowns,
     eval_quality_series,
     eval_relationships,
@@ -3452,7 +3453,14 @@ async def list_evals(
         selected_model_version,
         config_version,
     )
-    selected_outcomes = directional_epoch_outcomes(selected_epoch)
+    raw_selected_outcomes = directional_epoch_outcomes(selected_epoch)
+    selected_outcomes = deduplicate_eval_outcomes(raw_selected_outcomes)
+    directional_summary = {
+        **eval_summary(selected_outcomes),
+        "raw_signals_total": len(raw_selected_outcomes),
+        "unique_events": len(selected_outcomes),
+        "deduplicated_publications": len(raw_selected_outcomes) - len(selected_outcomes),
+    }
     selected_methodology = (
         evaluation_epoch_methodology(selected_epoch)
         if selected_epoch is not None
@@ -3468,7 +3476,7 @@ async def list_evals(
     return JSONResponse(
         content={
             "data": {
-                "summary": eval_summary(selected_outcomes),
+                "summary": directional_summary,
                 "breakdowns": eval_breakdowns(selected_outcomes),
                 "relationships": eval_relationships(selected_outcomes),
                 "quality_series": eval_quality_series(selected_outcomes),
@@ -3485,7 +3493,12 @@ async def list_evals(
                 "refresh_after_seconds": 600,
                 "primary_horizon": "4h",
                 "evaluation_window": "1h / 4h for product metrics; raw 1d / 3d retained",
-                "evaluation_scope": "all_stored_signals",
+                "evaluation_scope": "unique_ticker_events_earliest_signal",
+                "raw_ledger_scope": "all_stored_signals",
+                "raw_signals_total": len(raw_selected_outcomes),
+                "unique_events": len(selected_outcomes),
+                "deduplicated_publications": len(raw_selected_outcomes)
+                - len(selected_outcomes),
                 "evaluation_methodology": selected_methodology,
                 "target_evaluation_methodology": EVALUATION_METHODOLOGY_VERSION,
                 "snapshot_scope": (
@@ -3508,10 +3521,11 @@ async def list_evals(
                     evaluation_epoch_meta(epoch, observation_counts) for epoch in epochs
                 ],
                 "warning": (
-                    "All stored signals enter the all-signal metrics; the live "
-                    "and retrospective point-in-time cohorts remain separate in summary.cohorts. "
-                    "Returns use raw MOEX candles without fees, slippage or corporate-action "
-                    "adjustment; this is not a calibrated backtest or proof of alpha."
+                    "Metrics count one ticker-level news event by its earliest point-in-time "
+                    "signal; the immutable export retains every stored signal. Live and "
+                    "retrospective cohorts remain separate in summary.cohorts. Returns use "
+                    "raw MOEX candles without fees, slippage or corporate-action adjustment; "
+                    "this is not a calibrated backtest or proof of alpha."
                 ),
             },
         }
