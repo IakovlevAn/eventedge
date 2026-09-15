@@ -307,7 +307,12 @@ jobs:
             wait "$sources_pid" || concurrent_status=1
             wait "$assessments_pid" || concurrent_status=1
             if [[ "$concurrent_status" == "0" ]] \
-              && jq -e '.meta.evaluation_scope == "all_stored_signals"' \
+              && jq -e '
+                  .meta.evaluation_scope == "unique_ticker_events_earliest_signal"
+                  and .meta.raw_ledger_scope == "all_stored_signals"
+                  and .meta.raw_signals_total >= .meta.unique_events
+                  and .meta.deduplicated_publications == (.meta.raw_signals_total - .meta.unique_events)
+                ' \
                 "${check_dir}/evals.json" >/dev/null \
               && jq -e '.data | length >= 6' "${check_dir}/sources.json" >/dev/null \
               && jq -e '
