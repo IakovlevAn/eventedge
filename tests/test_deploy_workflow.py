@@ -27,7 +27,10 @@ def test_production_smoke_accounts_for_partial_moex_and_checks_new_routes() -> N
     assert "Smoke test source registry and market events" in workflow
     assert '"${EVENTEDGE_API_URL}/v1/sources"' in workflow
     assert 'freshness_basis == "latest_stored_publication"' in workflow
-    assert '.meta.evaluation_scope == "all_stored_signals"' in workflow
+    assert '.meta.evaluation_scope == "unique_ticker_events_earliest_signal"' in workflow
+    assert '.meta.raw_ledger_scope == "all_stored_signals"' in workflow
+    assert ".meta.raw_signals_total >= .meta.unique_events" in workflow
+    assert ".meta.deduplicated_publications ==" in workflow
     assert '.meta.total_rows > 0' in workflow
     assert 'has("freshness_status")' in workflow
     assert '"${EVENTEDGE_API_URL}/v1/news?limit=1"' in workflow
